@@ -5586,6 +5586,17 @@ class SessionDeleteTests(unittest.TestCase):
             self.assertTrue(first.exists())
             self.assertTrue(second.exists())
 
+    def test_id_only_delete_of_a_mixed_provider_session_stays_ambiguous(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first, second, sources = self.rollout_pair(root)
+            sources[1]["provider"] = "opencode"
+            with mock.patch.object(meter, "all_session_sources", return_value=sources):
+                result = meter.request_session_delete("shared")
+            self.assertEqual(result["error_code"], "ambiguous_id")
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+
     def test_trace_delete_keeps_the_claude_duplicate_guard(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

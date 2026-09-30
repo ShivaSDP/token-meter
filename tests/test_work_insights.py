@@ -1560,6 +1560,20 @@ class OpenerPositionAndWindowTests(unittest.TestCase):
         entry = service.snapshot()[service.session_key("s1")]
         self.assertEqual((entry["work_type"], entry["area"]), ("ops", "Personal"))
 
+    def test_a_permanently_failed_opener_reads_unclear_not_the_fallback(self):
+        service, clock = self.service()
+        service.observe("s1", turns("hi"))
+        drain(service)
+        self.assertEqual(service.snapshot()[service.session_key("s1")]["work_type"], "ops")
+        base = FakeClient.responder
+        FakeClient.responder = lambda prompt: jet_response("Sure") if self.RELEASE in prompt else base(prompt)
+        for _attempt in range(W.MAX_ITEM_ATTEMPTS):
+            service.observe("s1", turns("hi", self.RELEASE))
+            drain(service)
+            clock.now += W.ITEM_RETRY_DELAYS_S[-1] + 1
+        entry = service.snapshot()[service.session_key("s1")]
+        self.assertEqual((entry["work_type"], entry["area"]), ("unclear", "Unclear"))
+
     def build(self, rows, labels, today, **kwargs):
         return domain.build_work_insights(rows, labels, lambda ident: ident.split("\0")[0], self.AREAS,
                                           lambda m, p: None, today=today, **kwargs)

@@ -1265,12 +1265,16 @@ class WorkInsightsService:
                 return row["taxonomy"] in (tags["area"], area_hash)
             return True
 
-        # A recorded opener replaces other turns' labels only once it has its own label, so a
+        # A recorded opener replaces other turns' labels only once it has its own outcome, so a
         # session whose opener moved but was never relabeled (e.g. past the backfill horizon)
         # keeps its earlier labels instead of losing them.
         opener_labeled = {
             (row["session_key"], row["question"]) for row in rows
             if row["question"] != "correction" and usable(row)
+            and (recorded.get(row["session_key"]) or (None,))[0] == row["turn_key"]
+        } | {  # A permanently failed opener is settled too: it reads Unclear, not the fallback.
+            (row["session_key"], row["question"]) for row in terminal
+            if row["question"] != "correction"
             and (recorded.get(row["session_key"]) or (None,))[0] == row["turn_key"]
         }
 
