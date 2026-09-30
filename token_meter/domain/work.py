@@ -25,6 +25,10 @@ def work_identity(row):
     return f"{row.get('id') or ''}\0{row.get('path') or ''}"
 
 
+def _trace_key(row):
+    return str(row.get("session") or row.get("id") or "")
+
+
 def is_child_row(row):
     """A row is a child run only when none of its agent records is a root (a parent keeps its children)."""
     records = [r for r in row.get("_agent_records") or () if isinstance(r, dict)]
@@ -638,13 +642,14 @@ def find_sessions(rows, labels, key_for, areas, output_price, filters, months=6,
     if ids_only:
         return {"total": len(matched), "spend": round(sum(_cost(s) for s in matched), 6),
                 "truncated": len(matched) > MAX_DRILL_IDS,
-                "ids": list(dict.fromkeys(s["row"].get("id") or "" for s in matched))[:MAX_DRILL_IDS]}
+                "keys": list(dict.fromkeys(_trace_key(s["row"]) for s in matched))[:MAX_DRILL_IDS]}
     return {
         "total": len(matched),
         "spend": round(sum(_cost(s) for s in matched), 6),
         "truncated": len(matched) > limit,
         "sessions": [{
             "id": s["row"].get("id") or "",
+            "session": _trace_key(s["row"]),
             "title": str(s["row"].get("session_name") or s["row"].get("title") or "")[:90],
             "runtime": s["row"].get("runtime") or "",
             "project": s["row"].get("project") or "",

@@ -1039,7 +1039,7 @@ class DrillDownTests(unittest.TestCase):
         self.assertEqual([s["id"] for s in out["sessions"]], ["b", "a"])
         self.assertEqual(out["spend"], 14.0)
         self.assertEqual(set(out["sessions"][0]), {
-            "id", "title", "runtime", "project", "start", "last", "cost", "turns", "model", "area",
+            "id", "session", "title", "runtime", "project", "start", "last", "cost", "turns", "model", "area",
             "work_type", "complexity", "outcome", "corrections", "labeled_turns"})
 
     def test_outcome_model_and_limit_filters(self):
@@ -1056,13 +1056,16 @@ class DrillDownTests(unittest.TestCase):
     def test_rollouts_sharing_a_session_id_keep_separate_labels(self):
         first, fork = row("x", cost=5.0), row("x", cost=1.0)
         first["path"], fork["path"] = "/t/first.jsonl", "/t/fork.jsonl"
+        first["session"], fork["session"] = "first.jsonl", "fork.jsonl"
         labels = {domain.work_identity(first): {"area": "Personal", "work_type": "debug"},
                   domain.work_identity(fork): {"area": "Personal", "work_type": "docs"}}
         out = domain.find_sessions([first, fork], labels, lambda ident: ident, self.AREAS, lambda m, p: None, {})
         self.assertEqual(sorted(s["work_type"] for s in out["sessions"]), ["debug", "docs"])
         ids = domain.find_sessions([first, fork], labels, lambda ident: ident, self.AREAS, lambda m, p: None, {},
                                    ids_only=True)
-        self.assertEqual((ids["ids"], ids["total"]), (["x"], 2))
+        self.assertEqual((ids["keys"], ids["total"]), (["first.jsonl", "fork.jsonl"], 2))
+        self.assertNotIn("ids", ids)
+        self.assertEqual(sorted(s["session"] for s in out["sessions"]), ["first.jsonl", "fork.jsonl"])
 
     def test_start_month_and_ids_modes(self):
         rows = [row("a", day="2026-08-30"), row("b", day="2026-09-02")]
@@ -1073,7 +1076,7 @@ class DrillDownTests(unittest.TestCase):
         self.assertEqual({s["id"] for s in active["sessions"]}, {"a", "b"})
         self.assertEqual({s["id"] for s in started["sessions"]}, {"b"})
         ids = self.find(rows, labels, {}, ids_only=True)
-        self.assertEqual((set(ids["ids"]), ids["total"]), ({"a", "b"}, 2))
+        self.assertEqual((set(ids["keys"]), ids["total"]), ({"a", "b"}, 2))
         self.assertNotIn("sessions", ids)
 
     def test_complexity_group_and_tier(self):
@@ -1177,7 +1180,7 @@ class SurfaceContractTests(unittest.TestCase):
         self.assertLess(declaration, route)
         self.assertLess(session_filter, route)
         self.assertIn("if(h.startsWith('work-sessions')||h.startsWith('sessions-all?work=')){", self.page)
-        self.assertIn("if(workSessionFilter&&!workSessionFilter.ids.has(String(s.id)))return false;", self.page)
+        self.assertIn("if(workSessionFilter&&!workSessionFilter.keys.has(sessionRowKey(s)))return false;", self.page)
         self.assertIn("if(key==='work'){workSessionFilter=null;workFilterRequest++;}", self.page)
         self.assertNotIn("w-drawer", self.page)
 

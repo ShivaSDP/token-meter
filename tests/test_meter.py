@@ -5025,6 +5025,57 @@ class CodexLineageAccountingTests(unittest.TestCase):
         self.assertEqual(summary["tokens"], 0)
         self.assertEqual(summary["turns"], 0)
 
+    def test_all_session_rows_are_one_per_trace_file_with_exact_keys(self):
+        self.write_trace("root", [
+            self.meta("root-1"),
+            self.turn("2026-08-11T00:00:01Z"),
+            self.tokens(100, 10, 100, 10, "2026-08-11T00:00:03Z"),
+        ], 10)
+        self.write_trace("root-resumed", [
+            self.meta("root-1"),
+            self.turn("2026-08-11T05:00:01Z"),
+            self.tokens(40, 4, 140, 14, "2026-08-11T05:00:03Z"),
+        ], 30)
+        self.write_trace("spawned", [
+            self.meta("spawned-1", parent_thread_id="root-1"),
+            self.turn("2026-08-11T06:00:01Z"),
+            self.tokens(20, 2, 20, 2, "2026-08-11T06:00:03Z"),
+        ], 40)
+        sources = list(self.adapter.discover_legacy(self.context))
+        self.assertEqual({source["id"] for source in sources}, {"task-1"})
+        saved_xsess = dict(meter._xsess)
+        saved_summaries = dict(meter._summary_cache)
+        try:
+            meter._xsess.update({
+                "data": None, "at": 0, "sessions": [], "internal_rows": (),
+                "project_model_stats": {},
+            })
+            meter._summary_cache.clear()
+            with mock.patch.object(meter, "_codex_native_adapter", return_value=self.adapter):
+                result = meter.cross_session(sources=sources)
+        finally:
+            meter._xsess.clear()
+            meter._xsess.update(saved_xsess)
+            meter._summary_cache.clear()
+            meter._summary_cache.update(saved_summaries)
+
+        rows = result["sessions"]
+        self.assertEqual(len(rows), 3)
+        self.assertEqual({row["id"] for row in rows}, {"task-1"})
+        keys = {row["session"] for row in rows}
+        self.assertEqual(keys, {
+            "rollout-root.jsonl", "rollout-root-resumed.jsonl", "rollout-spawned.jsonl",
+        })
+        self.assertEqual(sum(row["tokens"] for row in rows), result["total_tokens"])
+        self.assertEqual(result["total_tokens"], 176)
+        self.assertAlmostEqual(sum(row["cost"] for row in rows), result["total_cost"])
+        by_key = {row["session"]: row for row in rows}
+        self.assertTrue(by_key["rollout-spawned.jsonl"].get("subagent"))
+        self.assertNotIn("subagent", by_key["rollout-root.jsonl"])
+        for row in rows:
+            resolved = meter.find_session(row["session"], sources=sources)
+            self.assertEqual(resolved["path"], row["path"])
+
     def test_cross_session_daily_models_spend_and_budget_share_corrected_totals(self):
         sources = self.root_child_and_grandchild_sources()
         saved_xsess = dict(meter._xsess)
@@ -5383,6 +5434,23 @@ class SessionRouteTests(unittest.TestCase):
                 self.assertIsNone(meter.dashboard_asset_path("/assets/../meter.py"))
 
 
+class SessionTraceKeyProjectionTests(unittest.TestCase):
+    def test_spend_logs_and_current_sessions_carry_the_trace_key(self):
+        rows = [
+            {"id": "task-1", "session": "rollout-a.jsonl", "provider": "codex",
+             "_day_cost": {"2026-08-11": 2.0}, "mtime": 990, "turns": 1},
+            {"id": "task-1", "session": "rollout-b.jsonl", "provider": "codex",
+             "_day_cost": {"2026-08-11": 3.0}, "mtime": 995, "turns": 1},
+        ]
+        spend = meter.spend_log_summaries(rows, "2026-08-01", "2026-08-31")
+        self.assertEqual(
+            sorted(row["session"] for row in spend),
+            ["rollout-a.jsonl", "rollout-b.jsonl"],
+        )
+        current = meter.current_session_summaries(rows, now=1000)
+        self.assertEqual([row["session"] for row in current], ["rollout-b.jsonl"])
+
+
 class SessionDeleteTests(unittest.TestCase):
     def test_moves_only_exact_discovered_jsonl_to_trash(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5435,6 +5503,66 @@ class SessionDeleteTests(unittest.TestCase):
             self.assertEqual(result["error_code"], "ambiguous_id")
             self.assertTrue(canonical.exists())
             self.assertTrue(duplicate.exists())
+
+    def rollout_pair(self, root):
+        first, second = root / "rollout-a.jsonl", root / "rollout-b.jsonl"
+        first.write_text('{"a":1}\n')
+        second.write_text('{"b":1}\n')
+        sources = [
+            {"id": "shared", "session": first.name, "path": str(first),
+             "provider": "codex", "project": "/repo", "mtime": 5},
+            {"id": "shared", "session": second.name, "path": str(second),
+             "provider": "codex", "project": "/repo", "mtime": 1},
+        ]
+        return first, second, sources
+
+    def test_logical_id_spanning_rollouts_is_ambiguous_without_trace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first, second, sources = self.rollout_pair(root)
+
+            result = meter.trash_session_log(
+                "shared", sources=sources, trash_dir=str(root / "Trash"),
+            )
+
+            self.assertEqual(result["error_code"], "ambiguous_id")
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+
+    def test_trace_key_moves_exactly_the_selected_rollout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first, second, sources = self.rollout_pair(root)
+
+            result = meter.trash_session_log(
+                "shared", trace="rollout-b.jsonl", sources=sources,
+                trash_dir=str(root / "Trash"),
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(first.exists())
+            self.assertFalse(second.exists())
+
+    def test_trace_key_must_belong_to_the_session_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first, second, sources = self.rollout_pair(root)
+            for session_id, trace in (("other", "rollout-b.jsonl"), ("shared", "rollout-c.jsonl"),
+                                      ("shared", "../rollout-b.jsonl")):
+                result = meter.trash_session_log(
+                    session_id, trace=trace, sources=sources,
+                    trash_dir=str(root / "Trash"),
+                )
+                self.assertEqual(result["error_code"], "not_found")
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+
+    def test_delete_route_forwards_the_trace_key(self):
+        with mock.patch.object(meter, "find_session", return_value=None), \
+                mock.patch.object(meter, "trash_session_log",
+                                  return_value={"ok": False, "error_code": "not_found"}) as trash:
+            meter.request_session_delete("shared", "rollout-b.jsonl")
+        trash.assert_called_once_with("shared", trace="rollout-b.jsonl")
 
     def test_cursor_delete_moves_only_transcript_and_preserves_shared_database(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -9782,9 +9910,9 @@ console.log(JSON.stringify({
             "const interactingLogRow=forceAllSessionRowRefresh?null:root.querySelector('.srow:hover,.srow:focus-within');",
             "if(interactingLogRow)return;",
             "function mergeAllSessionInventory(inventory,liveSessions)",
-            "(liveSessions||[]).forEach(row=>rows.set(String(row.id),row))",
-            "const liveSessionIds=new Set((xs.current_sessions||[]).map(session=>String(session.id||'')));",
-            "const live=liveSessionIds.has(id)",
+            "(liveSessions||[]).forEach(row=>rows.set(sessionRowKey(row),row))",
+            "const liveSessionIds=new Set((xs.current_sessions||[]).map(sessionRowKey));",
+            "const live=liveSessionIds.has(key)",
             "const className=`srow${active?' active':''}${live?' live':''}`",
             ".srow.active,.srow.live{border-color:rgba(0,188,235,.62)",
             "const existing=new Map([...root.children]",
@@ -9805,6 +9933,68 @@ console.log(JSON.stringify({
             self.page,
         )
         self.assertNotIn("$('slist').innerHTML=sessions.length?sessions.map", self.page)
+
+    @staticmethod
+    def page_function(page, name):
+        start = page.index("function {}(".format(name))
+        depth = 0
+        for index in range(start, len(page)):
+            if page[index] == "{":
+                depth += 1
+            elif page[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return page[start:index + 1]
+        raise AssertionError(name)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard JavaScript")
+    def test_all_sessions_keep_one_row_per_trace_file(self):
+        script = "\n".join(
+            self.page_function(self.page, name)
+            for name in ("sessionRowKey", "mergeAllSessionInventory")
+        ) + """
+const inventory=[
+ {id:'task-1',session:'rollout-a.jsonl',cost:0.91},
+ {id:'task-1',session:'rollout-b.jsonl',cost:111.57},
+ {id:'task-1',session:'rollout-c.jsonl',cost:0.16},
+ {id:'legacy'},
+];
+const live=[{id:'task-1',session:'rollout-b.jsonl',cost:112.0}];
+const merged=mergeAllSessionInventory(inventory,live);
+console.log(JSON.stringify({
+ keys:merged.map(sessionRowKey),
+ cost:merged.reduce((sum,row)=>sum+(row.cost||0),0),
+}));
+"""
+        result = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=True,
+        )
+        merged = json.loads(result.stdout)
+        self.assertEqual(merged["keys"], [
+            "rollout-a.jsonl", "rollout-b.jsonl", "rollout-c.jsonl", "legacy",
+        ])
+        self.assertAlmostEqual(merged["cost"], 0.91 + 112.0 + 0.16)
+
+    def test_every_session_entry_point_addresses_one_trace_file(self):
+        for marker in (
+            "function sessionRowKey(row){return String(row?.session||row?.id||'');}",
+            "function stateSessionKey(state){return String(state?.session||stateSessionId(state)||'');}",
+            "renderedAllSessions=new Map(all.map(row=>[sessionRowKey(row),row]));",
+            "const key=sessionRowKey(s),active=pinned?key===pinned:Boolean(LATEST&&key===stateSessionKey(LATEST));",
+            "row.dataset.id=key;",
+            "data-delete-session=\"${esc(sessionRowKey(s))}\"",
+            "body:JSON.stringify({session_id:target.id,trace:target.session||''})",
+            "if(workSessionFilter&&!workSessionFilter.keys.has(sessionRowKey(s)))return false;",
+            "keys:new Set(payload.keys.map(String))",
+            "data-spend-session=\"${esc(sessionRowKey(row))}\"",
+            "data-spend-insight-session=\"${esc(sessionRowKey(row))}\"",
+            "data-frustration-session=\"${esc(sessionRowKey(row.session))}\"",
+            "href=\"${esc(sessionRoute(sessionRowKey(row)))}\"",
+            "<span class=\"badge subagentTag\">Subagent</span>",
+        ):
+            self.assertIn(marker, self.page)
+        self.assertNotIn("workSessionFilter.ids.has(String(s.id))", self.page)
+        self.assertNotIn("rows.set(String(row.id),row)", self.page)
 
     def test_current_and_all_sessions_share_the_defined_app_badge_helper(self):
         self.assertIn("const appBadgeClass=session=>", self.page)

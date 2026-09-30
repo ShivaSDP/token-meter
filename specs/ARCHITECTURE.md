@@ -97,6 +97,12 @@ model-and-numeric-usage prefixes before native load, legacy detail, or legacy
 summary parsing. Ambiguous lineage retains all evidence. Runtime-neutral
 aggregation never reopens traces or performs a second deduplication.
 
+Session lists, routes, Spend links, Work drill-downs, and deletes address one
+trace file through its `session` key; resumed rollouts and spawned children
+that share a logical `id` remain separate rows whose adapter-corrected costs
+sum to the Spend total. A logical `id` remains a compatible route to the most
+active file, but deleting one that spans several files requires the trace key.
+
 Subagent observability reuses each adapter's corrected accounting. Codex adds
 an agent edge only for an explicit bounded `thread_spawn` relationship, hashes
 private physical identities into separate opaque agent identities, and keeps

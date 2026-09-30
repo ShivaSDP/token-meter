@@ -3449,16 +3449,39 @@ def find_session(sid, sources=None):
     return max(matches, key=selection_rank)
 
 
-def trash_session_log(session_id, sources=None, trash_dir=None, mover=None):
+def trash_session_log(session_id, sources=None, trash_dir=None, mover=None, trace=None):
     """Move one exact, currently discovered session log to Trash."""
     session_id = str(session_id or "").strip()
-    if not session_id or len(session_id) > 240:
+    trace = str(trace or "").strip()
+    if not session_id or len(session_id) > 240 or len(trace) > 240:
         return {"ok": False, "error": "A valid session ID is required.", "error_code": "invalid_id"}
     source_pool = list(sources) if sources is not None else all_session_sources()
-    source = find_session(session_id, sources=source_pool)
-    if not source or str(source.get("id") or "") != session_id:
-        return {"ok": False, "error": "Session is not in the discovered log inventory.",
-                "error_code": "not_found"}
+    not_found = {"ok": False, "error": "Session is not in the discovered log inventory.",
+                 "error_code": "not_found"}
+    if trace:
+        traced = [
+            candidate for candidate in canonical_aggregation_sources(source_pool)
+            if str(candidate.get("session") or "") == trace
+            and str(candidate.get("id") or "") == session_id
+        ]
+        if len(traced) != 1:
+            return not_found
+        source = traced[0]
+    else:
+        source = find_session(session_id, sources=source_pool)
+        if not source or str(source.get("id") or "") != session_id:
+            return not_found
+        logical_paths = {
+            str(candidate.get("path") or "")
+            for candidate in canonical_aggregation_sources(source_pool)
+            if str(candidate.get("id") or "") == session_id
+        }
+        if len(logical_paths) > 1:
+            return {
+                "ok": False,
+                "error": "This session has multiple trace files; choose one trace to delete.",
+                "error_code": "ambiguous_id",
+            }
     duplicate_paths = {
         str(path) for path in (source.get("_duplicate_paths") or ()) if path
     }
@@ -5833,6 +5856,9 @@ def session_summary(source, opencode_conn=None):
                               {}, {}, {}, False, availability=metric_availability("unknown"))
     finally:
         work_turns, _WORK_TURNS.turns = getattr(_WORK_TURNS, "turns", None), None
+    row["session"] = str(source.get("session") or row.get("id") or "")
+    if _work_is_child_row(row):
+        row["subagent"] = True
     if work_insights_settings()["enabled"]:
         service = work_insights_service()
         if work_turns and not _work_is_child_row(row):
@@ -6321,9 +6347,9 @@ def session_action_capability():
     }
 
 
-def request_session_delete(session_id):
+def request_session_delete(session_id, trace=None):
     """Apply the public read-only-provider boundary before any trash action."""
-    source = find_session(session_id) if session_id else None
+    source = find_session(str(trace or session_id)) if (trace or session_id) else None
     provider = str((source or {}).get("provider") or "").strip().lower()
     read_only = {
         str(value).strip().lower()
@@ -6337,7 +6363,7 @@ def request_session_delete(session_id):
             ),
             "error_code": "read_only_provider",
         }
-    return trash_session_log(session_id)
+    return trash_session_log(session_id, trace=trace)
 
 
 def agent_access_launcher():
@@ -10412,7 +10438,7 @@ class H(BaseHTTPRequestHandler):
             self._send(json.dumps(result), "application/json", status=status)
             return
         if req_path == "/session/delete":
-            result = request_session_delete(payload.get("session_id"))
+            result = request_session_delete(payload.get("session_id"), payload.get("trace"))
             if result.get("ok"):
                 result["next_session_id"] = publish_after_session_delete()
             status = 200 if result.get("ok") else (404 if result.get("error_code") == "not_found" else
