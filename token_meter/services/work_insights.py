@@ -173,6 +173,11 @@ def skeleton(text, limit=MAX_ITEM_CHARS, head=SKELETON_HEAD, tail=SKELETON_TAIL)
     return f"{first}\n[... {omitted} lines omitted; outline follows ...]\n" + "\n".join(outline) + f"\n[...]\n{last}"
 
 
+# Two adjacent letters in any script; digits, punctuation, and emoji are not words.
+_LETTERS_RE = re.compile(r"[^\W\d_]{2}")
+_WORD_RE = re.compile(r"[^\W_](?:[\w']*[^\W_])?")
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]")
+
 _INJECTED_PREFIXES = (
     "<task-notification>", "<command-", "<local-command", "<bash-", "<user-prompt-submit-hook>",
     "<recommended_plugins>", "<environment_context>", "<heartbeat>", "<subagent_notification>",
@@ -184,14 +189,16 @@ _INJECTED_PREFIXES = (
 def prepare_text(text):
     """Return cleaned, bounded text, or '' for runtime-injected (non-human) messages."""
     cleaned = clean_text(text)
-    if cleaned.startswith(_INJECTED_PREFIXES) or not re.search(r"[A-Za-z]{2}", cleaned):
+    if cleaned.startswith(_INJECTED_PREFIXES) or not _LETTERS_RE.search(cleaned):
         # Injected wrappers, and upload- or image-only turns with no words of their own.
         return ""
     return skeleton(cleaned)
 
 
 def is_substantive(text):
-    return len(re.findall(r"[A-Za-z0-9']+", text)) >= MIN_OPENER_WORDS
+    # CJK scripts do not separate words with spaces, so count their characters instead.
+    return (len(_WORD_RE.findall(text)) >= MIN_OPENER_WORDS
+            or len(_CJK_RE.findall(text)) >= MIN_OPENER_WORDS)
 
 
 def question_tags(settings):
@@ -597,8 +604,8 @@ class LabelLedger:
     def session_labels(self):
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT turn_key, session_key, question, value, confidence, taxonomy, model "
-                "FROM work_labels").fetchall()
+                "SELECT turn_key, session_key, question, value, confidence, taxonomy, model, labeled_at "
+                "FROM work_labels ORDER BY rowid").fetchall()
             failures = connection.execute(
                 "SELECT turn_key, session_key, question FROM work_failures WHERE terminal = 1").fetchall()
         return [dict(row) for row in rows], [dict(row) for row in failures]
@@ -1179,6 +1186,8 @@ class WorkInsightsService:
         """Return {session_key: labels} for aggregation; cached by labels_version.
 
         Labels from the current prompt version win; older ones are shown until relabeled.
+        Among equally current session labels the newest wins: intake only labels the
+        current opener, so a later-labeled opener replaces one that is no longer first.
         """
         version = self.labels_version
         cached = self._snapshot
@@ -1211,9 +1220,10 @@ class WorkInsightsService:
             current = row["taxonomy"] == tags.get(row["question"])
             key = (row["session_key"], row["question"]) if row["question"] != "correction" else row["turn_key"]
             target = turns if row["question"] == "correction" else best
-            if key not in target or (current and not target[key][0]):
-                target[key] = (current, row)
-        openers = {row["turn_key"] for (current, row) in best.values() if current and row["question"] == "work_type"}
+            rank = (current, int(row["labeled_at"] or 0))
+            if key not in target or rank >= target[key][0]:
+                target[key] = (rank, row)
+        openers = {row["turn_key"] for (_rank, row) in best.values() if row["question"] == "work_type"}
         for (_session, question), (_current, row) in best.items():
             entry = sessions.setdefault(row["session_key"], {})
             unclear = float(row["confidence"]) < cutoff(question)

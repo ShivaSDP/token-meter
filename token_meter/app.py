@@ -7618,6 +7618,8 @@ def work_sessions_state(query):
         values = query.get(name) or [""]
         return str(values[0] or "")[:240] if len(values) == 1 else None
 
+    if any(one(name) is None for name in ("months", "ids", "runtime", "project")):
+        return {"ok": False, "error": "Use each filter once."}, 400
     try:
         months = int(one("months") or "6")
     except ValueError:
@@ -7632,8 +7634,9 @@ def work_sessions_state(query):
             return {"ok": False, "error": "Use each filter once."}, 400
         if value:
             filters[name] = value
-    if "month" in filters and not re.fullmatch(r"\d{4}-\d{2}", filters["month"]):
-        return {"ok": False, "error": "Choose a valid month."}, 400
+    for name in ("month", "start_month"):
+        if name in filters and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", filters[name]):
+            return {"ok": False, "error": "Choose a valid month."}, 400
     if "area" in filters and filters["area"] not in (
             [a["name"] for a in settings["areas"]] + ["Unclear", "Pending"]):
         return {"ok": False, "error": "Area was not found."}, 404
@@ -7647,8 +7650,6 @@ def work_sessions_state(query):
     if project and not any((row.get("project") or "") == project for row in rows):
         return {"ok": False, "error": "Project was not found."}, 404
     ids_only = one("ids") == "1"
-    if "start_month" in filters and not re.fullmatch(r"\d{4}-\d{2}", filters["start_month"]):
-        return {"ok": False, "error": "Choose a valid month."}, 400
     result = _domain_find_sessions(
         rows, service.snapshot() if service else {},
         service.session_key if service else (lambda _row_id: ""),

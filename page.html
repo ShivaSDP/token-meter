@@ -1584,7 +1584,7 @@ const speedFmt=n=>{n=Number(n)||0;if(n<=0)return'--';if(n>=100)return n.toFixed(
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // Work page state is declared early: the initial hash route can run before later definitions.
 let WORK=null,workRequest=0,workLastLoadedAt=0,workMeasure='spend',workMonths='6',workRuntime='',workProject='';
-let workSessionFilter=null;
+let workSessionFilter=null,workFilterRequest=0;
 let WORK_SETTINGS=null,workAreasDraft=null;
 function durationShort(seconds){
  seconds=Math.max(0,Math.round(seconds||0));
@@ -3432,7 +3432,7 @@ $('g-active-filters').onclick=event=>{
  if(key==='app'){globalApp='';$('g-app').value='';localStorage.removeItem('tm_global_app');}
  if(key==='project'){globalProject='';$('g-project').value='';localStorage.removeItem('tm_global_project');}
  if(key==='time'){globalTime='all';$('g-time').value='all';localStorage.removeItem('tm_global_time');}
- if(key==='work')workSessionFilter=null;
+ if(key==='work'){workSessionFilter=null;workFilterRequest++;}
  paintGlobalFilters();
  if(LATEST)renderAllSessions(LATEST.xsession);
 };
@@ -5730,9 +5730,12 @@ function workDelta(current,previous,{kind='rate',better='up'}={}){
  return `<span class=workDelta data-tone="${good==null?'':good?'good':'bad'}">${up?'▲':Math.abs(diff)<0.5?'■':'▼'} ${esc(text)}</span>`;
 }
 function renderWorkKpis(insights){
- const kpis=insights?.kpis,now=kpis?.current,before=kpis?.previous,host=$('w-kpis');
+ const kpis=insights?.kpis,now=kpis?.current,host=$('w-kpis');
  if(!now){host.innerHTML='';return;}
- const span=workMonths==='0'||!before?'':` vs the ${workMonths} months before`;
+ // Compare only with the calendar months the server reports, and only when they have judged sessions.
+ const before=kpis.previous&&kpis.previous.judged_sessions?kpis.previous:null,prior=kpis?.previous_months||[];
+ const year=prior.length&&prior[0].slice(0,4)!==String(new Date().getFullYear());
+ const span=before&&prior.length?` vs ${workMonthName(prior[0],{year})}${prior.length>1?`–${workMonthName(prior[prior.length-1],{year})}`:''}`:'';
  const tile=(label,value,detail,delta,tip)=>`<div class="card workKpi"><span class="workKpiLabel fieldtip" tabindex=0 data-tip="${esc(tip)}" aria-description="${esc(tip)}">${esc(label)}</span><strong class=mono>${value}</strong><span class=workKpiDetail>${detail}</span>${delta}</div>`;
  host.innerHTML=[
   tile('Resolved sessions',now.resolved_rate==null?'--':workPercent(now.resolved_rate),`${now.judged_sessions.toLocaleString()} sessions with labeled follow-ups${now.few_samples?' · few':''}`,workDelta(now.resolved_rate,before?.resolved_rate,{kind:'rate',better:'up'})+`<small class=workMuted>${esc(span)}</small>`,'Accepted without pushback or recovered after it, as a share of sessions whose follow-ups are labeled.'),
@@ -5829,14 +5832,14 @@ function renderWorkSizing(insights){
  grid.innerHTML=head+groups.map(group=>`<div role=row style="display:contents"><div class=workSizingRowHead role=rowheader>${group==='complex'?'Complex+':esc(WORK_COMPLEXITY_LABELS[group])}</div>${tiers.map(tier=>{
   const cell=cells.find(item=>item.complexity===group&&item.tier===tier)||{sessions:0,spend:0};
   const flag=cell.flag==='possible_overspend'?'<span class=workFlag><span aria-hidden=true>▲</span>Possible overspend (estimate)</span>':cell.flag==='possible_false_economy'?'<span class=workFlag><span aria-hidden=true>▲</span>Possible false economy (estimate)</span>':'';
-  return `<div class=workSizingCell role=cell data-flag="${esc(cell.flag||'')}"${cell.sessions?` data-drill="${esc(JSON.stringify({complexity:group,tier}))}" data-drill-label="${esc(`${group==='complex'?'Complex+':WORK_COMPLEXITY_LABELS[group]} · ${WORK_TIER_LABELS[tier]}`)}"`:''}><strong class=mono>${cell.sessions?money(cell.spend):'--'}</strong><span>${cell.sessions} session${cell.sessions===1?'':'s'}</span>${cell.rework?`<span>Rework ${workRateText(cell.rework)}</span>`:''}${flag}</div>`;
+  return `<div class=workSizingCell data-flag="${esc(cell.flag||'')}"${cell.sessions?` tabindex=0 role=button data-drill="${esc(JSON.stringify({complexity:group,tier}))}" data-drill-label="${esc(`${group==='complex'?'Complex+':WORK_COMPLEXITY_LABELS[group]} · ${WORK_TIER_LABELS[tier]}`)}"`:' role=cell'}><strong class=mono>${cell.sessions?money(cell.spend):'--'}</strong><span>${cell.sessions} session${cell.sessions===1?'':'s'}</span>${cell.rework?`<span>Rework ${workRateText(cell.rework)}</span>`:''}${flag}</div>`;
  }).join('')}</div>`).join('');
 }
 function renderWorkEffort(insights){
  const effort=insights?.right_sizing?.effort,table=$('w-effort-table');
  if(!effort||!(effort.efforts||[]).length){table.innerHTML='<tbody><tr><td><div class=workEmpty>No reasoning-effort data for these sessions.</div></td></tr></tbody>';return;}
  const groups=['routine','everyday','complex'],cell=(group,level)=>(effort.cells||[]).find(item=>item.complexity===group&&item.effort===level);
- table.innerHTML=`<thead><tr><th>Complexity</th>${effort.efforts.map(level=>`<th class=num>${esc(level)}</th>`).join('')}</tr></thead><tbody>${groups.map(group=>`<tr><td>${group==='complex'?'Complex+':esc(WORK_COMPLEXITY_LABELS[group])}</td>${effort.efforts.map(level=>{const item=cell(group,level);if(!item||!item.sessions)return '<td class="num workMuted">--</td>';return `<td class="num mono workFitCell" data-drill="${esc(JSON.stringify({complexity:group,effort:level}))}" data-drill-label="${esc(`${group==='complex'?'Complex+':WORK_COMPLEXITY_LABELS[group]} · ${level} effort`)}">${money(item.spend)}${item.flag?'<span class=workFitBest style="color:var(--warn);border-color:rgba(255,180,87,.5)">▲ Overthinking?</span>':''}<small>${item.sessions} · rework ${item.rework?workRateText(item.rework):'--'}</small></td>`;}).join('')}</tr>`).join('')}</tbody>`;
+ table.innerHTML=`<thead><tr><th>Complexity</th>${effort.efforts.map(level=>`<th class=num>${esc(level)}</th>`).join('')}</tr></thead><tbody>${groups.map(group=>`<tr><td>${group==='complex'?'Complex+':esc(WORK_COMPLEXITY_LABELS[group])}</td>${effort.efforts.map(level=>{const item=cell(group,level);if(!item||!item.sessions)return '<td class="num workMuted">--</td>';return `<td class="num mono workFitCell" tabindex=0 role=button data-drill="${esc(JSON.stringify({complexity:group,effort:level}))}" data-drill-label="${esc(`${group==='complex'?'Complex+':WORK_COMPLEXITY_LABELS[group]} · ${level} effort`)}">${money(item.spend)}${item.flag?'<span class=workFitBest style="color:var(--warn);border-color:rgba(255,180,87,.5)">▲ Overthinking?</span>':''}<small>${item.sessions} · rework ${item.rework?workRateText(item.rework):'--'}</small></td>`;}).join('')}</tr>`).join('')}</tbody>`;
 }
 function renderWorkChoices(insights){
  const rows=insights?.choices||[],host=$('w-choices');
@@ -5881,7 +5884,7 @@ function renderWorkFit(insights){
  const fit=insights?.model_fit||{},models=fit.models||[],table=$('w-fit-table');
  if(!models.length||!(fit.work_types||[]).length){table.innerHTML='<tbody><tr><td><div class=workEmpty>Waiting for labeled sessions.</div></td></tr></tbody>';return;}
  const cell=(work,model)=>(fit.cells||[]).find(item=>item.work_type===work&&item.model===model.model&&item.runtime===model.runtime);
- table.innerHTML=`<thead><tr><th>Work type</th>${models.map(model=>`<th class=num title="${esc(model.runtime)} · ${model.sessions} sessions">${esc(model.model)}<br><small class=workMuted>${esc(model.runtime)}</small></th>`).join('')}</tr></thead><tbody>${fit.work_types.map(work=>`<tr><td>${esc(WORK_TYPE_LABELS[work]||work)}</td>${models.map(model=>{const item=cell(work,model);if(!item||!item.sessions)return '<td class="num workMuted">--</td>';return `<td class="num mono workFitCell" data-drill="${esc(JSON.stringify({work_type:work,model:model.model,model_runtime:model.runtime}))}" data-drill-label="${esc(`${WORK_TYPE_LABELS[work]||work} · ${model.model}`)}">${workRateText(item.rework)}${item.best?'<span class=workFitBest>Best</span>':''}<small>${item.sessions} · ${money(item.cost_per_session)}/session</small></td>`;}).join('')}</tr>`).join('')}</tbody>`;
+ table.innerHTML=`<thead><tr><th>Work type</th>${models.map(model=>`<th class=num title="${esc(model.runtime)} · ${model.sessions} sessions">${esc(model.model)}<br><small class=workMuted>${esc(model.runtime)}</small></th>`).join('')}</tr></thead><tbody>${fit.work_types.map(work=>`<tr><td>${esc(WORK_TYPE_LABELS[work]||work)}</td>${models.map(model=>{const item=cell(work,model);if(!item||!item.sessions)return '<td class="num workMuted">--</td>';return `<td class="num mono workFitCell" tabindex=0 role=button data-drill="${esc(JSON.stringify({work_type:work,model:model.model,model_runtime:model.runtime}))}" data-drill-label="${esc(`${WORK_TYPE_LABELS[work]||work} · ${model.model}`)}">${workRateText(item.rework)}${item.best?'<span class=workFitBest>Best</span>':''}<small>${item.sessions} · ${money(item.cost_per_session)}/session</small></td>`;}).join('')}</tr>`).join('')}</tbody>`;
 }
 $('w-headlines').addEventListener('click',event=>{
  const card=event.target.closest('[data-target]');if(!card)return;
@@ -5893,7 +5896,7 @@ $('view-work').addEventListener('click',event=>{
  openWorkSessions(filters,target.dataset.drillLabel);
 });
 $('view-work').addEventListener('keydown',event=>{
- if((event.key==='Enter'||event.key===' ')&&event.target.matches('rect[data-drill]')){event.preventDefault();event.target.dispatchEvent(new MouseEvent('click',{bubbles:true}));}
+ if((event.key==='Enter'||event.key===' ')&&event.target.matches('rect[data-drill],td[data-drill],.workSizingCell[data-drill]')){event.preventDefault();event.target.dispatchEvent(new MouseEvent('click',{bubbles:true}));}
 });
 function renderWork(payload){
  WORK=payload;renderWorkStatus(payload);
@@ -6001,16 +6004,17 @@ async function applyWorkSessionFilter(params){
  const query=new URLSearchParams();
  ['months','runtime','project','month','start_month','area','work_type','complexity','tier','effort','outcome','model','model_runtime'].forEach(key=>{if(params.get(key))query.set(key,params.get(key));});
  query.set('ids','1');
- const label=params.get('label')||'Work';
+ const label=params.get('label')||'Work',request=++workFilterRequest;
  if(history.replaceState)history.replaceState(null,'','/#sessions-all');
  setSessionScope('all');showTab('session');showCurrentPanel('sessions');
  workSessionFilter={label,ids:new Set(),loading:true};
  renderCurrentSessions();if(LATEST)renderAllSessions(LATEST.xsession);
  try{
   const response=await fetch(`/work/sessions?${query}`,{cache:'no-store'}),payload=await response.json();
+  if(request!==workFilterRequest)return;
   if(!response.ok||!payload.ok)throw new Error(payload.error||'Work filter unavailable');
   workSessionFilter={label,ids:new Set(payload.ids.map(String)),total:payload.total,truncated:payload.truncated};
- }catch(error){workSessionFilter={label:`${label} (unavailable)`,ids:new Set(),failed:true};}
+ }catch(error){if(request!==workFilterRequest)return;workSessionFilter={label:`${label} (unavailable)`,ids:new Set(),failed:true};}
  if(LATEST)renderAllSessions(LATEST.xsession);
 }
 async function loadDelivery(){

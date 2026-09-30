@@ -94,22 +94,36 @@ EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max", "ultra")
 HIGH_EFFORTS = ("xhigh", "max", "ultra")
 
 
-def session_outcome(turns, sequence, pending=False):
+def session_outcome(turns, sequence, pending=False, labeled=False):
     """Classify a session from its ordered follow-up pushback labels.
 
     A session is classified only once it has no queued or backlogged work (``pending``);
     sessions whose labels are all low-confidence are Unclear rather than counted as accepted.
+    A ``labeled`` session with no pending work and no follow-up labels had no classifiable
+    follow-ups (greetings, image- or wrapper-only turns), so it is a single shot; a session
+    with no labels at all is still waiting for the classifier.
     """
     if turns <= 1:
         return "single_shot"
-    if pending or not sequence:
+    if pending:
         return "pending"
+    if not sequence:
+        return "single_shot" if labeled else "pending"
     confident = [value for _ordinal, value in sequence if value is not None]
     if not confident:
         return "unclear"
     if not any(confident):
         return "accepted"
     return "ended_on_pushback" if confident[-1] else "recovered"
+
+
+def _outcome(s):
+    return session_outcome(s["turns"], s["sequence"], s["pending"], labeled=bool(s["entry"]))
+
+
+def _month_shift(month, delta):
+    year, number = divmod(int(month[:4]) * 12 + int(month[5:7]) - 1 + delta, 12)
+    return f"{year:04d}-{number + 1:02d}"
 
 
 def build_work_insights(rows, labels, key_for, areas, output_price, months=6,
@@ -121,8 +135,8 @@ def build_work_insights(rows, labels, key_for, areas, output_price, months=6,
         rows, labels, key_for, area_names, tiers, runtime, project, pending_keys)
     all_months = _window_months(sessions, months)
     month_set = set(all_months)
-    every = _window_months(sessions, 0)
-    previous = set(every[max(0, len(every) - 2 * len(all_months)):len(every) - len(all_months)]) if months else set()
+    # The comparison period is the same number of calendar months just before the current window.
+    previous = {_month_shift(all_months[0], -step) for step in range(1, months + 1)} if months and all_months else set()
     segments = area_names + [UNCLEAR, PENDING]
     return _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tier_prices,
                       runtime_options, project_options, today, corrections_for, previous)
@@ -216,7 +230,7 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
     for s in in_window:
         bucket = by_month.get(s["start_month"])
         if bucket is not None:
-            outcome = session_outcome(s["turns"], s["sequence"], s["pending"])
+            outcome = _outcome(s)
             bucket.setdefault("outcomes", {}).setdefault(outcome, 0)
             bucket["outcomes"][outcome] += 1
             bucket.setdefault("outcome_spend", {}).setdefault(outcome, 0.0)
@@ -233,7 +247,7 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
         if not group:
             continue
         spend = sum(float(s["row"].get("cost") or 0) for s in group)
-        outcomes_here = [session_outcome(s["turns"], s["sequence"], s["pending"]) for s in group]
+        outcomes_here = [_outcome(s) for s in group]
         judged = sum(o in ("accepted", "recovered", "ended_on_pushback") for o in outcomes_here)
         resolved = [s for s, o in zip(group, outcomes_here) if o in ("accepted", "recovered")]
         economics.append({
@@ -317,7 +331,6 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
         "economics": economics,
         "rework": rework,
         "right_sizing": {"cells": cells, "tiers_known": bool(tiers), "effort": effort},
-        "rework_by_position": position,
         "kpis": kpis,
         "model_fit": model_fit,
         "choices": _choices(model_fit),
@@ -351,7 +364,7 @@ def _kpis(group):
     counts = collections.Counter()
     spend = collections.Counter()
     for s in group:
-        outcome = session_outcome(s["turns"], s["sequence"], s["pending"])
+        outcome = _outcome(s)
         counts[outcome] += 1
         spend[outcome] += _cost(s)
     judged = counts["accepted"] + counts["recovered"] + counts["ended_on_pushback"]
@@ -447,7 +460,7 @@ def _effort(in_window):
 
 def _resolved(group, corrections_for):
     _attach_sequences([s for s in group if not s["sequence"]], corrections_for)
-    return [s for s in group if session_outcome(s["turns"], s["sequence"], s["pending"])
+    return [s for s in group if _outcome(s)
             in ("accepted", "recovered")]
 
 
@@ -531,7 +544,9 @@ def _choices(model_fit):
             continue
         best = min(eligible, key=lambda c: (c["rework"]["rate"], c["cost_per_session"] or 0))
         used = max(cells, key=lambda c: c["sessions"])
-        if best is used or best["rework"]["rate"] + 0.03 > (used["rework"] or {"rate": 1})["rate"]:
+        if best is used or not used["rework"] or used["rework"]["few_samples"]:
+            continue  # The usual model needs the same labeled evidence before it is compared.
+        if best["rework"]["rate"] + 0.03 > used["rework"]["rate"]:
             continue
         rows.append({"work_type": work_type, "best": best, "used": used,
                      "gap": used["rework"]["rate"] - best["rework"]["rate"]})
@@ -607,7 +622,7 @@ def find_sessions(rows, labels, key_for, areas, output_price, filters, months=6,
     _attach_sequences(matched, corrections_for)
     if filters.get("outcome"):
         matched = [s for s in matched
-                   if session_outcome(s["turns"], s["sequence"], s["pending"]) == filters["outcome"]]
+                   if _outcome(s) == filters["outcome"]]
     matched.sort(key=lambda s: (-_cost(s), s["row"].get("last") or ""))
     if ids_only:
         return {"total": len(matched), "spend": round(sum(_cost(s) for s in matched), 6),
@@ -630,7 +645,7 @@ def find_sessions(rows, labels, key_for, areas, output_price, filters, months=6,
             "area": s["area"],
             "work_type": s["work_type"],
             "complexity": s["complexity"],
-            "outcome": session_outcome(s["turns"], s["sequence"], s["pending"]),
+            "outcome": _outcome(s),
             "corrections": s["corrections"],
             "labeled_turns": s["correction_labels"],
         } for s in matched[:limit]],

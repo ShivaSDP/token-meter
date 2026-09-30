@@ -926,7 +926,8 @@ class OutcomeInsightTests(unittest.TestCase):
         debug = next(e for e in out["economics"] if e["work_type"] == "debug")
         self.assertEqual((debug["judged_sessions"], debug["resolved_sessions"], debug["resolved_rate"]), (2, 2, 1.0))
         self.assertEqual(debug["cost_per_resolved"], 3.0)
-        positions = {p["bucket"]: p for p in out["rework_by_position"]}
+        self.assertNotIn("rework_by_position", out)
+        positions = {p["bucket"]: p for p in domain._position([{"sequence": seq} for seq in sequences.values()])}
         self.assertEqual(positions["1–2"]["samples"], 4)
         self.assertEqual(positions["3–5"]["samples"], 1)
         self.assertNotIn("outcomes", out)
@@ -1177,7 +1178,7 @@ class SurfaceContractTests(unittest.TestCase):
         self.assertLess(session_filter, route)
         self.assertIn("if(h.startsWith('work-sessions')||h.startsWith('sessions-all?work=')){", self.page)
         self.assertIn("if(workSessionFilter&&!workSessionFilter.ids.has(String(s.id)))return false;", self.page)
-        self.assertIn("if(key==='work')workSessionFilter=null;", self.page)
+        self.assertIn("if(key==='work'){workSessionFilter=null;workFilterRequest++;}", self.page)
         self.assertNotIn("w-drawer", self.page)
 
     def test_menu_bar_offers_pause_and_resume(self):
@@ -1322,6 +1323,149 @@ class SessionTagProjectionTests(unittest.TestCase):
         self.assertEqual(payload["work_tags"], tags)
         self.assertNotIn("zebra", json.dumps(payload))
         self.assertNotIn("/traces", json.dumps(payload["work_tags"]))
+
+
+class ReviewRegressionTests(unittest.TestCase):
+    """Regressions for defects found in independent review of the Work redesign."""
+
+    AREAS = DomainTests.AREAS
+
+    def build(self, rows, labels, sequences=None, **kwargs):
+        prices = {"gpt-5.6": 10.0, "cheap": 1.0, "mid": 4.0}
+        return domain.build_work_insights(
+            rows, labels, lambda ident: ident.split("\0")[0], self.AREAS, lambda m, p: prices.get(m),
+            today="2026-09-30", corrections_for=lambda ident, n: (sequences or {}).get(ident.split("\0")[0], []),
+            **kwargs)
+
+    def test_choices_skip_a_busiest_model_without_labeled_follow_ups(self):
+        rows = [row(f"u{i}", model="gpt-5.6") for i in range(3)] + [row(f"b{i}", model="mid") for i in range(3)]
+        labels = {f"u{i}": {"work_type": "debug", "corrections": 3, "correction_labels": 10} for i in range(3)}
+        labels.update({f"b{i}": {"work_type": "debug", "corrections": 1, "correction_labels": 10} for i in range(3)})
+        rows += [row(f"c{i}", model="cheap") for i in range(4)]
+        labels.update({f"c{i}": {"work_type": "debug"} for i in range(4)})
+        self.assertEqual(self.build(rows, labels)["choices"], [])
+        labels.update({f"c{i}": {"work_type": "debug", "corrections": 1, "correction_labels": 2} for i in range(4)})
+        self.assertEqual(self.build(rows, labels)["choices"], [])
+
+    def test_labeled_session_without_classifiable_follow_ups_is_single_shot(self):
+        self.assertEqual(domain.session_outcome(3, [], labeled=True), "single_shot")
+        self.assertEqual(domain.session_outcome(3, [], labeled=True, pending=True), "pending")
+        rows = [row("hi", turns_=2), row("never", turns_=3), row("queued", turns_=3)]
+        labels = {"hi": {"area": "Personal", "work_type": "feature"},
+                  "queued": {"area": "Personal", "work_type": "feature"}}
+        out = self.build(rows, labels, pending_keys={"queued"})
+        self.assertEqual(out["allocation"][-1]["outcomes"], {"single_shot": 1, "pending": 2})
+        found = domain.find_sessions(rows, labels, lambda ident: ident.split("\0")[0], self.AREAS,
+                                     lambda m, p: None, {"outcome": "single_shot"},
+                                     corrections_for=lambda ident, n: [], pending_keys={"queued"})
+        self.assertEqual([s["id"] for s in found["sessions"]], ["hi"])
+
+    def test_previous_kpi_window_is_the_calendar_months_before(self):
+        rows, labels, sequences = [], {}, {}
+        for i, day in enumerate(["2026-07-10", "2026-07-11", "2026-09-10", "2026-09-11"]):
+            rows.append(row(f"k{i}", day=day, turns_=3))
+            labels[f"k{i}"] = {"work_type": "debug", "correction_labels": 2}
+            sequences[f"k{i}"] = [(1, False), (2, False)]
+        kpis = self.build(rows, labels, sequences, months=1)["kpis"]
+        self.assertEqual(kpis["previous_months"], ["2026-08"])
+        self.assertIsNone(kpis["previous"])
+        kpis = self.build(rows, labels, sequences, months=3)["kpis"]
+        self.assertEqual(kpis["previous_months"], ["2026-04", "2026-05", "2026-06"])
+        kpis = self.build(rows, labels, sequences, months=0)["kpis"]
+        self.assertEqual((kpis["previous_months"], kpis["previous"]), ([], None))
+        january = [row("j", day="2026-01-05", turns_=3)]
+        kpis = self.build(january, {"j": {"work_type": "debug"}}, months=3)["kpis"]
+        self.assertEqual(kpis["previous_months"], ["2025-10", "2025-11", "2025-12"])
+
+    def test_non_latin_requests_are_classifiable(self):
+        for text in ("修复登录页面的错误", "исправь ошибку в форме входа"):
+            self.assertEqual(W.prepare_text(text), text)
+            self.assertTrue(W.is_substantive(text), text)
+        for text in ("!!! ???", "🎉🎉", "12345", "... 42 ..."):
+            self.assertEqual(W.prepare_text(text), "", text)
+        self.assertFalse(W.is_substantive("hey"))
+        self.assertFalse(W.is_substantive("修复"))
+
+    def test_opener_moving_later_in_one_prompt_version_uses_the_new_opener(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        service, values, clock = make_service(tmp.name)
+        answers = {"What kind of work": "debug", "Which area": "Product engineering", "Scale": "0",
+                   "previous work was wrong": "no"}
+
+        def respond(prompt):
+            key = next(v for k, v in answers.items() if k in prompt)
+            return jet_response(key if key.isdigit() or key in ("yes", "no") else letter_for(prompt, key))
+
+        FakeClient.responder = respond
+        service.observe("s1", turns("fix it", "ok"))
+        drain(service)
+        key = service.session_key("s1")
+        self.assertEqual(service.snapshot()[key]["work_type"], "debug")
+        answers.update({"What kind of work": "feature", "Which area": "Agents and tools", "Scale": "2"})
+        clock.now += 60
+        service.observe("s1", turns("fix it", "ok", "please build a new agent tool for the release flow"))
+        drain(service)
+        entry = service.snapshot()[key]
+        self.assertEqual((entry["work_type"], entry["area"], entry["complexity"]),
+                         ("feature", "Agents and tools", "complex"))
+
+    def test_a_turn_that_became_the_opener_is_not_a_correction(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        service, values, clock = make_service(tmp.name)
+        key, tag = service.session_key("s1"), W.PROMPT_VERSION
+        first, second = service._turn_key("s1", 0), service._turn_key("s1", 1)
+        service.ledger.record_label(first, "work_type", key, "debug", 0.9, tag, "d", clock.now)
+        service.ledger.record_label(second, "correction", key, "True", 0.9, tag, "d", clock.now)
+        service.ledger.record_label(second, "work_type", key, "feature", 0.9, tag, "d", clock.now + 60)
+        service.labels_version += 1
+        entry = service.snapshot()[key]
+        self.assertEqual(entry["work_type"], "feature")
+        self.assertNotIn("corrections", entry)
+        self.assertNotIn("correction_labels", entry)
+
+    def test_work_sessions_rejects_repeated_period_and_mode_and_impossible_months(self):
+        rows = (row("a"),)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with mock.patch.object(meter, "TOKEN_METER_SETTINGS", os.path.join(tmp.name, "settings.json")), \
+                mock.patch.object(meter, "_work_service_instance", None), \
+                mock.patch.dict(meter._xsess, {"data": {"ok": True}, "internal_rows": rows}):
+            for bad in ({"months": ["3", "12"]}, {"ids": ["1", "1"]}, {"runtime": ["Codex", "Claude Code"]},
+                        {"project": ["alpha", "beta"]}):
+                payload, status = meter.work_sessions_state(bad)
+                self.assertEqual((status, payload.get("error")), (400, "Use each filter once."), bad)
+            for bad in ({"month": ["2026-13"]}, {"month": ["2026-00"]}, {"start_month": ["2026-13"]},
+                        {"start_month": ["2026-00"]}):
+                self.assertEqual(meter.work_sessions_state(bad)[1], 400, bad)
+            self.assertEqual(meter.work_sessions_state({"month": ["2026-12"]})[1], 200)
+
+    def test_page_kpi_comparison_uses_the_reported_previous_months(self):
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "page.html"),
+                  encoding="utf-8") as handle:
+            page = handle.read()
+        kpis = page[page.index("function renderWorkKpis("):page.index("function renderWorkLedger(")]
+        self.assertNotIn("months before", kpis)
+        self.assertIn("kpis?.previous_months", kpis)
+        self.assertIn("judged_sessions?kpis.previous:null", kpis)
+
+    def test_page_work_filter_ignores_stale_responses(self):
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "page.html"),
+                  encoding="utf-8") as handle:
+            page = handle.read()
+        apply = page[page.index("async function applyWorkSessionFilter("):page.index("async function loadDelivery(")]
+        self.assertIn("request=++workFilterRequest", apply)
+        self.assertEqual(apply.count("if(request!==workFilterRequest)return;"), 2)
+        self.assertLess(page.index("workFilterRequest=0"), page.index("function applyHashRoute(){"))
+
+    def test_page_drillable_cells_are_keyboard_buttons(self):
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "page.html"),
+                  encoding="utf-8") as handle:
+            page = handle.read()
+        self.assertEqual(page.count('<td class="num mono workFitCell" tabindex=0 role=button data-drill='), 2)
+        self.assertIn("` tabindex=0 role=button data-drill=\"${esc(JSON.stringify({complexity:group,tier}))}\"", page)
+        self.assertIn("event.target.matches('rect[data-drill],td[data-drill],.workSizingCell[data-drill]')", page)
 
 
 if __name__ == "__main__":
