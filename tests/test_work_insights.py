@@ -892,7 +892,7 @@ class DomainTests(unittest.TestCase):
     def test_filters_and_period(self):
         rows = [row("a"), row("b", runtime="Claude Code", project="beta", day="2025-01-05")]
         out = self.build(rows, {}, months=3, runtime="Codex")
-        self.assertEqual(out["months"], ["2026-09"])
+        self.assertEqual(out["months"], ["2026-07", "2026-08", "2026-09"])
         self.assertEqual(out["filters"]["runtimes"], ["Claude Code", "Codex"])
         self.assertEqual(set(out["filters"]["projects"]), {"alpha", "beta"})
 
@@ -1348,10 +1348,10 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual(self.build(rows, labels)["choices"], [])
 
     def test_labeled_session_without_classifiable_follow_ups_is_single_shot(self):
-        self.assertEqual(domain.session_outcome(3, [], labeled=True), "single_shot")
+        self.assertEqual(domain.session_outcome(3, [], labeled=True, follow_ups=0), "single_shot")
         self.assertEqual(domain.session_outcome(3, [], labeled=True, pending=True), "pending")
         rows = [row("hi", turns_=2), row("never", turns_=3), row("queued", turns_=3)]
-        labels = {"hi": {"area": "Personal", "work_type": "feature"},
+        labels = {"hi": {"area": "Personal", "work_type": "feature", "follow_ups": 0},
                   "queued": {"area": "Personal", "work_type": "feature"}}
         out = self.build(rows, labels, pending_keys={"queued"})
         self.assertEqual(out["allocation"][-1]["outcomes"], {"single_shot": 1, "pending": 2})
@@ -1374,8 +1374,9 @@ class ReviewRegressionTests(unittest.TestCase):
         kpis = self.build(rows, labels, sequences, months=0)["kpis"]
         self.assertEqual((kpis["previous_months"], kpis["previous"]), ([], None))
         january = [row("j", day="2026-01-05", turns_=3)]
-        kpis = self.build(january, {"j": {"work_type": "debug"}}, months=3)["kpis"]
-        self.assertEqual(kpis["previous_months"], ["2025-10", "2025-11", "2025-12"])
+        kpis = domain.build_work_insights(january, {"j": {"work_type": "debug"}}, lambda ident: ident.split("\0")[0],
+                                          self.AREAS, lambda m, p: None, months=3, today="2026-01-31")["kpis"]
+        self.assertEqual(kpis["previous_months"], ["2025-08", "2025-09", "2025-10"])
 
     def test_non_latin_requests_are_classifiable(self):
         for text in ("修复登录页面的错误", "исправь ошибку в форме входа"):
@@ -1459,13 +1460,121 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual(apply.count("if(request!==workFilterRequest)return;"), 2)
         self.assertLess(page.index("workFilterRequest=0"), page.index("function applyHashRoute(){"))
 
-    def test_page_drillable_cells_are_keyboard_buttons(self):
+
+class OpenerPositionAndWindowTests(unittest.TestCase):
+    """Regressions for the second correctness review: opener identity, calendar windows, outcomes, drill cells."""
+
+    AREAS = DomainTests.AREAS
+    RELEASE = "please build a new agent tool for the release flow"
+
+    def service(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        service, values, clock = make_service(tmp.name)
+
+        def respond(prompt):
+            real = self.RELEASE in prompt
+            if "What kind of work" in prompt:
+                return jet_response(letter_for(prompt, "feature" if real else "ops"))
+            if "Which area" in prompt:
+                return jet_response(letter_for(prompt, "Agents and tools" if real else "Personal"))
+            if "Scale" in prompt:
+                return jet_response("2" if real else "0")
+            return jet_response("no")
+
+        FakeClient.responder = respond
+        return service, clock
+
+    def assert_real_opener(self, service):
+        entry = service.snapshot()[service.session_key("s1")]
+        self.assertEqual((entry["work_type"], entry["area"], entry["complexity"]),
+                         ("feature", "Agents and tools", "complex"))
+
+    def test_fallback_opener_queued_before_the_real_opener_does_not_win(self):
+        service, clock = self.service()
+        service.observe("s1", turns("hi"))
+        service.observe("s1", turns("hi", self.RELEASE))
+        # The real opener is newer, so the worker would label it first and the fallback afterwards.
+        drain(service)
+        self.assert_real_opener(service)
+
+    def test_opener_labels_are_chosen_by_position_not_write_time(self):
+        service, clock = self.service()
+        service.observe("s1", turns("hi", self.RELEASE))
+        drain(service)
+        key, fallback = service.session_key("s1"), service._turn_key("s1", 0)
+        for offset in (0, 60):  # An equal whole-second write, then a later one (an in-flight stale item).
+            for question, value in (("work_type", "ops"), ("area", "Personal"), ("complexity", "routine")):
+                service.ledger.record_label(fallback, question, key, value, 0.9,
+                                            W.question_tags(service.settings_provider())[question], "d",
+                                            clock.now + offset)
+            service.labels_version += 1
+            self.assert_real_opener(service)
+        # The opener survives a restart without re-observing the session.
+        reopened = W.WorkInsightsService(service.ledger_path, service.settings_provider, client_factory=FakeClient,
+                                         clock=clock, monotonic=clock, sleep=lambda s: None)
+        self.assert_real_opener(reopened)
+
+    def test_moving_the_opener_drops_the_queued_fallback_opener(self):
+        service, clock = self.service()
+        service.observe("s1", turns("hi"))
+        service.observe("s1", turns("hi", self.RELEASE))
+        by_key = {item.turn_key: item.questions for item in service.queue}
+        self.assertEqual(by_key, {service._turn_key("s1", 1): W.SESSION_QUESTIONS})
+
+    def build(self, rows, labels, today, **kwargs):
+        return domain.build_work_insights(rows, labels, lambda ident: ident.split("\0")[0], self.AREAS,
+                                          lambda m, p: None, today=today, **kwargs)
+
+    def test_current_window_is_calendar_months_ending_this_month(self):
+        rows = [row("may", day="2026-05-10"), row("sep", day="2026-09-10")]
+        out = self.build(rows, {}, "2026-09-30", months=3)
+        self.assertEqual(out["months"], ["2026-07", "2026-08", "2026-09"])
+        self.assertEqual(out["kpis"]["previous_months"], ["2026-04", "2026-05", "2026-06"])
+        self.assertEqual(out["kpis"]["previous"]["sessions"], 1)
+        self.assertEqual([b["sessions_total"] for b in out["allocation"]], [0, 0, 1])
+        found = domain.find_sessions(rows, {}, lambda ident: ident.split("\0")[0], self.AREAS, lambda m, p: None,
+                                     {}, months=3, today="2026-09-30")
+        self.assertEqual([s["id"] for s in found["sessions"]], ["sep"])
+
+    def test_months_without_data_are_empty_not_replaced_by_older_data(self):
+        out = self.build([row("jun", day="2026-06-10")], {}, "2026-09-30", months=3)
+        self.assertEqual(out["months"], ["2026-07", "2026-08", "2026-09"])
+        self.assertEqual(out["coverage"]["sessions"], 0)
+        self.assertIsNone(out["kpis"]["current"]["resolved_rate"])
+        self.assertEqual(out["kpis"]["previous"]["sessions"], 1)
+        self.assertEqual(out["headlines"], [])
+        # Without a today, the window ends at the latest data month; All history keeps data months only.
+        self.assertEqual(self.build([row("jun", day="2026-06-10")], {}, "", months=3)["months"],
+                         ["2026-04", "2026-05", "2026-06"])
+        everything = self.build([row("a", day="2026-02-10"), row("b", day="2026-06-10")], {}, "2026-09-30", months=0)
+        self.assertEqual((everything["months"], everything["kpis"]["previous_months"]), (["2026-02", "2026-06"], []))
+
+    def test_labeled_session_with_never_labeled_follow_ups_is_unclear_not_single_shot(self):
+        self.assertEqual(domain.session_outcome(3, [], labeled=True, follow_ups=0), "single_shot")
+        self.assertEqual(domain.session_outcome(3, [], labeled=True, follow_ups=2), "unclear")
+        self.assertEqual(domain.session_outcome(3, [], labeled=True), "unclear")  # Follow-up count unknown.
+        self.assertEqual(domain.session_outcome(3, [], labeled=True, follow_ups=2, pending=True), "pending")
+        service, clock = self.service()
+        service.observe("s1", turns(self.RELEASE, "[Image #1]"))
+        service.observe("s2", turns(self.RELEASE, "that is wrong, undo it"))
+        drain(service)
+        snapshot = service.snapshot()
+        self.assertEqual(snapshot[service.session_key("s1")]["follow_ups"], 0)
+        self.assertEqual(snapshot[service.session_key("s2")]["follow_ups"], 1)
+
+    def test_page_drill_cells_keep_table_semantics_with_inner_buttons(self):
         with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "page.html"),
                   encoding="utf-8") as handle:
             page = handle.read()
-        self.assertEqual(page.count('<td class="num mono workFitCell" tabindex=0 role=button data-drill='), 2)
-        self.assertIn("` tabindex=0 role=button data-drill=\"${esc(JSON.stringify({complexity:group,tier}))}\"", page)
-        self.assertIn("event.target.matches('rect[data-drill],td[data-drill],.workSizingCell[data-drill]')", page)
+        work = page[page.index("function renderWorkSizing("):page.index("function renderWork(payload)")]
+        self.assertNotIn("role=button", work)
+        self.assertNotIn("tabindex=0 data-drill", work)
+        self.assertEqual(work.count('<td class="num mono workFitCell"><button type=button class=workDrillBtn data-drill='), 2)
+        self.assertIn('<div class=workSizingCell role=cell', work)
+        self.assertIn('<button type=button class="workDrillBtn workSizingBtn" data-drill=', work)
+        self.assertIn("event.target.matches('rect[data-drill]')", work)
+        self.assertIn(".workDrillBtn:focus-visible{", page)
 
 
 if __name__ == "__main__":

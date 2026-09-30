@@ -7657,7 +7657,7 @@ def work_sessions_state(query):
         runtime=runtime[:40], project=project,
         corrections_for=service.session_corrections if service else None,
         pending_keys=service.pending_session_keys() if service else None,
-        ids_only=ids_only,
+        ids_only=ids_only, today=time.strftime("%Y-%m-%d"),
     )
     return {"ok": True, "filters": filters, **result}, 200
 

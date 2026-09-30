@@ -94,21 +94,24 @@ EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max", "ultra")
 HIGH_EFFORTS = ("xhigh", "max", "ultra")
 
 
-def session_outcome(turns, sequence, pending=False, labeled=False):
+def session_outcome(turns, sequence, pending=False, labeled=False, follow_ups=None):
     """Classify a session from its ordered follow-up pushback labels.
 
     A session is classified only once it has no queued or backlogged work (``pending``);
     sessions whose labels are all low-confidence are Unclear rather than counted as accepted.
-    A ``labeled`` session with no pending work and no follow-up labels had no classifiable
-    follow-ups (greetings, image- or wrapper-only turns), so it is a single shot; a session
-    with no labels at all is still waiting for the classifier.
+    A ``labeled`` session with no follow-up labels is a single shot only when the classifier
+    found no classifiable follow-ups (``follow_ups`` 0: greetings, image- or wrapper-only
+    turns). When it has follow-ups that were never labeled or the count is unknown, the
+    outcome is Unclear. A session with no labels at all is still waiting for the classifier.
     """
     if turns <= 1:
         return "single_shot"
     if pending:
         return "pending"
     if not sequence:
-        return "single_shot" if labeled else "pending"
+        if not labeled:
+            return "pending"
+        return "single_shot" if follow_ups == 0 else "unclear"
     confident = [value for _ordinal, value in sequence if value is not None]
     if not confident:
         return "unclear"
@@ -118,7 +121,8 @@ def session_outcome(turns, sequence, pending=False, labeled=False):
 
 
 def _outcome(s):
-    return session_outcome(s["turns"], s["sequence"], s["pending"], labeled=bool(s["entry"]))
+    return session_outcome(s["turns"], s["sequence"], s["pending"], labeled=bool(s["entry"]),
+                           follow_ups=s["entry"].get("follow_ups"))
 
 
 def _month_shift(month, delta):
@@ -133,7 +137,7 @@ def build_work_insights(rows, labels, key_for, areas, output_price, months=6,
     tiers, tier_prices = price_tiers(rows, output_price, with_prices=True)
     sessions, runtime_options, project_options = _prepare_sessions(
         rows, labels, key_for, area_names, tiers, runtime, project, pending_keys)
-    all_months = _window_months(sessions, months)
+    all_months = _window_months(sessions, months, today)
     month_set = set(all_months)
     # The comparison period is the same number of calendar months just before the current window.
     previous = {_month_shift(all_months[0], -step) for step in range(1, months + 1)} if months and all_months else set()
@@ -184,11 +188,18 @@ def _session_months(s):
                         *map(_month, (s["row"].get("_day_cost") or {}))] if m}
 
 
-def _window_months(sessions, months):
-    all_months = sorted(set().union(*(_session_months(s) for s in sessions))) if sessions else []
-    if months:
-        all_months = all_months[-months:]
-    return all_months[-MAX_MONTHS:]
+def _window_months(sessions, months, today=""):
+    """The ``months`` calendar months ending this month (or the latest data month without a today).
+
+    Months without data stay in the window as empty columns. ``months`` 0 keeps every data month.
+    """
+    data_months = sorted(set().union(*(_session_months(s) for s in sessions))) if sessions else []
+    if not months:
+        return data_months[-MAX_MONTHS:]
+    end = _month(today or "") or (data_months[-1] if data_months else "")
+    if not end:
+        return []
+    return [_month_shift(end, step - min(months, MAX_MONTHS) + 1) for step in range(min(months, MAX_MONTHS))]
 
 
 def _attach_sequences(sessions, corrections_for):
@@ -581,7 +592,7 @@ DRILL_FILTERS = ("month", "start_month", "area", "work_type", "complexity", "tie
 
 
 def find_sessions(rows, labels, key_for, areas, output_price, filters, months=6, runtime="", project="",
-                  corrections_for=None, pending_keys=None, limit=MAX_DRILL_SESSIONS, ids_only=False):
+                  corrections_for=None, pending_keys=None, limit=MAX_DRILL_SESSIONS, ids_only=False, today=""):
     """Sessions behind one Work module cell, ranked by spend; same windowing and labels as the aggregates.
 
     ``month`` selects sessions active in that month (as the allocation counts turns and spend);
@@ -592,7 +603,7 @@ def find_sessions(rows, labels, key_for, areas, output_price, filters, months=6,
     tiers = price_tiers(rows, output_price)
     sessions, _runtimes, _projects = _prepare_sessions(
         rows, labels, key_for, area_names, tiers, runtime, project, pending_keys)
-    all_months = _window_months(sessions, months)
+    all_months = _window_months(sessions, months, today)
     month = filters.get("month") or ""
     start_month = filters.get("start_month") or ""
     if start_month:

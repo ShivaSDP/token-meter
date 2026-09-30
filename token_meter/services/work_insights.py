@@ -484,6 +484,7 @@ _TABLES = {
     "work_failures": ("turn_key", "question", "session_key", "attempts", "reason",
                       "next_at", "terminal"),
     "work_backlog": ("session_key", "newest_ts", "pending", "added_at"),
+    "work_openers": ("session_key", "turn_key", "follow_ups"),
     "work_metadata": ("key", "value"),
 }
 
@@ -521,6 +522,9 @@ class LabelLedger:
             connection.execute("""CREATE TABLE IF NOT EXISTS work_backlog (
                 session_key TEXT PRIMARY KEY, newest_ts INTEGER NOT NULL,
                 pending INTEGER NOT NULL, added_at INTEGER NOT NULL)""")
+            # Which turn is each session's opener (by position) and how many classifiable follow-ups it has.
+            connection.execute("""CREATE TABLE IF NOT EXISTS work_openers (
+                session_key TEXT PRIMARY KEY, turn_key TEXT NOT NULL, follow_ups INTEGER NOT NULL)""")
             connection.execute("""CREATE TABLE IF NOT EXISTS work_metadata (
                 key TEXT PRIMARY KEY, value TEXT NOT NULL)""")
             connection.execute("CREATE INDEX IF NOT EXISTS work_labels_session ON work_labels (session_key)")
@@ -609,6 +613,18 @@ class LabelLedger:
             failures = connection.execute(
                 "SELECT turn_key, session_key, question FROM work_failures WHERE terminal = 1").fetchall()
         return [dict(row) for row in rows], [dict(row) for row in failures]
+
+    def openers(self):
+        with self._connect() as connection:
+            return {r["session_key"]: (r["turn_key"], int(r["follow_ups"]))
+                    for r in connection.execute("SELECT session_key, turn_key, follow_ups FROM work_openers")}
+
+    def record_opener(self, session_key, turn_key, follow_ups):
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO work_openers VALUES (?, ?, ?) ON CONFLICT (session_key)
+                   DO UPDATE SET turn_key = excluded.turn_key, follow_ups = excluded.follow_ups""",
+                (session_key, turn_key, int(follow_ups)))
 
     def model_mix(self):
         with self._connect() as connection:
@@ -716,6 +732,7 @@ class WorkInsightsService:
         self.ledger = None
         self._labeled = {}
         self._failures = {}
+        self._openers = {}
         self._recent_added = set()
         self._last_refill = None
         self._rate_window = collections.deque(maxlen=50)
@@ -759,6 +776,7 @@ class WorkInsightsService:
         try:
             self.ledger = LabelLedger(self.ledger_path)
             self._labeled, self._failures = self.ledger.labeled_keys()
+            self._openers = self.ledger.openers()
         except (sqlite3.Error, OSError):
             self.ledger = None
             self.state, self.reason = STATE_STORAGE, "ledger_unavailable"
@@ -814,6 +832,8 @@ class WorkInsightsService:
         # Label the session from its first substantive request, not a greeting.
         opener_index = next((i for i, text in enumerate(prepared) if text and is_substantive(text)),
                             next((i for i, text in enumerate(prepared) if text), None))
+        opener_key = self._turn_key(row_id, opener_index) if opener_index is not None else None
+        follow_ups = sum(1 for text in prepared[opener_index + 1:] if text) if opener_key else 0
         items = []
         retry_count, retry_at = 0, None
         for ordinal, turn in enumerate(turns):
@@ -835,6 +855,8 @@ class WorkInsightsService:
             state = (f"User's message:\n{text}" if opener or not context else
                      f"Assistant's previous message (end):\n{context}\n\nUser's latest message:\n{text}")
             items.append((turn_key, wanted, state, float(turn.get("ts") or newest or 0)))
+        if opener_key and not self._note_opener(session_key, opener_key, follow_ups, generation):
+            return 0
         if not items and not retry_count:
             self._remove_backlog(session_key)
             return 0
@@ -874,6 +896,34 @@ class WorkInsightsService:
         if added:
             self.wake.set()
         return added
+
+    def _note_opener(self, session_key, opener_key, follow_ups, generation):
+        """Record the session's opener by position; returns False when a clear() fenced this intake.
+
+        Queued work for a turn whose role changed (an earlier fallback opener, or a follow-up that
+        is now the opener) is dropped so it is re-queued for its current role only.
+        """
+        with self.lock:
+            if generation != self.generation:
+                return False
+            for item in [i for i in self.queue if i.session_key == session_key
+                         and (i.turn_key == opener_key) != (i.questions[0] in SESSION_QUESTIONS)]:
+                self.queue.remove(item)
+                self.queued.discard(item.turn_key)
+        if self._openers.get(session_key) == (opener_key, follow_ups):
+            return True
+        with self.write_lock:
+            if generation != self.generation:
+                return False
+            try:
+                self.ledger.record_opener(session_key, opener_key, follow_ups)
+            except sqlite3.Error:
+                self.state, self.reason = STATE_STORAGE, "ledger_write_failed"
+                return True
+            with self.lock:
+                self._openers[session_key] = (opener_key, follow_ups)
+                self.labels_version += 1
+        return True
 
     def _write_backlog(self, session_key, overflow, retry_count, retry_at, newest, now):
         try:
@@ -1185,9 +1235,10 @@ class WorkInsightsService:
     def snapshot(self):
         """Return {session_key: labels} for aggregation; cached by labels_version.
 
+        Session labels come only from the turn intake last recorded as the session's opener
+        (its first substantive request, by position), whatever order the labels were written in.
+        Sessions without an opener record (older ledgers) fall back to the newest label.
         Labels from the current prompt version win; older ones are shown until relabeled.
-        Among equally current session labels the newest wins: intake only labels the
-        current opener, so a later-labeled opener replaces one that is no longer first.
         """
         version = self.labels_version
         cached = self._snapshot
@@ -1201,8 +1252,13 @@ class WorkInsightsService:
             return sessions
         try:
             rows, terminal = self.ledger.session_labels()
+            recorded = self.ledger.openers()
         except sqlite3.Error:
             return sessions
+
+        def superseded(row):
+            opener = recorded.get(row["session_key"])
+            return row["question"] != "correction" and opener is not None and row["turn_key"] != opener[0]
 
         def usable(row):
             if row["question"] == "area":
@@ -1215,7 +1271,7 @@ class WorkInsightsService:
 
         best, turns = {}, {}
         for row in rows:
-            if not usable(row):
+            if not usable(row) or superseded(row):
                 continue
             current = row["taxonomy"] == tags.get(row["question"])
             key = (row["session_key"], row["question"]) if row["question"] != "correction" else row["turn_key"]
@@ -1224,6 +1280,7 @@ class WorkInsightsService:
             if key not in target or rank >= target[key][0]:
                 target[key] = (rank, row)
         openers = {row["turn_key"] for (_rank, row) in best.values() if row["question"] == "work_type"}
+        openers.update(turn_key for turn_key, _follow_ups in recorded.values())
         for (_session, question), (_current, row) in best.items():
             entry = sessions.setdefault(row["session_key"], {})
             unclear = float(row["confidence"]) < cutoff(question)
@@ -1249,8 +1306,11 @@ class WorkInsightsService:
                 if row["turn_key"] not in turns:
                     entry["correction_labels"] = entry.get("correction_labels", 0) + 1
                     turn_values[row["turn_key"]] = None
-            elif row["question"] in ("area", "work_type"):
+            elif row["question"] in ("area", "work_type") and not superseded(row):
                 entry.setdefault(row["question"], "Unclear" if row["question"] == "area" else "unclear")
+        for session_key, entry in sessions.items():
+            if session_key in recorded:
+                entry["follow_ups"] = recorded[session_key][1]
         self._turn_values = turn_values
         self._snapshot = (version, sessions, turn_values)
         return sessions
@@ -1306,6 +1366,7 @@ class WorkInsightsService:
                 self.queue.clear()
                 self.queued.clear()
                 self._labeled, self._failures = {}, {}
+                self._openers = {}
                 self._recent_added.clear()
                 self.labels_version += 1
             self.model_digest = ""
