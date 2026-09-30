@@ -9567,7 +9567,7 @@ console.log(JSON.stringify({
     def test_primary_navigation_and_command_palette_share_the_same_workflow_order(self):
         tab_ids = [
             "tab-session", "tab-daily", "tab-models", "tab-subagents",
-            "tab-efficiency", "tab-git", "tab-performance", "tab-learn",
+            "tab-efficiency", "tab-work", "tab-git", "tab-performance", "tab-learn",
             "tab-capabilities", "tab-settings",
         ]
         positions = [self.page.index(f"id={tab_id}") for tab_id in tab_ids]
@@ -10810,12 +10810,13 @@ const ticks=async(count=8)=>{{while(count--)await Promise.resolve();}};
             "Tools, MCP servers, and skills.",
             "Local token efficiency.",
             "Pushed code &times; covered spend.",
+            "What the spend went into.",
             "The Token Meter review loop.",
             "Budgets, connections, pricing, and updates.",
         ):
             self.assertIn(marker, self.page)
-        self.assertEqual(self.page.count("data-page-signal="), 9)
-        self.assertEqual(self.page.count("class=spectrumPageSubtitle"), 9)
+        self.assertEqual(self.page.count("data-page-signal="), 10)
+        self.assertEqual(self.page.count("class=spectrumPageSubtitle"), 10)
         self.assertNotIn(".spectrumPageHead{position:relative;isolation:isolate;display:flex;width:100%;max-width:none;min-height:138px", self.page)
 
     def test_shared_header_effect_adapter_exposes_generic_mounts(self):
@@ -10836,7 +10837,7 @@ const ticks=async(count=8)=>{{while(count--)await Promise.resolve();}};
             re.DOTALL,
         )
         self.assertEqual(
-            titles, ["Sessions", "Subagents", "Models", "Spend", "Efficiency", "Git"],
+            titles, ["Sessions", "Subagents", "Models", "Spend", "Efficiency", "Work", "Git"],
         )
         self.assertTrue(all(len(title) <= 12 for title in titles))
 

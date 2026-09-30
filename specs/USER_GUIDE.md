@@ -216,6 +216,30 @@ exposure, skill-pack activation, and review candidates. Incomplete evidence,
 built-in packs, default tools, and read-only runtimes are not treated as safe
 disable recommendations.
 
+### Work
+
+Work is off until you turn on **Settings → Work insights** and run
+`./scripts/setup-work-classifier` with Ollama running. A local Jet decision
+model then labels each session's opening request with an area (editable, up to
+eight), a work type, and a complexity level, and asks of each follow-up turn
+whether you pushed back on the previous work.
+
+- **Monthly activity allocation** shows each month's user turns, sessions, or
+  spend by area. Pending means not labeled yet; Unclear means the model was
+  not confident (below 50%).
+- **Workstreams** ranks project × area pairs for a month.
+- **Cost by work type** and **Rework** show spend, cost per session, and the
+  share of follow-up turns that pushed back. Rates under 20 labeled turns are
+  marked "few".
+- **Model right-sizing** compares request complexity with the price tier of
+  the session's main model. "Possible overspend" and "possible false economy"
+  are estimates to review, not verdicts.
+
+The worker labels at most the configured pace, pauses on battery by default,
+waits when the machine is busy, and backs off when Ollama is unreachable.
+Changing areas relabels only areas, newest first. Pause it from the page,
+Settings, or the menu bar.
+
 ### Git
 
 Git compares locally observed successful pushes with covered AI spend.

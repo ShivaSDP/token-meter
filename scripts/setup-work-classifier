@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Download Jet v6.2.0 (Apache-2.0) and import it into the local Ollama as a 4-bit model.
+set -euo pipefail
+
+MODEL_NAME="token-meter-jet"
+REPO="michaljach/jet"
+REVISION="v6.2.0"
+CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/token-meter"
+KEEP_DOWNLOAD=1
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/setup-work-classifier [--model NAME] [--remove-download]
+
+Downloads the Jet decision model (about 8.4 GB) from Hugging Face with curl,
+verifies every file size, and imports it into Ollama as a 4-bit model that
+Token Meter's Work insights use. Requires Ollama 0.34 or newer, running locally.
+
+  --model NAME        Ollama model name to create (default: token-meter-jet)
+  --remove-download   Delete the downloaded weights after a successful import
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --model) MODEL_NAME="${2:?--model needs a name}"; shift 2 ;;
+    --remove-download) KEEP_DOWNLOAD=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if ! printf '%s' "$MODEL_NAME" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$'; then
+  echo "Invalid Ollama model name: $MODEL_NAME" >&2
+  exit 2
+fi
+command -v curl >/dev/null || { echo "curl is required." >&2; exit 1; }
+command -v python3 >/dev/null || { echo "python3 is required." >&2; exit 1; }
+if ! command -v ollama >/dev/null; then
+  echo "Ollama is not installed. Install it from https://ollama.com, start it, then rerun this script." >&2
+  exit 1
+fi
+if ! ollama list >/dev/null 2>&1; then
+  echo "Ollama is installed but not running. Start the Ollama app, then rerun this script." >&2
+  exit 1
+fi
+
+TARGET="$CACHE_ROOT/jet-$REVISION"
+mkdir -p "$TARGET"
+BASE="https://huggingface.co/$REPO/resolve/$REVISION"
+LISTING="$(curl -fsSL "https://huggingface.co/api/models/$REPO/tree/$REVISION")"
+
+FILES="$(printf '%s' "$LISTING" | python3 -c '
+import json, sys
+wanted = {"config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja",
+          "calibration.json", "model.safetensors.index.json", "LICENSE"}
+for entry in json.load(sys.stdin):
+    path = entry.get("path", "")
+    if path in wanted or (path.startswith("model-") and path.endswith(".safetensors")):
+        size = (entry.get("lfs") or {}).get("size", entry.get("size", 0))
+        print(f"{path}\t{size}")
+')"
+if [ -z "$FILES" ]; then
+  echo "Could not read the model file list from Hugging Face." >&2
+  exit 1
+fi
+
+file_size() { stat -f %z "$1" 2>/dev/null || stat -c %s "$1"; }
+
+echo "Downloading Jet $REVISION to $TARGET"
+while IFS=$'\t' read -r path size; do
+  destination="$TARGET/$path"
+  if [ -f "$destination" ] && [ "$(file_size "$destination")" = "$size" ]; then
+    echo "  ok       $path"
+    continue
+  fi
+  echo "  fetching $path"
+  curl -fL --retry 3 --retry-delay 2 -C - -o "$destination" "$BASE/$path" || {
+    rm -f "$destination"
+    curl -fL --retry 3 --retry-delay 2 -o "$destination" "$BASE/$path"
+  }
+  actual="$(file_size "$destination")"
+  if [ "$actual" != "$size" ]; then
+    echo "Size mismatch for $path: expected $size bytes, got $actual." >&2
+    exit 1
+  fi
+done <<< "$FILES"
+
+cat > "$TARGET/Modelfile" <<EOF
+FROM $TARGET
+PARAMETER temperature 0
+PARAMETER num_predict 1
+EOF
+
+echo "Importing into Ollama as $MODEL_NAME (4-bit). This can take a few minutes."
+ollama create "$MODEL_NAME" -q int4 -f "$TARGET/Modelfile"
+
+if [ "$KEEP_DOWNLOAD" -eq 0 ]; then
+  rm -rf "$TARGET"
+  echo "Removed the downloaded weights."
+fi
+echo "Done. In Token Meter, open Settings → Work insights and turn on labeling."

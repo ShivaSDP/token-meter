@@ -178,6 +178,26 @@ evidence stays labelled beside the numbers.
   <img src="images/efficiency.png" alt="Token Meter Efficiency page with output per dollar, reasoning ratio, context load, and output per execution" width="900">
 </p>
 
+### Work
+
+**Work** shows what the spend went into. When you turn on **Settings → Work
+insights**, a local decision model ([Jet](https://huggingface.co/michaljach/jet),
+Apache-2.0) running in your own Ollama labels each session's area, work type,
+and complexity, and flags follow-up turns where you pushed back on the previous
+work. The page then shows monthly activity allocation by area, workstreams by
+project and area, cost by work type, rework rate by model, and a right-sizing
+grid of request complexity against model price tier.
+
+Set up the model once, with Ollama running:
+
+```bash
+./scripts/setup-work-classifier
+```
+
+Labeling is off by default, runs in the background at a limited pace, pauses on
+battery, and can be paused from the page, Settings, or the menu bar. Labels are
+estimates; low-confidence answers show as Unclear.
+
 ### Git
 
 **Git** pairs successful local pushes with covered spend, so you can see code
@@ -251,6 +271,10 @@ Costs and selected token values can be estimates. Codex cost uses public
 API-equivalent rates, which can differ from subscription billing; Cursor usage
 includes local proxies where authoritative values are unavailable; Pi cost is
 the local estimate persisted in its session record.
+
+Work insights, when you turn them on, read only the prompts you typed, keep
+them in memory, and send them only to Ollama on this machine. Token Meter stores
+labels, never the text.
 
 Subagent views use only content-free structural relationships and existing
 usage evidence. They do not expose prompts, responses, reasoning, tool
