@@ -184,9 +184,18 @@ evidence stays labelled beside the numbers.
 insights**, a local decision model ([Jet](https://huggingface.co/michaljach/jet),
 Apache-2.0) running in your own Ollama labels each session's area, work type,
 and complexity, and flags follow-up turns where you pushed back on the previous
-work. The page then shows monthly activity allocation by area, workstreams by
-project and area, cost by work type, rework rate by model, and a right-sizing
-grid of request complexity against model price tier.
+work. The page then shows:
+
+- **What stands out**: a few evidence-backed cards, such as sessions that ended
+  on a pushback or routine work done on premium models.
+- **Monthly activity allocation** by area, and **workstreams** by project and
+  area.
+- **Session outcomes**: accepted without pushback, recovered, or ended on
+  pushback, with cost per outcome and an estimate of spend after the first
+  pushback.
+- **Cost by work type**, **rework** by week, model, and turn position, and
+  **model fit by work type**.
+- A **right-sizing** grid of request complexity against model price tier.
 
 Set up the model once, with Ollama running:
 

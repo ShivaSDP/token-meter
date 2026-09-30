@@ -579,7 +579,7 @@ class LabelLedger:
                 "SELECT turn_key, session_key, question, value, confidence, taxonomy, model "
                 "FROM work_labels").fetchall()
             failures = connection.execute(
-                "SELECT session_key, question FROM work_failures WHERE terminal = 1").fetchall()
+                "SELECT turn_key, session_key, question FROM work_failures WHERE terminal = 1").fetchall()
         return [dict(row) for row in rows], [dict(row) for row in failures]
 
     def model_mix(self):
@@ -691,20 +691,36 @@ class WorkInsightsService:
         self._recent_added = set()
         self._last_refill = None
         self._rate_window = collections.deque(maxlen=50)
-        self._pending_delete = False
+        self._turn_values = {}
+        self._corrections_memo = (None, {})
         self._open_ledger()
 
     # ---- ledger lifecycle
 
+    @property
+    def _delete_marker(self):
+        return self.ledger_path + ".delete-pending"
+
+    @property
+    def delete_pending(self):
+        return os.path.exists(self._delete_marker)
+
+    def _finish_pending_delete(self):
+        """Complete a delete the user asked for; the marker survives restarts until it succeeds."""
+        if not self.delete_pending:
+            return True
+        try:
+            LabelLedger.remove(self.ledger_path)
+            os.remove(self._delete_marker)
+        except OSError:
+            self.ledger = None
+            self.state, self.reason = STATE_STORAGE, "delete_pending"
+            return False
+        return True
+
     def _open_ledger(self):
-        if self._pending_delete:
-            try:
-                LabelLedger.remove(self.ledger_path)
-            except OSError:
-                self.ledger = None
-                self.state, self.reason = STATE_STORAGE, "delete_pending"
-                return
-            self._pending_delete = False
+        if not self._finish_pending_delete():
+            return
         try:
             self.ledger = LabelLedger(self.ledger_path)
             self._labeled, self._failures = self.ledger.labeled_keys()
@@ -940,6 +956,9 @@ class WorkInsightsService:
             with self.lock:
                 self.queue.clear()
                 self.queued.clear()
+            if self.delete_pending:
+                self._finish_pending_delete()
+                return STORAGE_RETRY_S if self.delete_pending else 5.0
             self._set(STATE_DISABLED)
             return 5.0
         if self.ledger is None:
@@ -1098,7 +1117,9 @@ class WorkInsightsService:
         except sqlite3.Error:
             backlog, mix = 0, {}
         state = self.state
-        if not settings["enabled"]:
+        if self.delete_pending:
+            state = STATE_STORAGE
+        elif not settings["enabled"]:
             state = STATE_DISABLED
         elif is_paused(settings, self.clock()):
             state = STATE_PAUSED
@@ -1111,7 +1132,8 @@ class WorkInsightsService:
         per_minute = (len(recent) - 1) / elapsed if elapsed > 0 else float(settings["rate_per_minute"]) / 3
         return {
             "state": state,
-            "reason": self.reason if state == self.state else ("manual" if state == STATE_PAUSED else ""),
+            "reason": ("delete_pending" if self.delete_pending else
+                       self.reason if state == self.state else ("manual" if state == STATE_PAUSED else "")),
             "pending": pending,
             "queued": queued,
             "eta_s": int(pending / per_minute * 60) if pending and per_minute else 0,
@@ -1157,6 +1179,7 @@ class WorkInsightsService:
             entry = sessions.setdefault(row["session_key"], {})
             if row["question"] == "correction":
                 entry["correction_labels"] = entry.get("correction_labels", 0) + 1
+                turn_values[row["turn_key"]] = None
             elif row["question"] in ("area", "work_type"):
                 entry.setdefault(row["question"], "Unclear" if row["question"] == "area" else "unclear")
         self._turn_values = turn_values
@@ -1169,12 +1192,19 @@ class WorkInsightsService:
         ``pushback`` is True, False, or None when the label was low-confidence.
         """
         self.snapshot()
-        values = getattr(self, "_turn_values", {})
+        values = self._turn_values
+        memo_key = (row_id, int(count))
+        if self._corrections_memo[0] != self.labels_version:
+            self._corrections_memo = (self.labels_version, {})
+        cached = self._corrections_memo[1].get(memo_key)
+        if cached is not None:
+            return cached
         found = []
         for ordinal in range(1, max(0, int(count))):
             key = self._turn_key(row_id, ordinal)
             if key in values:
                 found.append((ordinal, values[key]))
+        self._corrections_memo[1][memo_key] = found
         return found
 
     def clear(self):
@@ -1188,16 +1218,20 @@ class WorkInsightsService:
                 self.labels_version += 1
             self.model_digest = ""
             failed = False
-            if self.ledger is not None:
-                try:
-                    self.ledger.clear()
-                except (sqlite3.Error, OSError):
-                    # Keep the ledger closed and retry the delete before any reopen,
-                    # so labels the user asked to delete never come back.
-                    self.ledger = None
-                    self._pending_delete = True
-                    self._set(STATE_STORAGE, "delete_pending", STORAGE_RETRY_S)
-                    failed = True
+            self._turn_values = {}
+            self._corrections_memo = (None, {})
+            try:
+                # Content-free marker first, so an interrupted or failed delete is retried
+                # before any reopen, including after a restart.
+                with open(self._delete_marker, "w", encoding="utf-8"):
+                    pass
+                LabelLedger.remove(self.ledger_path)
+                os.remove(self._delete_marker)
+                self.ledger = LabelLedger(self.ledger_path)
+            except (sqlite3.Error, OSError):
+                self.ledger = None
+                self._set(STATE_STORAGE, "delete_pending", STORAGE_RETRY_S)
+                failed = True
             with self.lock:
                 # Fence again after the salt rotated: intake that began mid-clear is discarded.
                 self.generation += 1

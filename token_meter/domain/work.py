@@ -81,22 +81,28 @@ def _rate(corrections, samples):
     return {"rate": corrections / samples, "samples": samples, "few_samples": samples < MIN_RATE_SAMPLES}
 
 
-OUTCOMES = ("single_shot", "accepted", "recovered", "ended_on_pushback", "pending")
+OUTCOMES = ("single_shot", "accepted", "recovered", "ended_on_pushback", "unclear", "pending")
 POSITION_BUCKETS = ((1, 2, "1–2"), (3, 5, "3–5"), (6, 10, "6–10"), (11, 20, "11–20"), (21, 10**9, "21+"))
 MAX_FIT_MODELS = 5
 MAX_HEADLINES = 4
 
 
 def session_outcome(turns, sequence):
-    """Classify a session from its ordered follow-up pushback labels."""
+    """Classify a session from its ordered follow-up pushback labels.
+
+    A session is classified only once its last follow-up turn is labeled; sessions whose
+    labels are all low-confidence are Unclear rather than counted as accepted.
+    """
     if turns <= 1:
         return "single_shot"
-    confident = [value for _ordinal, value in sequence if value is not None]
-    if not sequence:
+    if not sequence or sequence[-1][0] != turns - 1:
         return "pending"
+    confident = [value for _ordinal, value in sequence if value is not None]
+    if not confident:
+        return "unclear"
     if not any(confident):
         return "accepted"
-    return "ended_on_pushback" if confident and confident[-1] else "recovered"
+    return "ended_on_pushback" if confident[-1] else "recovered"
 
 
 def rework_share(turns, sequence):
@@ -277,7 +283,7 @@ def build_work_insights(rows, labels, key_for, areas, output_price, months=6,
     outcomes = _outcomes(in_window)
     position = _position(in_window)
     model_fit = _model_fit(in_window)
-    headlines = _headlines(sessions, all_months, area_names, economics, cells, tier_prices, outcomes)
+    headlines = _headlines(sessions, all_months, area_names, economics, cells, tier_prices, outcomes, today)
 
     labeled_sessions = sum(1 for s in in_window if s["area"] != PENDING)
     labeled_turns = sum(s["correction_labels"] for s in in_window)
@@ -384,13 +390,15 @@ def _model_fit(in_window):
 
 
 def _month_spend_shares(sessions, month, area_names):
+    """Area shares of all spend in the month, matching the allocation chart (Unclear and Pending included)."""
     spend = collections.Counter()
     for s in sessions:
         for day, cost in (s["row"].get("_day_cost") or {}).items():
-            if str(day)[:7] == month and s["area"] in area_names:
+            if str(day)[:7] == month:
                 spend[s["area"]] += float(cost or 0)
     total = sum(spend.values())
-    return ({area: value / total for area, value in spend.items()} if total else {}), total
+    shares = {area: value / total for area, value in spend.items() if area in area_names} if total else {}
+    return shares, total
 
 
 def _month_rework(sessions, month):
@@ -398,7 +406,7 @@ def _month_rework(sessions, month):
     return _rate(sum(s["corrections"] for s in group), sum(s["correction_labels"] for s in group))
 
 
-def _headlines(sessions, months, area_names, economics, cells, tier_prices, outcomes):
+def _headlines(sessions, months, area_names, economics, cells, tier_prices, outcomes, today=""):
     """Deterministic, evidence-backed statements; each names the module that supports it."""
     cards = []
     current = months[-1] if months else ""
@@ -412,6 +420,7 @@ def _headlines(sessions, months, area_names, economics, cells, tier_prices, outc
             if area and abs(delta) >= 0.10:
                 cards.append({"key": "area_shift", "kind": "neutral", "target": "allocation",
                               "area": area, "month": current, "previous_month": previous,
+                              "partial": bool(today and today[:7] == current),
                               "share": now_shares.get(area, 0), "previous_share": before_shares.get(area, 0)})
         now_rate, before_rate = _month_rework(sessions, current), _month_rework(sessions, previous)
         if now_rate and before_rate and not now_rate["few_samples"] and not before_rate["few_samples"]:
@@ -419,6 +428,7 @@ def _headlines(sessions, months, area_names, economics, cells, tier_prices, outc
             if abs(change) >= 0.03:
                 cards.append({"key": "pushback_trend", "kind": "good" if change < 0 else "warn",
                               "target": "rework", "month": current, "previous_month": previous,
+                              "partial": bool(today and today[:7] == current),
                               "rate": now_rate["rate"], "previous_rate": before_rate["rate"]})
     ended = next(b for b in outcomes["buckets"] if b["outcome"] == "ended_on_pushback")
     if not outcomes["few_samples"] and outcomes["labeled_sessions"]:

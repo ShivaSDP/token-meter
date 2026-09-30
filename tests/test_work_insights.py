@@ -541,6 +541,45 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(service.snapshot(), {})
         self.assertEqual(recovered, [1])
 
+    def test_clear_with_a_closed_ledger_still_deletes_the_files(self):
+        service, values, _ = make_service(self.tmp.name)
+        service.observe("s1", turns("hello"))
+        drain(service)
+        path = os.path.join(self.tmp.name, "work.sqlite3")
+        service.ledger = None
+        service.clear()
+        self.assertIsNotNone(service.ledger)
+        self.assertEqual(service.ledger.labeled_keys(), ({}, {}))
+        self.assertEqual(service.snapshot(), {})
+        self.assertFalse(os.path.exists(path + ".delete-pending"))
+
+    def test_a_failed_delete_survives_a_restart(self):
+        service, values, clock = make_service(self.tmp.name)
+        service.observe("s1", turns("hello"))
+        drain(service)
+        with mock.patch.object(W.LabelLedger, "remove", side_effect=PermissionError("denied")):
+            with self.assertRaises(W.LabelDeleteError):
+                service.clear()
+            restarted = W.WorkInsightsService(os.path.join(self.tmp.name, "work.sqlite3"), lambda: values,
+                                              client_factory=FakeClient, clock=clock, monotonic=clock)
+            self.assertIsNone(restarted.ledger)
+            self.assertEqual(restarted.status()["reason"], "delete_pending")
+        restarted = W.WorkInsightsService(os.path.join(self.tmp.name, "work.sqlite3"), lambda: values,
+                                          client_factory=FakeClient, clock=clock, monotonic=clock)
+        self.assertIsNotNone(restarted.ledger)
+        self.assertEqual(restarted.snapshot(), {})
+
+    def test_a_pending_delete_is_retried_while_disabled_and_shown(self):
+        service, values, clock = make_service(self.tmp.name)
+        with mock.patch.object(W.LabelLedger, "remove", side_effect=PermissionError("denied")):
+            with self.assertRaises(W.LabelDeleteError):
+                service.clear()
+        values["enabled"] = False
+        self.assertEqual(service.status()["state"], W.STATE_STORAGE)
+        service.step()
+        self.assertFalse(service.delete_pending)
+        self.assertEqual(service.status()["state"], W.STATE_DISABLED)
+
     def test_latency_baseline_adapts(self):
         service, _, _ = make_service(self.tmp.name)
         for _ in range(W.LATENCY_WINDOW):
@@ -778,6 +817,8 @@ class OutcomeInsightTests(unittest.TestCase):
         self.assertEqual(domain.session_outcome(3, [(1, True), (2, False)]), "recovered")
         self.assertEqual(domain.session_outcome(3, [(1, False), (2, True)]), "ended_on_pushback")
         self.assertEqual(domain.session_outcome(3, [(1, True), (2, None)]), "ended_on_pushback")
+        self.assertEqual(domain.session_outcome(3, [(1, None), (2, None)]), "unclear")
+        self.assertEqual(domain.session_outcome(4, [(1, False), (2, False)]), "pending")
         self.assertEqual(domain.rework_share(4, [(1, False), (2, True)]), 0.5)
         self.assertEqual(domain.rework_share(4, [(1, False)]), 0.0)
 

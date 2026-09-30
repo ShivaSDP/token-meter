@@ -7486,11 +7486,14 @@ def clear_work_insights():
     if service is not None:
         service.clear()
         return
-    for suffix in ("", "-wal", "-shm", "-journal"):
-        try:
-            os.remove(TOKEN_METER_WORK_INSIGHTS_DB + suffix)
-        except FileNotFoundError:
-            pass
+    marker = TOKEN_METER_WORK_INSIGHTS_DB + ".delete-pending"
+    if not os.path.exists(TOKEN_METER_WORK_INSIGHTS_DB) and not os.path.exists(marker):
+        return
+    # The marker makes a failed delete finish before the service ever reopens the ledger.
+    with open(marker, "w", encoding="utf-8"):
+        pass
+    _work.LabelLedger.remove(TOKEN_METER_WORK_INSIGHTS_DB)
+    os.remove(marker)
 
 
 def requeue_work_insights():
