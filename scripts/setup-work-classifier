@@ -15,7 +15,8 @@ usage() {
 Usage: scripts/setup-work-classifier [--model NAME] [--remove-download]
 
 Downloads the Jet decision model (about 8.4 GB) from Hugging Face with curl,
-verifies every file's size and SHA-256, and imports it into Ollama as a 4-bit model that
+verifies every file's size and hash (SHA-256 for weights, git blob SHA-1 for
+small files) against a pinned commit, and imports it into Ollama as a 4-bit model that
 Token Meter's Work insights use. Requires Ollama 0.34 or newer, running locally.
 
   --model NAME        Ollama model name to create (default: token-meter-jet)
@@ -75,11 +76,15 @@ file_digest() {
   python3 - "$1" "$2" <<'PY'
 import hashlib, sys
 path, kind = sys.argv[1], sys.argv[2]
-data = open(path, "rb").read()
+import os
 if kind == "sha256":
-    print("sha256:" + hashlib.sha256(data).hexdigest())
+    digest = hashlib.sha256()
 else:
-    print("git:" + hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest())
+    digest = hashlib.sha1(b"blob %d\0" % os.path.getsize(path))
+with open(path, "rb") as handle:
+    for chunk in iter(lambda: handle.read(1 << 20), b""):
+        digest.update(chunk)
+print(("sha256:" if kind == "sha256" else "git:") + digest.hexdigest())
 PY
 }
 

@@ -44,7 +44,7 @@ UNCLEAR_CONFIDENCE = 0.5
 MIN_GAP_S = 0.25
 NUM_CTX = 4_096
 KEEP_ALIVE = "2m"
-DIGEST_RECHECK_S = 600
+DIGEST_RECHECK_S = 0
 REFILL_INTERVAL_S = 10
 LATENCY_BASELINE_ALPHA = 0.02
 
@@ -517,6 +517,9 @@ class LabelLedger:
                     columns = tuple(row[1] for row in connection.execute(f'PRAGMA table_info("{table}")'))
                     if columns and columns != expected:
                         return True
+        except sqlite3.OperationalError:
+            # Locked, unopenable, or I/O errors are transient: surface them, never delete the ledger.
+            raise
         except sqlite3.DatabaseError:
             return True
         return False
@@ -738,6 +741,7 @@ class WorkInsightsService:
             self._remove_backlog(session_key)
             return 0
         taxonomy = taxonomy_hash(settings["areas"])
+        generation = self.generation
         active = bool(newest and newest >= now - ACTIVE_WINDOW_S)
         items, opener_seen = [], False
         retry_count, retry_at = 0, None
@@ -749,11 +753,11 @@ class WorkInsightsService:
             opener = not opener_seen
             opener_seen = True
             questions = SESSION_QUESTIONS if opener else TURN_QUESTIONS
-            for question in questions:
-                failure = self._failures.get((turn_key, question))
-                if failure and not failure[1] and failure[0] > now:
-                    retry_count += 1
-                    retry_at = failure[0] if retry_at is None else min(retry_at, failure[0])
+            waiting = [f[0] for f in (self._failures.get((turn_key, q)) for q in questions)
+                       if f and not f[1] and f[0] > now]
+            if waiting:
+                retry_count += 1
+                retry_at = min(waiting) if retry_at is None else min(retry_at, *waiting)
             wanted = tuple(q for q in questions if self._needs(turn_key, q, taxonomy, now))
             if not wanted:
                 continue
@@ -767,6 +771,8 @@ class WorkInsightsService:
         added = 0
         overflow = collections.defaultdict(lambda: [0, 0.0])
         with self.lock:
+            if generation != self.generation:
+                return 0  # Keys were computed with a salt that clear() just rotated.
             room = QUEUE_LIMIT - len(self.queue)
             for turn_key, wanted, state, ts in items:
                 if turn_key in self.queued:
@@ -933,15 +939,16 @@ class WorkInsightsService:
         if self.state in (STATE_BACKOFF, STATE_SETUP, STATE_STORAGE) and now < self.retry_at:
             return min(5.0, self.retry_at - now)
         client = self.client_factory(settings["ollama_url"], settings["model"])
-        failed = self._check_digest(client, settings)
-        if failed is not None:
-            return failed
         self._maybe_refill()
         item = self._next_item()
         if item is None:
             self.loaded = False
             self._set(STATE_IDLE)
             return 5.0
+        # A cheap local /api/tags lookup before every item, so a name re-pointed to a cloud model is caught.
+        failed = self._check_digest(client, settings)
+        if failed is not None:
+            return failed
         reason = self._throttle_reason(settings)
         if reason:
             self._unload(settings)
@@ -1015,17 +1022,16 @@ class WorkInsightsService:
                 attempts, terminal = self.ledger.record_failure(
                     item.turn_key, question, item.session_key, reason, self.clock())
                 delay = ITEM_RETRY_DELAYS_S[min(attempts - 1, len(ITEM_RETRY_DELAYS_S) - 1)]
+                with self.lock:
+                    self._failures[(item.turn_key, question)] = (int(self.clock() + delay), terminal)
+                    if terminal:
+                        self.labels_version += 1
                 if not terminal:
                     # Schedule a re-load so the retry happens even if the session is never parsed again.
                     self.ledger.upsert_backlog(item.session_key, item.newest_ts, 1,
                                                self.clock() + delay, merge=True)
             except sqlite3.Error:
                 self._set(STATE_STORAGE, "ledger_write_failed", STORAGE_RETRY_S)
-                return
-        with self.lock:
-            self._failures[(item.turn_key, question)] = (int(self.clock() + delay), terminal)
-            if terminal:
-                self.labels_version += 1
 
     def _fail_global(self, error):
         if error.kind == "setup":

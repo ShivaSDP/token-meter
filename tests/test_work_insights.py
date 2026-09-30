@@ -341,7 +341,7 @@ class ServiceTests(unittest.TestCase):
         drain(service)
         version = service.labels_version
         with mock.patch.object(FakeClient, "model_digest", lambda self: "digest-2"):
-            clock.now += W.DIGEST_RECHECK_S + 1
+            service.observe("s2", turns("next request"))
             service.step()
         self.assertEqual(service.model_digest, "digest-2")
         self.assertGreater(service.labels_version, version)
@@ -439,6 +439,37 @@ class ServiceTests(unittest.TestCase):
         self.assertNotEqual(ledger.salt, "old-salt-value")
         with open(path, "rb") as handle:
             self.assertNotIn(b"old-salt-value", handle.read())
+
+    def test_locked_ledger_is_never_deleted(self):
+        import sqlite3
+        path = os.path.join(self.tmp.name, "locked.sqlite3")
+        ledger = W.LabelLedger(path)
+        salt = ledger.salt
+        holder = sqlite3.connect(path, isolation_level=None)
+        holder.execute("BEGIN EXCLUSIVE")
+        try:
+            with mock.patch.object(W.LabelLedger, "_connect",
+                                   lambda self: sqlite3.connect(self.path, timeout=0.05)):
+                with self.assertRaises(sqlite3.OperationalError):
+                    W.LabelLedger(path)
+        finally:
+            holder.execute("ROLLBACK")
+            holder.close()
+        self.assertEqual(W.LabelLedger(path).salt, salt)
+
+    def test_observe_after_clear_with_a_stale_generation_queues_nothing(self):
+        service, values, _ = make_service(self.tmp.name)
+        original = service._turn_key
+
+        def racing_key(row_id, ordinal):
+            key = original(row_id, ordinal)
+            if service.generation == 0:
+                service.clear()
+            return key
+
+        service._turn_key = racing_key
+        self.assertEqual(service.observe("s1", turns("hello")), 0)
+        self.assertEqual(service.queue, [])
 
     def test_latency_baseline_adapts(self):
         service, _, _ = make_service(self.tmp.name)
