@@ -201,6 +201,51 @@ All derived from existing labels; no extra model calls.
   (≥ 1.5× the median). Every card needs 20+ labeled sessions where it uses
   rates and links to the module that supports it.
 
+## Drill-down, operating rhythm, and prompt v2 (iteration 3)
+
+- **Sessions behind any number.** Allocation segments, workstream rows, work
+  types, outcomes, rework models, model-fit, right-sizing, and effort cells open
+  a sessions panel (`GET /work/sessions`, allowlisted fields, top 50 by spend,
+  same windowing and labels as the aggregates). `#work-sessions?<filters>` deep
+  links to it. Filters are validated against fixed enums, the configured areas,
+  `YYYY-MM` months, and known project labels.
+- **Right-size reasoning.** A complexity × reasoning-effort table; xhigh, max, or
+  ultra effort on routine requests is flagged as possible overthinking.
+- **More headline cards.** Cost per resolved (accepted or recovered) session vs
+  sessions that ended on pushback; "spend rose while resolved sessions stayed
+  flat" (last two complete months, spend +25% or more, resolved +5% or less, 20+
+  resolved sessions in the earlier month); spend on high-effort routine work.
+- **Prompt version p2.** Every label stores the prompt version. Stale labels keep
+  classifying until the worker relabels them, and current labels win.
+  "Pending" means follow-up turns that have never been labeled.
+- **Turn preparation.** Codex follow-ups now carry the preceding assistant
+  message (current rollouts store it as `response_item` messages). Leading
+  runtime wrappers ending in "My request:" are stripped; continuation summaries
+  and attachment-only turns are skipped; sessions are labeled from their first
+  substantive turn (three or more words), not a greeting.
+- **Options and cutoffs.** `debug` includes install or setup errors; `ops` is
+  running git, release, or install commands or machine upkeep without changing
+  code; the default "Operations and setup" area is machine upkeep not tied to a
+  product codebase. Work type uses a 0.35 Unclear cutoff; area and pushback
+  stay at 0.5.
+
+### Live-label audit (2026-09-30)
+
+An independent agent labeled a blind stratified sample from the live ledger
+(55 sessions, 95 unambiguous follow-up turns): area 92% and work type 93%
+correct at confidence ≥ 0.7; complexity 76% exact and 100% within one level;
+pushback precision 0.87 (0.96 / 0.93 precision / recall at confidence ≥ 0.7)
+and recall about 0.77; 15 of 20 session outcomes matched. It found the Codex
+missing-context bug and the wrapper leaks above.
+
+Changes were tested on the 180-turn ground truth before adoption. Adding
+"asking for new changes, giving the go-ahead, or reporting a pre-existing bug
+is not a correction" to the pushback question dropped precision from 0.81 to
+0.45, so it was rejected. The narrowed `ops`/`debug` options kept accuracy
+(50/60) with more confident answers (38 at ≥ 0.7, 92% correct). A 0.35 work-type
+cutoff labels 58 of 60 sessions at 84% vs 51 at 86%. Rewording "routine"
+complexity changed nothing and was not adopted.
+
 ## Privacy
 
 - User-turn text and the preceding assistant-reply tail (600 characters) exist

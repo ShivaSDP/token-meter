@@ -85,6 +85,8 @@ OUTCOMES = ("single_shot", "accepted", "recovered", "ended_on_pushback", "unclea
 POSITION_BUCKETS = ((1, 2, "1–2"), (3, 5, "3–5"), (6, 10, "6–10"), (11, 20, "11–20"), (21, 10**9, "21+"))
 MAX_FIT_MODELS = 5
 MAX_HEADLINES = 4
+EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max", "ultra")
+HIGH_EFFORTS = ("xhigh", "max", "ultra")
 
 
 def session_outcome(turns, sequence, pending=False):
@@ -118,6 +120,16 @@ def build_work_insights(rows, labels, key_for, areas, output_price, months=6,
     """Aggregate labeled sessions. ``months`` 0 means all history."""
     area_names = [a["name"] for a in areas]
     tiers, tier_prices = price_tiers(rows, output_price, with_prices=True)
+    sessions, runtime_options, project_options = _prepare_sessions(
+        rows, labels, key_for, area_names, tiers, runtime, project, pending_keys)
+    all_months = _window_months(sessions, months)
+    month_set = set(all_months)
+    segments = area_names + [UNCLEAR, PENDING]
+    return _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tier_prices,
+                      runtime_options, project_options, today, corrections_for)
+
+
+def _prepare_sessions(rows, labels, key_for, area_names, tiers, runtime, project, pending_keys):
     sessions = []
     runtime_options, project_options = set(), collections.Counter()
     for row in rows:
@@ -147,18 +159,35 @@ def build_work_insights(rows, labels, key_for, areas, output_price, months=6,
             "correction_labels": int(entry.get("correction_labels") or 0),
             "tier": tiers.get((row.get("runtime") or "", primary_model(row))),
             "model": primary_model(row),
+            "effort": str(row.get("reasoning_effort") or "").lower(),
             "sequence": [],
             "pending": bool(pending_keys) and key_for(row.get("id") or "") in pending_keys,
         })
+    return sessions, runtime_options, project_options
 
-    all_months = sorted({m for s in sessions for m in [s["start_month"], *map(_month, s["days"]),
-                                                      *map(_month, (s["row"].get("_day_cost") or {}))] if m})
+
+def _session_months(s):
+    return {m for m in [s["start_month"], *map(_month, s["days"]),
+                        *map(_month, (s["row"].get("_day_cost") or {}))] if m}
+
+
+def _window_months(sessions, months):
+    all_months = sorted(set().union(*(_session_months(s) for s in sessions))) if sessions else []
     if months:
         all_months = all_months[-months:]
-    all_months = all_months[-MAX_MONTHS:]
-    month_set = set(all_months)
-    segments = area_names + [UNCLEAR, PENDING]
+    return all_months[-MAX_MONTHS:]
 
+
+def _attach_sequences(sessions, corrections_for):
+    if corrections_for is None:
+        return
+    for s in sessions:
+        if s["turns"] > 1 and s["correction_labels"]:
+            s["sequence"] = corrections_for(s["row"].get("id") or "", s["turns"])
+
+
+def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tier_prices,
+               runtime_options, project_options, today, corrections_for):
     allocation = []
     for month in all_months:
         bucket = {"month": month, "partial": bool(today and today[:7] == month),
@@ -220,10 +249,7 @@ def build_work_insights(rows, labels, key_for, areas, output_price, months=6,
                               "truncated": len(rows_out) > MAX_WORKSTREAMS}
 
     in_window = [s for s in sessions if s["start_month"] in month_set]
-    if corrections_for is not None:
-        for s in in_window:
-            if s["turns"] > 1 and s["correction_labels"]:
-                s["sequence"] = corrections_for(s["row"].get("id") or "", s["turns"])
+    _attach_sequences(in_window, corrections_for)
     economics = []
     by_type = collections.defaultdict(list)
     for s in in_window:
@@ -282,9 +308,11 @@ def build_work_insights(rows, labels, key_for, areas, output_price, months=6,
             cell["flag"] = "possible_false_economy"
 
     outcomes = _outcomes(in_window)
+    effort = _effort(in_window)
     position = _position(in_window)
     model_fit = _model_fit(in_window)
-    headlines = _headlines(sessions, all_months, area_names, economics, cells, tier_prices, outcomes, today)
+    headlines = _headlines(sessions, all_months, area_names, economics, cells, tier_prices, outcomes, today,
+                           effort, corrections_for)
 
     labeled_sessions = sum(1 for s in in_window if s["area"] != PENDING)
     labeled_turns = sum(s["correction_labels"] for s in in_window)
@@ -296,7 +324,7 @@ def build_work_insights(rows, labels, key_for, areas, output_price, months=6,
         "workstreams": workstreams,
         "economics": economics,
         "rework": rework,
-        "right_sizing": {"cells": cells, "tiers_known": bool(tiers)},
+        "right_sizing": {"cells": cells, "tiers_known": bool(tiers), "effort": effort},
         "outcomes": outcomes,
         "position": position,
         "model_fit": model_fit,
@@ -407,9 +435,63 @@ def _month_rework(sessions, month):
     return _rate(sum(s["corrections"] for s in group), sum(s["correction_labels"] for s in group))
 
 
-def _headlines(sessions, months, area_names, economics, cells, tier_prices, outcomes, today=""):
+def _effort(in_window):
+    """Complexity × reasoning effort: spend, sessions, pushback; high effort on routine work is flagged."""
+    efforts = [e for e in EFFORT_ORDER if any(s["effort"] == e for s in in_window)]
+    rows = []
+    for group_name, members in COMPLEXITY_GROUPS:
+        for effort in efforts:
+            group = [s for s in in_window if s["complexity"] in members and s["effort"] == effort]
+            spend = sum(_cost(s) for s in group)
+            rows.append({"complexity": group_name, "effort": effort, "sessions": len(group),
+                         "spend": round(spend, 6),
+                         "rework": _rate(sum(s["corrections"] for s in group),
+                                         sum(s["correction_labels"] for s in group)),
+                         "flag": "possible_overthinking" if group_name == "routine" and effort in HIGH_EFFORTS
+                         and spend > 0 else ""})
+    return {"efforts": efforts, "cells": rows}
+
+
+def _resolved(group, corrections_for):
+    _attach_sequences([s for s in group if not s["sequence"]], corrections_for)
+    return [s for s in group if session_outcome(s["turns"], s["sequence"], s["pending"])
+            in ("accepted", "recovered")]
+
+
+def _headlines(sessions, months, area_names, economics, cells, tier_prices, outcomes, today="",
+               effort=None, corrections_for=None):
     """Deterministic, evidence-backed statements; each names the module that supports it."""
     cards = []
+    buckets = {b["outcome"]: b for b in outcomes["buckets"]}
+    resolved_n = buckets["accepted"]["sessions"] + buckets["recovered"]["sessions"]
+    if not outcomes["few_samples"] and resolved_n and buckets["ended_on_pushback"]["sessions"]:
+        resolved_cost = (buckets["accepted"]["spend"] + buckets["recovered"]["spend"]) / resolved_n
+        ended = buckets["ended_on_pushback"]
+        cards.append({"key": "cost_per_resolved", "kind": "neutral", "target": "outcomes",
+                      "cost": resolved_cost, "sessions": resolved_n,
+                      "ended_cost": ended["spend"] / ended["sessions"]})
+    complete = [m for m in months if not (today and today[:7] == m)]
+    if len(complete) >= 2:
+        last, before = complete[-1], complete[-2]
+        spend_last = sum(float(c or 0) for s in sessions for d, c in (s["row"].get("_day_cost") or {}).items()
+                         if str(d)[:7] == last)
+        spend_before = sum(float(c or 0) for s in sessions for d, c in (s["row"].get("_day_cost") or {}).items()
+                           if str(d)[:7] == before)
+        resolved_last = len(_resolved([s for s in sessions if s["start_month"] == last], corrections_for))
+        resolved_before = len(_resolved([s for s in sessions if s["start_month"] == before], corrections_for))
+        if spend_before > 0 and resolved_before >= MIN_RATE_SAMPLES:
+            spend_change = spend_last / spend_before - 1
+            resolved_change = resolved_last / resolved_before - 1
+            if spend_change >= 0.25 and resolved_change <= 0.05:
+                cards.append({"key": "value_flat", "kind": "warn", "target": "outcomes", "month": last,
+                              "previous_month": before, "spend_change": spend_change,
+                              "resolved_change": resolved_change})
+    if effort:
+        overthinking = [c for c in effort["cells"] if c["flag"] == "possible_overthinking"]
+        spend = sum(c["spend"] for c in overthinking)
+        if spend >= 1:
+            cards.append({"key": "effort_routine", "kind": "warn", "target": "sizing", "spend": spend,
+                          "sessions": sum(c["sessions"] for c in overthinking)})
     current = months[-1] if months else ""
     previous = months[-2] if len(months) > 1 else ""
     if current and previous:
@@ -457,3 +539,71 @@ def _headlines(sessions, months, area_names, economics, cells, tier_prices, outc
     order = {"warn": 0, "good": 1, "neutral": 2}
     cards.sort(key=lambda card: order[card["kind"]])
     return cards[:MAX_HEADLINES]
+
+
+MAX_DRILL_SESSIONS = 50
+DRILL_FILTERS = ("month", "area", "work_type", "complexity", "tier", "effort", "outcome", "model", "model_runtime")
+
+
+def find_sessions(rows, labels, key_for, areas, output_price, filters, months=6, runtime="", project="",
+                  corrections_for=None, pending_keys=None, limit=MAX_DRILL_SESSIONS):
+    """Sessions behind one Work module cell, ranked by spend; same windowing and labels as the aggregates.
+
+    ``month`` selects sessions active in that month (as allocation and workstreams count them);
+    every other filter applies to sessions started in the selected period (as the other modules do).
+    """
+    area_names = [a["name"] for a in areas]
+    tiers = price_tiers(rows, output_price)
+    sessions, _runtimes, _projects = _prepare_sessions(
+        rows, labels, key_for, area_names, tiers, runtime, project, pending_keys)
+    all_months = _window_months(sessions, months)
+    month = filters.get("month") or ""
+    if month:
+        candidates = [s for s in sessions if month in all_months and month in _session_months(s)]
+    else:
+        window = set(all_months)
+        candidates = [s for s in sessions if s["start_month"] in window]
+    groups = dict(COMPLEXITY_GROUPS)
+    matched = []
+    for s in candidates:
+        if filters.get("area") and s["area"] != filters["area"]:
+            continue
+        if filters.get("work_type") and (s["work_type"] or "") != filters["work_type"]:
+            continue
+        if filters.get("complexity") and s["complexity"] not in groups.get(filters["complexity"], ()):
+            continue
+        if filters.get("tier") and s["tier"] != filters["tier"]:
+            continue
+        if filters.get("effort") and s["effort"] != filters["effort"]:
+            continue
+        if filters.get("model") and (s["model"] != filters["model"]
+                                     or (s["row"].get("runtime") or "") != filters.get("model_runtime", "")):
+            continue
+        matched.append(s)
+    _attach_sequences(matched, corrections_for)
+    if filters.get("outcome"):
+        matched = [s for s in matched
+                   if session_outcome(s["turns"], s["sequence"], s["pending"]) == filters["outcome"]]
+    matched.sort(key=lambda s: (-_cost(s), s["row"].get("last") or ""))
+    return {
+        "total": len(matched),
+        "spend": round(sum(_cost(s) for s in matched), 6),
+        "truncated": len(matched) > limit,
+        "sessions": [{
+            "id": s["row"].get("id") or "",
+            "title": str(s["row"].get("session_name") or s["row"].get("title") or "")[:90],
+            "runtime": s["row"].get("runtime") or "",
+            "project": s["row"].get("project") or "",
+            "start": s["row"].get("start") or "",
+            "last": s["row"].get("last") or "",
+            "cost": round(_cost(s), 6),
+            "turns": s["turns"],
+            "model": s["model"],
+            "area": s["area"],
+            "work_type": s["work_type"],
+            "complexity": s["complexity"],
+            "outcome": session_outcome(s["turns"], s["sequence"], s["pending"]),
+            "corrections": s["corrections"],
+            "labeled_turns": s["correction_labels"],
+        } for s in matched[:limit]],
+    }

@@ -116,6 +116,8 @@ from token_meter.services.git_delivery import GitDeliveryLedger, GitDeliveryServ
 from token_meter.services import work_insights as _work
 from token_meter.domain.work import build_work_insights as _domain_build_work_insights
 from token_meter.domain.work import is_child_row as _work_is_child_row
+from token_meter.domain.work import find_sessions as _domain_find_sessions
+from token_meter.domain.work import DRILL_FILTERS as _domain_drill_filters
 from token_meter.models.catalog import (
     ANTHROPIC_PRICE as CLAUDE_PRICE,
     BUILTIN_MODEL_PRICE_HISTORY as _CANONICAL_BUILTIN_MODEL_PRICE_HISTORY,
@@ -4520,6 +4522,12 @@ def codex_user_turns(objs, default_model=None):
             if payload["message"].strip():
                 context = payload["message"].strip()[-USER_TURN_CONTEXT_CHARS:]
             continue
+        if payload.get("type") == "message" and payload.get("role") == "assistant":
+            # Current Codex rollouts carry assistant text only as response_item messages.
+            said = text_from_content(payload.get("content")).strip()
+            if said:
+                context = said[-USER_TURN_CONTEXT_CHARS:]
+            continue
         if payload.get("type") == "user_message":
             event_turns.append({"ts": ts, "text": payload.get("message") or "",
                                 "model": current_model, "context": context})
@@ -7576,6 +7584,78 @@ def work_session_tags(source_id):
     }
 
 
+def _work_rows_and_service():
+    """Rows with salted public project labels, plus the service when enabled."""
+    labels = {}
+
+    def public_project(value):
+        key = str(value or "")
+        if key not in labels:
+            labels[key] = delivery_project_label(key) or "Other local sessions"
+        return labels[key]
+
+    if _xsess.get("data") is None:
+        cross_session()
+    rows = tuple(dict(row, project=public_project(row.get("project")))
+                 for row in (_xsess.get("internal_rows") or ()))
+    service = work_insights_service() if work_insights_settings()["enabled"] else None
+    return rows, service
+
+
+WORK_DRILL_ENUMS = {
+    "work_type": set(_work.WORK_TYPES) | {"unclear"},
+    "complexity": {"routine", "everyday", "complex"},
+    "tier": {"light", "standard", "premium"},
+    "effort": {"low", "medium", "high", "xhigh", "max", "ultra"},
+    "outcome": {"single_shot", "accepted", "recovered", "ended_on_pushback", "unclear", "pending"},
+}
+
+
+def work_sessions_state(query):
+    """Bounded list of sessions behind one Work module cell (allowlisted fields only)."""
+    def one(name):
+        values = query.get(name) or [""]
+        return str(values[0] or "")[:240] if len(values) == 1 else None
+
+    try:
+        months = int(one("months") or "6")
+    except ValueError:
+        months = -1
+    if months not in (3, 6, 12, 0):
+        return {"ok": False, "error": "Choose a supported period."}, 400
+    settings = work_insights_settings()
+    filters = {}
+    for name in _domain_drill_filters:
+        value = one(name)
+        if value is None:
+            return {"ok": False, "error": "Use each filter once."}, 400
+        if value:
+            filters[name] = value
+    if "month" in filters and not re.fullmatch(r"\d{4}-\d{2}", filters["month"]):
+        return {"ok": False, "error": "Choose a valid month."}, 400
+    if "area" in filters and filters["area"] not in (
+            [a["name"] for a in settings["areas"]] + ["Unclear", "Pending"]):
+        return {"ok": False, "error": "Area was not found."}, 404
+    for name, allowed in WORK_DRILL_ENUMS.items():
+        if name in filters and filters[name] not in allowed:
+            return {"ok": False, "error": "Choose a supported filter."}, 400
+    if "model" in filters and "model_runtime" not in filters:
+        filters["model_runtime"] = ""
+    runtime, project = one("runtime") or "", one("project") or ""
+    rows, service = _work_rows_and_service()
+    if project and not any((row.get("project") or "") == project for row in rows):
+        return {"ok": False, "error": "Project was not found."}, 404
+    result = _domain_find_sessions(
+        rows, service.snapshot() if service else {},
+        service.session_key if service else (lambda _row_id: ""),
+        settings["areas"], _work_output_price, filters, months=months,
+        runtime=runtime[:40], project=project,
+        corrections_for=service.session_corrections if service else None,
+        pending_keys=service.pending_session_keys() if service else None,
+    )
+    return {"ok": True, "filters": filters, **result}, 200
+
+
 def work_insights_state(months="6", runtime="", project=""):
     """Build the bounded Work payload from cached summaries and content-free labels."""
     try:
@@ -10447,6 +10527,9 @@ class H(BaseHTTPRequestHandler):
                 (query.get("runtime") or [""])[0],
                 (query.get("project") or [""])[0],
             )
+            self._send(json.dumps(payload), "application/json", status=status)
+        elif req_path == "/work/sessions":
+            payload, status = work_sessions_state(parse_qs(parsed.query, keep_blank_values=True))
             self._send(json.dumps(payload), "application/json", status=status)
         elif req_path == "/work-insights/status":
             self._send(json.dumps({"ok": True, "status": work_insights_status(),

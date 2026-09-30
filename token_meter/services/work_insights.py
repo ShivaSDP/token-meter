@@ -41,6 +41,11 @@ LATENCY_DRIFT_FACTOR = 3.0
 LATENCY_WINDOW = 10
 ACTIVE_WINDOW_S = 600
 UNCLEAR_CONFIDENCE = 0.5
+# Per-question Unclear cutoffs, from the live-label audit (work type is right far more often than 0.5 implies).
+UNCLEAR_BY_QUESTION = {"work_type": 0.35, "area": 0.5, "correction": 0.5}
+# Bump when prompt wording, options, or turn selection changes; stale labels are shown until relabeled.
+PROMPT_VERSION = "p2"
+MIN_OPENER_WORDS = 3
 MIN_GAP_S = 0.25
 NUM_CTX = 4_096
 KEEP_ALIVE = "2m"
@@ -55,13 +60,13 @@ MIN_AREAS, MAX_AREAS = 2, 8
 MAX_AREA_NAME, MAX_AREA_DESCRIPTION = 40, 160
 
 WORK_TYPES = {
-    "debug": "diagnosing or fixing a failure, bug, or unexpected behavior",
+    "debug": "diagnosing or fixing a failure, bug, install or setup error, or unexpected behavior",
     "feature": "building new functionality or changing product behavior or design",
     "refactor": "restructuring, cleanup, or renaming without changing behavior",
     "docs": "writing or editing documentation, posts, slides, messages, or other prose",
     "explore": "understanding, explaining, researching, or planning without making changes",
     "review": "reviewing, testing, evaluating, or verifying existing work",
-    "ops": "git, release, install, environment, configuration, or process control",
+    "ops": "running git, release, or install commands, or machine upkeep, without changing code",
     "other": "a non-software request, such as personal, financial, or general questions",
 }
 TURN_TYPES = {
@@ -84,7 +89,7 @@ DEFAULT_AREAS = (
     {"name": "Agents and tools", "description": "agent workflows, skills, plugins, automation, and developer tooling"},
     {"name": "Writing and publishing", "description": "blogs, posts, slides, reports, documentation, and media"},
     {"name": "Research and evaluation", "description": "experiments, benchmarks, papers, and model evaluation"},
-    {"name": "Operations and setup", "description": "installs, environments, git, releases, and machine maintenance"},
+    {"name": "Operations and setup", "description": "machine and environment upkeep not tied to a product codebase"},
     {"name": "Personal", "description": "personal, financial, family, or non-work questions"},
 )
 
@@ -110,7 +115,9 @@ _CITATION_RE = re.compile(
     r"|<image\b[^>]*>(?:</image>)?|<system-reminder>.*?(?:</system-reminder>|$)",
     re.S,
 )
-_FILES_WRAPPER_RE = re.compile(r"^\s*# (?:Files mentioned by the user|Context from my IDE setup):.*?## My request(?: for Codex)?:\s*", re.S)
+# Runtime wrappers ("# Files mentioned by the user:", "# In app browser:", "# Chrome tabs:", ...) that end in the request.
+_FILES_WRAPPER_RE = re.compile(r"^\s*# [^\n]{1,60}:[ \t]*\n.*?## My request(?: for Codex)?:\s*", re.S)
+_ATTACHMENT_REF_RE = re.compile(r"\[(?:Image|File|Pasted text) #\d+[^\]]*\]")
 _LOG_LINE_RE = re.compile(r'(^\s{4,}\S|^\s*at |Traceback|^\s*File "|^\d{4}-\d\d-\d\d|[{}\[\];<>=]{3,}|^\s*[\w./-]+:\d+|^\$ |^\s*[|│])')
 _OUTLINE_RE = re.compile(r"^\s*(#{1,6}\s|[-*•]\s|\d+[.)]\s)")
 
@@ -130,6 +137,7 @@ class ClassifierError(Exception):
 
 def clean_text(text):
     text = _FILES_WRAPPER_RE.sub("", str(text or ""))
+    text = _ATTACHMENT_REF_RE.sub("", text)
     return _CITATION_RE.sub("", text).strip()
 
 
@@ -169,15 +177,28 @@ _INJECTED_PREFIXES = (
     "<task-notification>", "<command-", "<local-command", "<bash-", "<user-prompt-submit-hook>",
     "<recommended_plugins>", "<environment_context>", "<heartbeat>", "<subagent_notification>",
     "<turn_aborted>", "<skill>", "<codex_delegation>", "# AGENTS.md", "<system-reminder>",
+    "This session is being continued from a previous conversation",
 )
 
 
 def prepare_text(text):
     """Return cleaned, bounded text, or '' for runtime-injected (non-human) messages."""
     cleaned = clean_text(text)
-    if cleaned.startswith(_INJECTED_PREFIXES):
+    if cleaned.startswith(_INJECTED_PREFIXES) or not re.search(r"[A-Za-z]{2}", cleaned):
+        # Injected wrappers, and upload- or image-only turns with no words of their own.
         return ""
     return skeleton(cleaned)
+
+
+def is_substantive(text):
+    return len(re.findall(r"[A-Za-z0-9']+", text)) >= MIN_OPENER_WORDS
+
+
+def question_tags(settings):
+    """Expected stored tag per question: prompt version, plus the area taxonomy for areas."""
+    tags = {name: PROMPT_VERSION for name in ("work_type", "complexity", "correction", "turn")}
+    tags["area"] = f"{PROMPT_VERSION}:{taxonomy_hash(settings['areas'])}"
+    return tags
 
 
 def normalize_areas(values):
@@ -750,9 +771,9 @@ class WorkInsightsService:
 
     # ---- intake (called from the parse hook; must stay cheap)
 
-    def _needs(self, turn_key, question, taxonomy, now):
+    def _needs(self, turn_key, question, tags, now):
         stored = self._labeled.get((turn_key, question))
-        if stored is not None and (question != "area" or stored == taxonomy):
+        if stored is not None and stored == tags.get(question):
             return False
         failure = self._failures.get((turn_key, question))
         if failure and (failure[1] or failure[0] > now):
@@ -780,24 +801,27 @@ class WorkInsightsService:
         if horizon and newest and newest < now - horizon * 86400:
             self._remove_backlog(session_key)
             return 0
-        taxonomy = taxonomy_hash(settings["areas"])
+        tags = question_tags(settings)
         active = bool(newest and newest >= now - ACTIVE_WINDOW_S)
-        items, opener_seen = [], False
+        prepared = [prepare_text(turn.get("text") or "") for turn in turns]
+        # Label the session from its first substantive request, not a greeting.
+        opener_index = next((i for i, text in enumerate(prepared) if text and is_substantive(text)),
+                            next((i for i, text in enumerate(prepared) if text), None))
+        items = []
         retry_count, retry_at = 0, None
         for ordinal, turn in enumerate(turns):
-            text = prepare_text(turn.get("text") or "")
-            if not text:
+            text = prepared[ordinal]
+            if not text or opener_index is None or ordinal < opener_index:
                 continue
             turn_key = self._turn_key(row_id, ordinal)
-            opener = not opener_seen
-            opener_seen = True
+            opener = ordinal == opener_index
             questions = SESSION_QUESTIONS if opener else TURN_QUESTIONS
             waiting = [f[0] for f in (self._failures.get((turn_key, q)) for q in questions)
                        if f and not f[1] and f[0] > now]
             if waiting:
                 retry_count += 1
                 retry_at = min(waiting) if retry_at is None else min(retry_at, *waiting)
-            wanted = tuple(q for q in questions if self._needs(turn_key, q, taxonomy, now))
+            wanted = tuple(q for q in questions if self._needs(turn_key, q, tags, now))
             if not wanted:
                 continue
             context = clean_text(turn.get("context") or "")[-CONTEXT_CHARS:]
@@ -999,10 +1023,10 @@ class WorkInsightsService:
             self._set(STATE_THROTTLED, reason, THROTTLE_WAIT_S)
             return THROTTLE_WAIT_S
         self._set(STATE_RUNNING)
-        taxonomy = taxonomy_hash(settings["areas"])
+        tags = question_tags(settings)
         retry_scheduled = False
         for question_name in item.questions:
-            if not self._needs(item.turn_key, question_name, taxonomy, self.clock()):
+            if not self._needs(item.turn_key, question_name, tags, self.clock()):
                 continue
             question = question_for(question_name, settings)
             orders = (False, True) if question["type"] == "choice" else (False,)
@@ -1032,7 +1056,7 @@ class WorkInsightsService:
             self.loaded = True
             if question_name == "complexity":
                 value = COMPLEXITY_KEYS[int(value)]
-            if not self._store(item, question_name, value, confidence, taxonomy, generation):
+            if not self._store(item, question_name, value, confidence, tags[question_name], generation):
                 return STORAGE_RETRY_S
         self._finish_item(item)
         self.transport_failures = 0
@@ -1049,18 +1073,18 @@ class WorkInsightsService:
         else:
             self.baseline += LATENCY_BASELINE_ALPHA * (seconds - self.baseline)
 
-    def _store(self, item, question, value, confidence, taxonomy, generation):
+    def _store(self, item, question, value, confidence, tag, generation):
         with self.write_lock:
             if generation != self.generation:
                 return True
             try:
                 self.ledger.record_label(item.turn_key, question, item.session_key, value, confidence,
-                                         taxonomy if question == "area" else "", self.model_digest, self.clock())
+                                         tag, self.model_digest, self.clock())
             except sqlite3.Error:
                 self._set(STATE_STORAGE, "ledger_write_failed", STORAGE_RETRY_S)
                 return False
         with self.lock:
-            self._labeled[(item.turn_key, question)] = taxonomy if question == "area" else ""
+            self._labeled[(item.turn_key, question)] = tag
             self._failures.pop((item.turn_key, question), None)
             self.labels_version += 1
         return True
@@ -1152,13 +1176,17 @@ class WorkInsightsService:
         }
 
     def snapshot(self):
-        """Return {session_key: labels} for aggregation; cached by labels_version."""
+        """Return {session_key: labels} for aggregation; cached by labels_version.
+
+        Labels from the current prompt version win; older ones are shown until relabeled.
+        """
         version = self.labels_version
         cached = self._snapshot
         if cached and cached[0] == version:
             return cached[1]
         settings = self.settings_provider()
-        taxonomy = taxonomy_hash(settings["areas"])
+        tags = question_tags(settings)
+        area_hash = taxonomy_hash(settings["areas"])
         sessions = {}
         if self.ledger is None:
             return sessions
@@ -1166,27 +1194,51 @@ class WorkInsightsService:
             rows, terminal = self.ledger.session_labels()
         except sqlite3.Error:
             return sessions
-        turn_values = {}
+
+        def usable(row):
+            if row["question"] == "area":
+                # Current tag, or a pre-versioning label for the same areas.
+                return row["taxonomy"] in (tags["area"], area_hash)
+            return True
+
+        def cutoff(question):
+            return UNCLEAR_BY_QUESTION.get(question, UNCLEAR_CONFIDENCE)
+
+        best, turns = {}, {}
         for row in rows:
+            if not usable(row):
+                continue
+            current = row["taxonomy"] == tags.get(row["question"])
+            key = (row["session_key"], row["question"]) if row["question"] != "correction" else row["turn_key"]
+            target = turns if row["question"] == "correction" else best
+            if key not in target or (current and not target[key][0]):
+                target[key] = (current, row)
+        openers = {row["turn_key"] for (current, row) in best.values() if current and row["question"] == "work_type"}
+        for (_session, question), (_current, row) in best.items():
             entry = sessions.setdefault(row["session_key"], {})
-            unclear = float(row["confidence"]) < UNCLEAR_CONFIDENCE
-            if row["question"] == "correction":
-                entry["correction_labels"] = entry.get("correction_labels", 0) + 1
-                turn_values[row["turn_key"]] = None if unclear else row["value"] == "True"
-                if row["value"] == "True" and not unclear:
-                    entry["corrections"] = entry.get("corrections", 0) + 1
-            elif row["question"] == "area":
-                if row["taxonomy"] == taxonomy:
-                    entry["area"] = "Unclear" if unclear else row["value"]
-            elif row["question"] == "complexity":
+            unclear = float(row["confidence"]) < cutoff(question)
+            if question == "area":
+                entry["area"] = "Unclear" if unclear else row["value"]
+            elif question == "complexity":
                 entry["complexity"] = row["value"]
-            elif row["question"] == "work_type":
+            elif question == "work_type":
                 entry["work_type"] = "unclear" if unclear else row["value"]
+        turn_values = {}
+        for turn_key, (_current, row) in turns.items():
+            if turn_key in openers:
+                continue  # A stale correction on what is now the session's opening request.
+            entry = sessions.setdefault(row["session_key"], {})
+            unclear = float(row["confidence"]) < cutoff("correction")
+            entry["correction_labels"] = entry.get("correction_labels", 0) + 1
+            turn_values[turn_key] = None if unclear else row["value"] == "True"
+            if row["value"] == "True" and not unclear:
+                entry["corrections"] = entry.get("corrections", 0) + 1
         for row in terminal:
             entry = sessions.setdefault(row["session_key"], {})
             if row["question"] == "correction":
-                entry["correction_labels"] = entry.get("correction_labels", 0) + 1
-                turn_values[row["turn_key"]] = None
+                if row["turn_key"] not in turns:
+                    entry["correction_labels"] = entry.get("correction_labels", 0) + 1
+                    turn_values[row["turn_key"]] = None
             elif row["question"] in ("area", "work_type"):
                 entry.setdefault(row["question"], "Unclear" if row["question"] == "area" else "unclear")
         self._turn_values = turn_values
@@ -1194,13 +1246,22 @@ class WorkInsightsService:
         return sessions
 
     def pending_session_keys(self):
-        """Session keys that still have queued or backlogged work (content-free)."""
+        """Sessions with never-labeled work still queued or backlogged (content-free).
+
+        Relabeling under a newer prompt version does not make a session pending: its
+        existing labels keep classifying it until they are replaced.
+        """
         with self.lock:
-            keys = {item.session_key for item in self.queue}
+            queued = [(item.session_key, item.turn_key, item.questions) for item in self.queue]
+        # Outcomes depend only on follow-up pushback labels, so only those make a session pending.
+        keys = {session for session, turn, questions in queued
+                if "correction" in questions and (turn, "correction") not in self._labeled}
         if self.ledger is not None:
+            labeled = self.snapshot()
             try:
                 with self.ledger._connect() as connection:
-                    keys.update(r["session_key"] for r in connection.execute("SELECT session_key FROM work_backlog"))
+                    keys.update(r["session_key"] for r in connection.execute("SELECT session_key FROM work_backlog")
+                                if not labeled.get(r["session_key"], {}).get("correction_labels"))
             except sqlite3.Error:
                 pass
         return keys

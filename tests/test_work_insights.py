@@ -105,6 +105,57 @@ class TextPreparationTests(unittest.TestCase):
         self.assertEqual(W.prepare_text(raw), "fix the chart")
         self.assertEqual(W.clean_text("ok <oai-mem-citation>MEMORY.md:1</oai-mem-citation>"), "ok")
 
+    def test_wrappers_greetings_and_attachment_only_turns(self):
+        wrapped = "# In app browser:\n- tab one\n\n## My request for Codex:\nmake the header sticky"
+        self.assertEqual(W.prepare_text(wrapped), "make the header sticky")
+        self.assertEqual(W.prepare_text("# Files pasted by the user:\n## a.png: /x\n## My request:\nfix it now"), "fix it now")
+        self.assertEqual(W.prepare_text("[Image #1]"), "")
+        self.assertEqual(W.prepare_text("This session is being continued from a previous conversation that ran out"), "")
+        self.assertFalse(W.is_substantive("hi"))
+        self.assertTrue(W.is_substantive("add a dark mode"))
+
+    def test_session_is_labeled_from_the_first_substantive_turn(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        service, values, _ = make_service(tmp.name)
+        service.observe("s1", turns("hi", "please add a dark mode toggle", "looks wrong"))
+        by_key = {item.turn_key: item.questions for item in service.queue}
+        self.assertEqual(by_key[service._turn_key("s1", 1)], W.SESSION_QUESTIONS)
+        self.assertEqual(by_key[service._turn_key("s1", 2)], W.TURN_QUESTIONS)
+        self.assertNotIn(service._turn_key("s1", 0), by_key)
+
+    def test_current_prompt_labels_win_and_stale_ones_are_relabeled(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        service, values, clock = make_service(tmp.name)
+        key = service.session_key("s1")
+        old_opener, new_opener = service._turn_key("s1", 0), service._turn_key("s1", 1)
+        service.ledger.record_label(old_opener, "work_type", key, "ops", 0.9, "", "d", clock.now)
+        service.ledger.record_label(new_opener, "correction", key, "True", 0.9, "", "d", clock.now)
+        service._labeled, service._failures = service.ledger.labeled_keys()
+        service.labels_version += 1
+        self.assertEqual(service.snapshot()[key]["work_type"], "ops")
+        added = service.observe("s1", turns("hi", "please add a dark mode toggle"))
+        self.assertEqual(added, 1)
+        service.ledger.record_label(new_opener, "work_type", key, "feature", 0.9, W.PROMPT_VERSION, "d", clock.now)
+        service.labels_version += 1
+        entry = service.snapshot()[key]
+        self.assertEqual(entry["work_type"], "feature")
+        self.assertNotIn("corrections", entry)
+
+    def test_work_type_uses_a_lower_unclear_cutoff_than_area(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        service, values, clock = make_service(tmp.name)
+        key = service.session_key("s1")
+        tags = W.question_tags(values)
+        turn = service._turn_key("s1", 0)
+        service.ledger.record_label(turn, "work_type", key, "debug", 0.4, tags["work_type"], "d", clock.now)
+        service.ledger.record_label(turn, "area", key, "Personal", 0.4, tags["area"], "d", clock.now)
+        service.labels_version += 1
+        entry = service.snapshot()[key]
+        self.assertEqual((entry["work_type"], entry["area"]), ("debug", "Unclear"))
+
     def test_skips_injected_messages(self):
         for text in ("<task-notification>done</task-notification>", "# AGENTS.md instructions",
                      "<environment_context>cwd</environment_context>"):
@@ -298,7 +349,7 @@ class ServiceTests(unittest.TestCase):
         service, values, clock = make_service(self.tmp.name, {"rate_per_minute": 10})
         stamps = []
         FakeClient.responder = lambda prompt: stamps.append(clock.now) or jet_response("A")
-        service.observe("s1", turns("a"))
+        service.observe("s1", turns("please fix the chart"))
         self.assertEqual(service.step(), 0.0)
         self.assertEqual(len(stamps), 5)
         gaps = [b - a for a, b in zip(stamps, stamps[1:])]
@@ -358,8 +409,8 @@ class ServiceTests(unittest.TestCase):
     def test_overflow_is_credited_to_the_session_it_came_from(self):
         service, values, clock = make_service(self.tmp.name)
         with mock.patch.object(W, "QUEUE_LIMIT", 2):
-            service.observe("old", [{"ts": clock.now - 5000 + i, "text": f"t{i}", "model": "m"} for i in range(2)])
-            service.observe("live", [{"ts": clock.now - 10 + i, "text": f"l{i}", "model": "m"} for i in range(2)])
+            service.observe("old", [{"ts": clock.now - 5000 + i, "text": f"please do old task {i}", "model": "m"} for i in range(2)])
+            service.observe("live", [{"ts": clock.now - 10 + i, "text": f"please do live task {i}", "model": "m"} for i in range(2)])
         with service.ledger._connect() as connection:
             rows = dict(connection.execute("SELECT session_key, pending FROM work_backlog").fetchall())
         self.assertEqual(rows, {service.session_key("old"): 2})
@@ -615,10 +666,24 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse(service.delete_pending)
         self.assertEqual(service.status()["reason"], "ledger_unavailable")
 
+    def test_relabeling_under_a_new_prompt_does_not_make_sessions_pending(self):
+        service, values, clock = make_service(self.tmp.name)
+        key = service.session_key("s1")
+        for ordinal in (0, 1):
+            question = "work_type" if ordinal == 0 else "correction"
+            service.ledger.record_label(service._turn_key("s1", ordinal), question, key,
+                                        "feature" if ordinal == 0 else "False", 0.9, "", "d", clock.now)
+        service._labeled, service._failures = service.ledger.labeled_keys()
+        service.labels_version += 1
+        self.assertGreater(service.observe("s1", turns("please add a dark mode", "thanks that works")), 0)
+        self.assertNotIn(key, service.pending_session_keys())
+        service.observe("s2", turns("please add a dark mode", "thanks that works"))
+        self.assertIn(service.session_key("s2"), service.pending_session_keys())
+
     def test_pending_sessions_are_not_classified(self):
         service, values, clock = make_service(self.tmp.name)
         with mock.patch.object(W, "QUEUE_LIMIT", 0):
-            service.observe("s1", turns("a", "b", "c"))
+            service.observe("s1", turns("please fix the chart", "still broken there", "now it works"))
         self.assertIn(service.session_key("s1"), service.pending_session_keys())
 
     def test_latency_baseline_adapts(self):
@@ -910,6 +975,81 @@ class OutcomeInsightTests(unittest.TestCase):
         self.assertEqual(trend["kind"], "good")
 
 
+class OperatingRhythmTests(unittest.TestCase):
+    AREAS = DomainTests.AREAS
+
+    def build(self, rows, labels, sequences):
+        prices = {"gpt-5.6": 10.0, "cheap": 1.0}
+        return domain.build_work_insights(rows, labels, lambda rid: rid, self.AREAS, lambda m, p: prices.get(m),
+                                          today="2026-09-30", corrections_for=lambda rid, n: sequences.get(rid, []))
+
+    def test_effort_grid_flags_high_effort_routine_work(self):
+        a, b = row("a", cost=8.0), row("b", cost=1.0)
+        a["reasoning_effort"], b["reasoning_effort"] = "xhigh", "low"
+        out = self.build([a, b], {"a": {"complexity": "routine"}, "b": {"complexity": "routine"}}, {})
+        effort = out["right_sizing"]["effort"]
+        self.assertEqual(effort["efforts"], ["low", "xhigh"])
+        flagged = [c for c in effort["cells"] if c["flag"]]
+        self.assertEqual([(c["complexity"], c["effort"], c["spend"]) for c in flagged], [("routine", "xhigh", 8.0)])
+        self.assertIn("effort_routine", [h["key"] for h in out["headlines"]])
+
+    def test_value_flat_uses_complete_months_only(self):
+        rows, labels, sequences = [], {}, {}
+        for i in range(24):
+            day = "2026-07-10" if i < 22 else "2026-08-10"
+            rows.append(row(f"j{i}", day=day, cost=1.0 if i < 22 else 30.0, turns_=3))
+            labels[f"j{i}"] = {"correction_labels": 2}
+            sequences[f"j{i}"] = [(1, False), (2, False)]
+        cards = self.build(rows, labels, sequences)["headlines"]
+        flat = next(c for c in cards if c["key"] == "value_flat")
+        self.assertEqual((flat["month"], flat["previous_month"]), ("2026-08", "2026-07"))
+        self.assertLess(flat["resolved_change"], 0)
+
+    def test_cost_per_resolved_needs_enough_labeled_sessions(self):
+        rows = [row(f"r{i}", cost=2.0, turns_=3) for i in range(25)]
+        labels = {f"r{i}": {"correction_labels": 2, "corrections": 1 if i < 5 else 0} for i in range(25)}
+        sequences = {f"r{i}": [(1, False), (2, True)] if i < 5 else [(1, False), (2, False)] for i in range(25)}
+        card = next(c for c in self.build(rows, labels, sequences)["headlines"] if c["key"] == "cost_per_resolved")
+        self.assertEqual((card["sessions"], card["cost"], card["ended_cost"]), (20, 2.0, 2.0))
+
+
+class DrillDownTests(unittest.TestCase):
+    AREAS = DomainTests.AREAS
+
+    def find(self, rows, labels, filters, sequences=None, **kwargs):
+        prices = {"gpt-5.6": 10.0, "cheap": 1.0, "mid": 4.0}
+        return domain.find_sessions(rows, labels, lambda rid: rid, self.AREAS, lambda m, p: prices.get(m),
+                                    filters, corrections_for=lambda rid, n: (sequences or {}).get(rid, []),
+                                    **kwargs)
+
+    def test_month_and_area_match_the_allocation_cell(self):
+        rows = [row("a", cost=5.0), row("b", cost=9.0), row("c", day="2026-08-01")]
+        labels = {"a": {"area": "Personal"}, "b": {"area": "Personal"}, "c": {"area": "Personal"}}
+        out = self.find(rows, labels, {"month": "2026-09", "area": "Personal"})
+        self.assertEqual([s["id"] for s in out["sessions"]], ["b", "a"])
+        self.assertEqual(out["spend"], 14.0)
+        self.assertEqual(set(out["sessions"][0]), {
+            "id", "title", "runtime", "project", "start", "last", "cost", "turns", "model", "area",
+            "work_type", "complexity", "outcome", "corrections", "labeled_turns"})
+
+    def test_outcome_model_and_limit_filters(self):
+        rows = [row(f"s{i}", cost=float(i), model="mid" if i % 2 else "gpt-5.6", turns_=3) for i in range(6)]
+        labels = {f"s{i}": {"work_type": "debug", "correction_labels": 2, "corrections": 1} for i in range(6)}
+        sequences = {f"s{i}": [(1, False), (2, True)] if i < 3 else [(1, True), (2, False)] for i in range(6)}
+        ended = self.find(rows, labels, {"outcome": "ended_on_pushback"}, sequences)
+        self.assertEqual({s["id"] for s in ended["sessions"]}, {"s0", "s1", "s2"})
+        mid = self.find(rows, labels, {"model": "mid", "model_runtime": "Codex"}, sequences)
+        self.assertEqual({s["id"] for s in mid["sessions"]}, {"s1", "s3", "s5"})
+        limited = self.find(rows, labels, {"work_type": "debug"}, sequences, limit=2)
+        self.assertEqual((limited["total"], len(limited["sessions"]), limited["truncated"]), (6, 2, True))
+
+    def test_complexity_group_and_tier(self):
+        rows = [row("a", model="gpt-5.6"), row("b", model="cheap"), row("c", model="mid")]
+        labels = {"a": {"complexity": "high_impact"}, "b": {"complexity": "complex"}, "c": {"complexity": "routine"}}
+        out = self.find(rows, labels, {"complexity": "complex", "tier": "premium"})
+        self.assertEqual([s["id"] for s in out["sessions"]], ["a"])
+
+
 class AppContractTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -995,6 +1135,15 @@ class SurfaceContractTests(unittest.TestCase):
         self.assertIn("cloud models are refused", self.page)
         self.assertIn("Token Meter stores labels, never text", self.page)
         self.assertIn("./scripts/setup-work-classifier", self.page)
+
+    def test_work_state_is_declared_before_the_initial_route_runs(self):
+        declaration = self.page.index("let WORK=null,workRequest=0")
+        drill = self.page.index("let workDrillRequest=0")
+        route = self.page.index("function applyHashRoute(){")
+        self.assertLess(declaration, route)
+        self.assertLess(drill, route)
+        self.assertIn("if(h.startsWith('work-sessions')){", self.page)
+        self.assertIn("#w-drawer.workDrawer{background:#0d1117;position:fixed;", self.page)
 
     def test_menu_bar_offers_pause_and_resume(self):
         for marker in ('"Pause work insights"', '"Resume work insights"', '/work-insights/pause"',
@@ -1087,6 +1236,23 @@ class AppIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertFalse(payload["ok"])
         self.assertNotIn("delete_failed", payload["error"])
+
+    def test_work_sessions_route_validates_filters(self):
+        rows = (row("a"),)
+        with mock.patch.object(meter, "TOKEN_METER_SETTINGS", self.settings), \
+                mock.patch.object(meter, "_work_service_instance", None), \
+                mock.patch.dict(meter._xsess, {"data": {"ok": True}, "internal_rows": rows}):
+            ok, status = meter.work_sessions_state({"months": ["6"], "work_type": ["debug"]})
+            self.assertEqual(status, 200)
+            self.assertEqual(ok["filters"], {"work_type": "debug"})
+            for bad in ({"months": ["7"]}, {"work_type": ["nope"]}, {"month": ["2026-9"]},
+                        {"outcome": ["x"]}, {"work_type": ["debug", "feature"]}):
+                self.assertEqual(meter.work_sessions_state(bad)[1], 400, bad)
+            self.assertEqual(meter.work_sessions_state({"area": ["Nowhere"]})[1], 404)
+            self.assertEqual(meter.work_sessions_state({"project": ["missing"]})[1], 404)
+            everything, _ = meter.work_sessions_state({"months": ["0"]})
+        self.assertEqual(everything["total"], 1)
+        self.assertNotIn("/", everything["sessions"][0]["project"])
 
     def test_post_routes_validate_over_http(self):
         with mock.patch.object(meter, "TOKEN_METER_SETTINGS", self.settings), \
