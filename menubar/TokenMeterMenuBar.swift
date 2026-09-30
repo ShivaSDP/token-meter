@@ -2361,10 +2361,17 @@ final class TokenMeterMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(softwareUpdate.actionToken, forHTTPHeaderField: "X-Token-Meter-Action")
         request.httpBody = body
-        snapshot.workInsightsPaused = duration != "resume"
-        refreshMenu()
-        URLSession.shared.dataTask(with: request) { [weak self] _, _, _ in
-            DispatchQueue.main.async { self?.refreshMenu() }
+        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+                if error == nil && (200..<300).contains(statusCode) {
+                    self.snapshot.workInsightsPaused = duration != "resume"
+                    self.refreshMenu()
+                } else {
+                    self.openWorkInsightsSettings()
+                }
+            }
         }.resume()
     }
 
@@ -2647,6 +2654,7 @@ if ProcessInfo.processInfo.environment["TOKEN_METER_MENUBAR_SMOKE"] == "1" {
         print(snapshot.outputSpeedLabel)
         print("active-title=\(activeTitle)")
         print("budget-state=\(budget?.compactLabel ?? "unconfigured") exceeded=\(budget?.anyExceeded == true)")
+        print("work-insights=\(snapshot.workInsightsEnabled ? (snapshot.workInsightsPaused ? "paused" : "active") : "off") state=\(snapshot.workInsightsState.isEmpty ? "none" : snapshot.workInsightsState)")
         print("title-metrics=\(TitleMetric.allCases.filter(savedMetrics.contains).map(\.title).joined(separator: ","))")
         print("quota-alerts=\(alertsEnabled ? "on" : "off") warn-at=\(alertThreshold)%")
         for provider in quotas {

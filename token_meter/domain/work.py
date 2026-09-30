@@ -22,10 +22,9 @@ WORK_TYPE_ORDER = ("debug", "feature", "refactor", "docs", "explore", "review", 
 
 
 def is_child_row(row):
-    return any(
-        isinstance(record, dict) and record.get("parent_id")
-        for record in row.get("_agent_records") or ()
-    )
+    """A row is a child run only when none of its agent records is a root (a parent keeps its children)."""
+    records = [r for r in row.get("_agent_records") or () if isinstance(r, dict)]
+    return bool(records) and all(r.get("parent_id") for r in records)
 
 
 def turn_days(row):
@@ -160,8 +159,10 @@ def build_work_insights(rows, labels, key_for, areas, output_price, months=6,
             group["turns"] += month_turns
             group["sessions"] += 1
             group["spend"] += month_spend
-            group["corrections"] += s["corrections"]
-            group["correction_labels"] += s["correction_labels"]
+            if s["start_month"] == month:
+                # Corrections are session totals; count them once, in the month the session started.
+                group["corrections"] += s["corrections"]
+                group["correction_labels"] += s["correction_labels"]
             if s["work_type"]:
                 group["work_types"][s["work_type"]] += 1
         total_turns = sum(g["turns"] for g in groups.values()) or 0

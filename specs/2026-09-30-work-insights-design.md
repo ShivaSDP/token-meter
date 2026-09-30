@@ -114,9 +114,10 @@ Answer readout, chosen from the evaluation below:
   Current-session items bypass the backlog queue but share the limit.
 - Manual pause from Settings, the Work page header, or the menu bar:
   1 hour, until tomorrow (local 06:00), or until resumed. The worker checks
-  before every request; the in-flight request (bounded by its timeout,
-  typically under 2 s) completes, then a `keep_alive: 0` request unloads the
-  model.
+  pause, enablement, and the rate limit before every model request, so a
+  session opener's calls are spaced rather than burst; the in-flight request
+  (bounded by its timeout, typically under 2 s) completes, then a
+  `keep_alive: 0` request unloads the model.
 - Automatic throttle, re-evaluated before each request. Any hit sets state
   `throttled` with a reason and waits 60 s:
   - load average per CPU above 0.75 (skipped where unavailable);
@@ -131,10 +132,10 @@ Answer readout, chosen from the evaluation below:
 | Connection refused, DNS, timeout | Transport | Circuit breaker: exponential backoff 5 s × 2ⁿ, cap 10 min, ±20% jitter. Probe `GET /api/version`. Items keep their attempt count. |
 | HTTP 404 or "model not found" | Setup | State `setup_needed` with reason `model_missing`; probe `/api/tags` every 60 s. |
 | HTTP 5xx, out of memory | Transport | Same backoff as transport. |
-| HTTP 400, no usable label in logprobs | Item | Attempt +1; retry after 1 min, 10 min, 1 h; after 3 attempts record terminal `unclassifiable` with a reason code. Shown as Unclear. |
+| HTTP 400, no usable label in logprobs | Item | Attempt +1; a content-free backlog row schedules a re-load after 1 min, 10 min, 1 h; after 3 attempts record terminal `unclassifiable` with a reason code. Shown as Unclear. |
 | Ledger I/O error | Storage | State `storage_error`; worker stops writing and retries every 5 min. Incompatible schema is moved aside and recreated, like the Git ledger. |
 | Worker exception | Internal | Supervisor loop logs a sanitized reason code (no text, no exception message), sleeps with backoff, restarts. |
-| Model digest changes | Version | New labels record the new digest; existing labels stay valid. Settings shows the version mix and offers "Relabel with current model". |
+| Model digest changes | Version | The digest is re-checked every 10 minutes and after settings changes. New labels record the new digest; existing labels stay valid. Relabeling with a new model is v2. |
 | Areas edited | Taxonomy | Area labels carry a taxonomy hash. Stale area labels count as Pending and are re-queued newest first. Work type and turn labels are unaffected. |
 
 Request timeouts: connect 2 s; read 10 s plus 1 s per 1,000 prompt characters,
@@ -178,10 +179,15 @@ reset to defaults), and "Delete all labels" with confirmation.
 
 ## Privacy
 
-- User-turn text exists only in process memory, only for unlabeled turns, only
-  while queued, and is sent only to the configured loopback Ollama URL.
-- The Ollama URL must be `http` with host `127.0.0.1`, `localhost`, or `::1`.
-  Redirects are refused.
+- User-turn text and the preceding assistant-reply tail (600 characters) exist
+  only in process memory, only for unlabeled turns, only while queued, and are
+  sent only to the configured loopback Ollama URL.
+- The Ollama URL must be `http` with host `127.0.0.1` or `::1`; `localhost`
+  is stored as `127.0.0.1`. Redirects are refused. Models whose Ollama entry
+  reports a remote host or a cloud tag are refused (`remote_model`).
+- Turn keys are salted hashes of session identity and position only, never of
+  text, so stored keys cannot confirm guessed prompts.
+- The service and its ledger are not created until the feature is enabled.
 - The ledger stores salted keys, enum labels, confidences, model digest,
   taxonomy hash, timestamps, and reason codes. Area names are user settings.
 - Logs and API errors use reason codes only.

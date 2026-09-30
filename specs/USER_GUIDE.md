@@ -222,7 +222,9 @@ Work is off until you turn on **Settings → Work insights** and run
 `./scripts/setup-work-classifier` with Ollama running. A local Jet decision
 model then labels each session's opening request with an area (editable, up to
 eight), a work type, and a complexity level, and asks of each follow-up turn
-whether you pushed back on the previous work.
+whether you pushed back on the previous work. For that question it also reads
+the last 600 characters of the assistant reply before your turn. Tool output
+and files are never read, and cloud-proxied Ollama models are refused.
 
 - **Monthly activity allocation** shows each month's user turns, sessions, or
   spend by area. Pending means not labeled yet; Unclear means the model was

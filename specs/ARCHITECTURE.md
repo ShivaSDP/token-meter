@@ -295,9 +295,11 @@ No public HTTP, native, MCP, or telemetry projection may contain:
 - local trace/database paths or raw exceptions;
 - unbounded trace rows or provider-controlled payloads.
 
-Work insights read typed user-turn text only in process memory, only when the
-user enables them, and send it only to a loopback (`127.0.0.1`, `localhost`,
-`::1`) plain-HTTP Ollama endpoint with redirects refused. The ledger, logs, and
+Work insights read typed user-turn text and the preceding assistant-reply tail
+only in process memory, only when the user enables them, and send them only to
+a loopback (`127.0.0.1`, `::1`; `localhost` pinned to `127.0.0.1`) plain-HTTP
+Ollama endpoint with redirects refused; remote or cloud Ollama models are
+rejected. The ledger, logs, and
 projections carry labels and reason codes only; `/work` and session tags are
 allowlisted aggregates and enums.
 

@@ -21,7 +21,7 @@ import time
 import urllib.parse
 
 
-LEDGER_SCHEMA_VERSION = 1
+LEDGER_SCHEMA_VERSION = 2
 QUEUE_LIMIT = 256
 QUEUE_LOW_WATER = 64
 REFILL_BATCH = 4
@@ -44,6 +44,9 @@ UNCLEAR_CONFIDENCE = 0.5
 MIN_GAP_S = 0.25
 NUM_CTX = 4_096
 KEEP_ALIVE = "2m"
+DIGEST_RECHECK_S = 600
+REFILL_INTERVAL_S = 10
+LATENCY_BASELINE_ALPHA = 0.02
 
 DEFAULT_MODEL = "token-meter-jet"
 DEFAULT_URL = "http://127.0.0.1:11434"
@@ -205,7 +208,9 @@ def validate_ollama_url(value):
     if parsed.path not in ("", "/"):
         raise ValueError("The Ollama URL must not include a path.")
     host = (parsed.hostname or "").lower()
-    if host != "localhost":
+    if host == "localhost":
+        host = "127.0.0.1"
+    else:
         try:
             if not ipaddress.ip_address(host).is_loopback:
                 raise ValueError
@@ -367,6 +372,13 @@ def read_answer(responses, question, labels_keys):
 
 # ---------------------------------------------------------------- Ollama client
 
+def is_remote_model(entry):
+    """True for Ollama entries that proxy inference to another host (for example cloud models)."""
+    names = [str(entry.get(key) or "").lower() for key in ("name", "model")]
+    return bool(entry.get("remote_host") or entry.get("remote_model")
+                or any(re.search(r"(^|[-:])cloud($|[-:])", name) for name in names))
+
+
 class OllamaClient:
     """Minimal loopback client. Raises ClassifierError with bounded reason codes."""
 
@@ -412,6 +424,8 @@ class OllamaClient:
         for model in (tags.get("models") or []) if isinstance(tags, dict) else []:
             names = {str(model.get("name") or ""), str(model.get("model") or "")}
             if self.model in names or f"{self.model}:latest" in names:
+                if is_remote_model(model):
+                    raise ClassifierError("setup", "remote_model")
                 return str(model.get("digest") or "")[:24] or "unknown"
         raise ClassifierError("setup", "model_missing")
 
@@ -461,9 +475,11 @@ class LabelLedger:
         if directory:
             os.makedirs(directory, exist_ok=True)
         with self._connect() as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            stale = 0 < version < LEDGER_SCHEMA_VERSION
             for table, expected in _TABLES.items():
                 columns = tuple(row[1] for row in connection.execute(f'PRAGMA table_info("{table}")'))
-                if columns and columns != expected:
+                if columns and (stale or columns != expected):
                     for name in _TABLES:
                         connection.execute(f'DROP TABLE IF EXISTS "{name}"')
                     break
@@ -542,21 +558,24 @@ class LabelLedger:
             return {r["model"]: int(r["n"]) for r in connection.execute(
                 "SELECT model, COUNT(*) AS n FROM work_labels GROUP BY model")}
 
-    def upsert_backlog(self, session_key, newest_ts, pending, now):
+    def upsert_backlog(self, session_key, newest_ts, pending, eligible_at):
+        """Record content-free pending work; ``added_at`` holds the earliest refill time."""
         with self._connect() as connection:
             connection.execute(
                 """INSERT INTO work_backlog VALUES (?, ?, ?, ?) ON CONFLICT (session_key)
-                   DO UPDATE SET newest_ts = excluded.newest_ts, pending = excluded.pending""",
-                (session_key, int(newest_ts or 0), int(pending), int(now)))
+                   DO UPDATE SET newest_ts = MAX(newest_ts, excluded.newest_ts),
+                   pending = excluded.pending, added_at = MIN(added_at, excluded.added_at)""",
+                (session_key, int(newest_ts or 0), int(pending), int(eligible_at)))
 
     def remove_backlog(self, session_key):
         with self._connect() as connection:
             connection.execute("DELETE FROM work_backlog WHERE session_key = ?", (session_key,))
 
-    def next_backlog(self, limit):
+    def next_backlog(self, limit, now):
         with self._connect() as connection:
             return [r["session_key"] for r in connection.execute(
-                "SELECT session_key FROM work_backlog ORDER BY newest_ts DESC LIMIT ?", (int(limit),))]
+                "SELECT session_key FROM work_backlog WHERE added_at <= ? ORDER BY newest_ts DESC LIMIT ?",
+                (int(now), int(limit)))]
 
     def backlog_pending(self):
         with self._connect() as connection:
@@ -632,10 +651,14 @@ class WorkInsightsService:
         self.model_digest = ""
         self.loaded = False
         self.labels_version = 0
+        self.generation = 0
         self._snapshot = None
         self.ledger = None
         self._labeled = {}
         self._failures = {}
+        self._recent_added = set()
+        self._digest_checked = None
+        self._last_refill = None
         self._rate_window = collections.deque(maxlen=50)
         self._open_ledger()
 
@@ -653,10 +676,14 @@ class WorkInsightsService:
         salt = self.ledger.salt if self.ledger else ""
         return hashlib.sha256(f"{salt}\0session\0{row_id}".encode("utf-8")).hexdigest()[:24]
 
-    def _turn_key(self, row_id, ordinal, text):
-        digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+    def _turn_key(self, row_id, ordinal):
+        # Position only: a content hash next to the stored salt would let short texts be guessed.
         salt = self.ledger.salt if self.ledger else ""
-        return hashlib.sha256(f"{salt}\0turn\0{row_id}\0{ordinal}\0{digest}".encode("utf-8")).hexdigest()[:32]
+        return hashlib.sha256(f"{salt}\0turn\0{row_id}\0{ordinal}".encode("utf-8")).hexdigest()[:32]
+
+    def _bump(self):
+        with self.lock:
+            self.labels_version += 1
 
     # ---- intake (called from the parse hook; must stay cheap)
 
@@ -669,25 +696,34 @@ class WorkInsightsService:
             return False
         return True
 
+    def forget(self, row_id):
+        """Drop any backlog row for a session that no longer yields classifiable turns."""
+        if self.ledger is not None and self.settings_provider()["enabled"]:
+            self._remove_backlog(self.session_key(row_id))
+
     def observe(self, row_id, turns, last_ts=0.0):
         """Queue unlabeled work for one parsed session. Text is kept only in the bounded queue."""
         settings = self.settings_provider()
-        if not settings["enabled"] or self.ledger is None or not turns:
+        if not settings["enabled"] or self.ledger is None:
+            return 0
+        session_key = self.session_key(row_id)
+        if not turns:
+            self._remove_backlog(session_key)
             return 0
         now = self.clock()
         horizon = settings["backfill_days"]
         newest = max([float(t.get("ts") or 0) for t in turns] + [float(last_ts or 0)])
         if horizon and newest and newest < now - horizon * 86400:
+            self._remove_backlog(session_key)
             return 0
         taxonomy = taxonomy_hash(settings["areas"])
-        session_key = self.session_key(row_id)
         active = bool(newest and newest >= now - ACTIVE_WINDOW_S)
         items, opener_seen = [], False
         for ordinal, turn in enumerate(turns):
             text = prepare_text(turn.get("text") or "")
             if not text:
                 continue
-            turn_key = self._turn_key(row_id, ordinal, text)
+            turn_key = self._turn_key(row_id, ordinal)
             opener = not opener_seen
             opener_seen = True
             questions = SESSION_QUESTIONS if opener else TURN_QUESTIONS
@@ -702,17 +738,18 @@ class WorkInsightsService:
             self._remove_backlog(session_key)
             return 0
         added = 0
+        overflow = collections.defaultdict(lambda: [0, 0.0])
         with self.lock:
             room = QUEUE_LIMIT - len(self.queue)
-            fresh = [i for i in items if i[0] not in self.queued]
-            overflow = 0
-            for turn_key, wanted, state, ts in fresh:
+            for turn_key, wanted, state, ts in items:
+                if turn_key in self.queued:
+                    continue
                 if room <= 0 and not active:
-                    overflow += 1
+                    overflow[session_key][0] += 1
+                    overflow[session_key][1] = max(overflow[session_key][1], ts)
                     continue
                 self.seq += 1
-                priority = 0 if active else 1
-                self.queue.append(Item(priority, self.seq, session_key, turn_key, wanted, state, ts))
+                self.queue.append(Item(0 if active else 1, self.seq, session_key, turn_key, wanted, state, ts))
                 self.queued.add(turn_key)
                 room -= 1
                 added += 1
@@ -722,14 +759,17 @@ class WorkInsightsService:
                 del self.queue[QUEUE_LIMIT:]
                 for item in dropped:
                     self.queued.discard(item.turn_key)
-                overflow += len(dropped)
-        if overflow:
-            try:
-                self.ledger.upsert_backlog(session_key, newest, overflow, now)
-            except sqlite3.Error:
-                self.state, self.reason = STATE_STORAGE, "ledger_write_failed"
-        else:
-            self._remove_backlog(session_key)
+                    overflow[item.session_key][0] += 1
+                    overflow[item.session_key][1] = max(overflow[item.session_key][1], item.newest_ts)
+            if added:
+                self._recent_added.add(session_key)
+        try:
+            for key, (count, ts) in overflow.items():
+                self.ledger.upsert_backlog(key, ts or newest, count, now)
+            if session_key not in overflow:
+                self.ledger.remove_backlog(session_key)
+        except sqlite3.Error:
+            self.state, self.reason = STATE_STORAGE, "ledger_write_failed"
         if added:
             self.wake.set()
         return added
@@ -751,30 +791,36 @@ class WorkInsightsService:
 
     def _finish_item(self, item):
         with self.lock:
-            if self.queue and self.queue[0] is item:
-                self.queue.pop(0)
-            else:
-                try:
-                    self.queue.remove(item)
-                except ValueError:
-                    pass
+            try:
+                self.queue.remove(item)
+            except ValueError:
+                pass
             self.queued.discard(item.turn_key)
 
     def _maybe_refill(self):
         if self.refill is None or self.ledger is None:
             return
+        now = self.monotonic()
+        if self._last_refill is not None and now - self._last_refill < REFILL_INTERVAL_S:
+            return
         with self.lock:
             if len(self.queue) > QUEUE_LOW_WATER:
                 return
+        self._last_refill = now
         try:
-            keys = self.ledger.next_backlog(REFILL_BATCH)
+            keys = self.ledger.next_backlog(REFILL_BATCH, self.clock())
         except sqlite3.Error:
             return
         if not keys:
             return
-        found = set(self.refill(keys) or ())
+        with self.lock:
+            self._recent_added.difference_update(keys)
+        self.refill(keys)
+        with self.lock:
+            requeued = set(self._recent_added)
         for key in keys:
-            if key not in found:
+            # A re-load that queued nothing means the session has no reachable pending work.
+            if key not in requeued:
                 self._remove_backlog(key)
 
     def _throttle_reason(self, settings):
@@ -799,9 +845,38 @@ class WorkInsightsService:
             self.client_factory(settings["ollama_url"], settings["model"]).unload()
             self.loaded = False
 
+    def _may_send(self, generation):
+        """Gate every model request on enablement, pause, clear, and the rate limit."""
+        while True:
+            settings = self.settings_provider()
+            if (not settings["enabled"] or is_paused(settings, self.clock())
+                    or generation != self.generation):
+                return False
+            wait = self.pacer.wait_time(settings["rate_per_minute"])
+            if wait <= 0:
+                return True
+            self.sleep(wait)
+
+    def _check_digest(self, client):
+        now = self.monotonic()
+        due = (not self.model_digest or self.state in (STATE_SETUP, STATE_BACKOFF)
+               or self._digest_checked is None or now - self._digest_checked >= DIGEST_RECHECK_S)
+        if not due:
+            return None
+        try:
+            digest = client.model_digest()
+        except ClassifierError as error:
+            return self._fail_global(error)
+        self._digest_checked = now
+        if digest != self.model_digest:
+            self.model_digest = digest
+            self._bump()
+        return None
+
     def step(self):
-        """Do at most one unit of work. Returns seconds the loop should wait next."""
+        """Do at most one item. Returns seconds the loop should wait next."""
         settings = self.settings_provider()
+        generation = self.generation
         now = self.clock()
         if not settings["enabled"]:
             with self.lock:
@@ -820,16 +895,13 @@ class WorkInsightsService:
         if self.state in (STATE_BACKOFF, STATE_SETUP, STATE_STORAGE) and now < self.retry_at:
             return min(5.0, self.retry_at - now)
         client = self.client_factory(settings["ollama_url"], settings["model"])
-        if not self.model_digest or self.state in (STATE_SETUP, STATE_BACKOFF):
-            try:
-                self.model_digest = client.model_digest()
-            except ClassifierError as error:
-                return self._fail_global(error)
+        failed = self._check_digest(client)
+        if failed is not None:
+            return failed
         self._maybe_refill()
         item = self._next_item()
         if item is None:
-            if self.loaded:
-                self.loaded = False
+            self.loaded = False
             self._set(STATE_IDLE)
             return 5.0
         reason = self._throttle_reason(settings)
@@ -837,71 +909,82 @@ class WorkInsightsService:
             self._unload(settings)
             self._set(STATE_THROTTLED, reason, THROTTLE_WAIT_S)
             return THROTTLE_WAIT_S
-        wait = self.pacer.wait_time(settings["rate_per_minute"])
-        if wait > 0:
-            self._set(STATE_RUNNING)
-            return wait
+        self._set(STATE_RUNNING)
         taxonomy = taxonomy_hash(settings["areas"])
         for question_name in item.questions:
-            if not self._needs(item.turn_key, question_name, taxonomy, now):
+            if not self._needs(item.turn_key, question_name, taxonomy, self.clock()):
                 continue
             question = question_for(question_name, settings)
             orders = (False, True) if question["type"] == "choice" else (False,)
             rendered = [render_prompt(item.state, question, reverse) for reverse in orders]
             timeout = min(60.0, 10.0 + len(rendered[0][0]) / 1000.0)
-            started = self.monotonic()
             try:
                 responses = []
                 for prompt, *_ in rendered:
+                    if not self._may_send(generation):
+                        return 0.0
                     self.pacer.consume()
+                    started = self.monotonic()
                     responses.append(client.classify(prompt, timeout))
+                    self._record_latency((self.monotonic() - started) / (1.0 + len(prompt) / 1000.0))
                 value, confidence = read_answer(responses, question, [(r[1], r[2]) for r in rendered])
             except ClassifierError as error:
                 if error.kind in ("transport", "setup"):
                     return self._fail_global(error)
-                self._fail_item(item, question_name, error.reason)
+                self._fail_item(item, question_name, error.reason, generation)
                 continue
             self.loaded = True
-            self._record_latency(self.monotonic() - started)
             if question_name == "complexity":
                 value = COMPLEXITY_KEYS[int(value)]
-            if not self._store(item, question_name, value, confidence, taxonomy):
+            if not self._store(item, question_name, value, confidence, taxonomy, generation):
                 return STORAGE_RETRY_S
         self._finish_item(item)
         self.transport_failures = 0
         self._rate_window.append(self.clock())
-        self._set(STATE_RUNNING)
         return 0.0
 
     def _record_latency(self, seconds):
+        """Track per-1k-character latency; the baseline adapts slowly so only sudden slowdowns throttle."""
         self.latencies.append(seconds)
-        if self.baseline is None and len(self.latencies) >= LATENCY_WINDOW:
-            self.baseline = sorted(self.latencies)[len(self.latencies) // 2]
-            self.latencies.clear()
+        if self.baseline is None:
+            if len(self.latencies) >= LATENCY_WINDOW:
+                self.baseline = sorted(self.latencies)[len(self.latencies) // 2]
+                self.latencies.clear()
+        else:
+            self.baseline += LATENCY_BASELINE_ALPHA * (seconds - self.baseline)
 
-    def _store(self, item, question, value, confidence, taxonomy):
+    def _store(self, item, question, value, confidence, taxonomy, generation):
+        if generation != self.generation:
+            return True
         try:
             self.ledger.record_label(item.turn_key, question, item.session_key, value, confidence,
                                      taxonomy if question == "area" else "", self.model_digest, self.clock())
         except sqlite3.Error:
             self._set(STATE_STORAGE, "ledger_write_failed", STORAGE_RETRY_S)
             return False
-        self._labeled[(item.turn_key, question)] = taxonomy if question == "area" else ""
-        self._failures.pop((item.turn_key, question), None)
-        self.labels_version += 1
+        with self.lock:
+            self._labeled[(item.turn_key, question)] = taxonomy if question == "area" else ""
+            self._failures.pop((item.turn_key, question), None)
+            self.labels_version += 1
         return True
 
-    def _fail_item(self, item, question, reason):
+    def _fail_item(self, item, question, reason, generation):
+        if generation != self.generation:
+            return
         try:
             attempts, terminal = self.ledger.record_failure(
                 item.turn_key, question, item.session_key, reason, self.clock())
+            delay = ITEM_RETRY_DELAYS_S[min(attempts - 1, len(ITEM_RETRY_DELAYS_S) - 1)]
+            if not terminal:
+                # Schedule a re-load so the retry happens even if the session is never parsed again.
+                self.ledger.upsert_backlog(item.session_key, item.newest_ts, 1, self.clock() + delay)
         except sqlite3.Error:
             self._set(STATE_STORAGE, "ledger_write_failed", STORAGE_RETRY_S)
             return
-        delay = ITEM_RETRY_DELAYS_S[min(attempts - 1, len(ITEM_RETRY_DELAYS_S) - 1)]
-        self._failures[(item.turn_key, question)] = (int(self.clock() + delay), terminal)
-        if terminal:
-            self.labels_version += 1
+        with self.lock:
+            self._failures[(item.turn_key, question)] = (int(self.clock() + delay), terminal)
+            if terminal:
+                self.labels_version += 1
 
     def _fail_global(self, error):
         if error.kind == "setup":
@@ -924,8 +1007,9 @@ class WorkInsightsService:
                 self._set(STATE_BACKOFF, "internal_error", backoff)
                 wait, backoff = backoff, min(300.0, backoff * 2)
             if wait > 0:
-                self.wake.clear()
+                # Clear after waking so a settings change that arrives mid-step is not lost.
                 self.sleep(wait)
+                self.wake.clear()
 
     # ---- queries
 
@@ -965,8 +1049,9 @@ class WorkInsightsService:
 
     def snapshot(self):
         """Return {session_key: labels} for aggregation; cached by labels_version."""
+        version = self.labels_version
         cached = self._snapshot
-        if cached and cached[0] == self.labels_version:
+        if cached and cached[0] == version:
             return cached[1]
         settings = self.settings_provider()
         taxonomy = taxonomy_hash(settings["areas"])
@@ -978,13 +1063,9 @@ class WorkInsightsService:
         except sqlite3.Error:
             return sessions
         for row in rows:
-            entry = sessions.setdefault(row["session_key"], {"turns": collections.Counter(), "turn_labels": 0})
-            confidence = float(row["confidence"])
-            unclear = confidence < UNCLEAR_CONFIDENCE
-            if row["question"] == "turn":
-                entry["turn_labels"] += 1
-                entry["turns"]["unclear" if unclear else row["value"]] += 1
-            elif row["question"] == "correction":
+            entry = sessions.setdefault(row["session_key"], {})
+            unclear = float(row["confidence"]) < UNCLEAR_CONFIDENCE
+            if row["question"] == "correction":
                 entry["correction_labels"] = entry.get("correction_labels", 0) + 1
                 if row["value"] == "True" and not unclear:
                     entry["corrections"] = entry.get("corrections", 0) + 1
@@ -993,30 +1074,37 @@ class WorkInsightsService:
                     entry["area"] = "Unclear" if unclear else row["value"]
             elif row["question"] == "complexity":
                 entry["complexity"] = row["value"]
-            else:
-                entry[row["question"]] = "unclear" if unclear else row["value"]
+            elif row["question"] == "work_type":
+                entry["work_type"] = "unclear" if unclear else row["value"]
         for row in terminal:
-            entry = sessions.setdefault(row["session_key"], {"turns": collections.Counter(), "turn_labels": 0})
-            if row["question"] == "turn":
-                entry["turn_labels"] += 1
-                entry["turns"]["unclear"] += 1
-            else:
+            entry = sessions.setdefault(row["session_key"], {})
+            if row["question"] == "correction":
+                entry["correction_labels"] = entry.get("correction_labels", 0) + 1
+            elif row["question"] in ("area", "work_type"):
                 entry.setdefault(row["question"], "Unclear" if row["question"] == "area" else "unclear")
-        self._snapshot = (self.labels_version, sessions)
+        self._snapshot = (version, sessions)
         return sessions
 
     def clear(self):
         with self.lock:
+            self.generation += 1
             self.queue.clear()
             self.queued.clear()
+            self._labeled, self._failures = {}, {}
+            self._recent_added.clear()
+            self.labels_version += 1
+        self.model_digest = ""
         if self.ledger is not None:
             self.ledger.clear()
-        self._labeled, self._failures = {}, {}
-        self.labels_version += 1
-        self.model_digest = ""
 
     def settings_changed(self):
-        self.labels_version += 1
+        settings = self.settings_provider()
+        with self.lock:
+            self.labels_version += 1
+            if not settings["enabled"]:
+                self.queue.clear()
+                self.queued.clear()
+        self._digest_checked = None
         self.wake.set()
 
 

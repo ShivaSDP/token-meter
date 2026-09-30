@@ -4462,11 +4462,11 @@ def claude_user_turns(objs, default_model=None):
             turns.append(turn)
             pending.append(turn)
             continue
-        if obj.get("type") != "assistant" or obj.get("isSidechain"):
+        if obj.get("type") != "assistant":
             continue
         msg = obj.get("message") if isinstance(obj.get("message"), dict) else {}
         content = msg.get("content")
-        if isinstance(content, list):
+        if isinstance(content, list) and not obj.get("isSidechain"):
             said = " ".join(
                 block.get("text") or "" for block in content
                 if isinstance(block, dict) and block.get("type") == "text"
@@ -5816,14 +5816,20 @@ def session_summary(source, opencode_conn=None):
     adapter = runtime_registry().get(source.get("provider"))
     summarizer = getattr(adapter, "summarize_legacy", None)
     _WORK_TURNS.turns = None
-    if summarizer is not None:
-        row = summarizer(source, opencode_conn)
-    else:
-        row = summary_row(source, source.get("title"), 0.0, 0, 0, set(), None, None,
-                          {}, {}, {}, False, availability=metric_availability("unknown"))
-    work_turns, _WORK_TURNS.turns = getattr(_WORK_TURNS, "turns", None), None
-    if work_turns and not _work_is_child_row(row):
-        work_insights_service().observe(row["id"], work_turns)
+    try:
+        if summarizer is not None:
+            row = summarizer(source, opencode_conn)
+        else:
+            row = summary_row(source, source.get("title"), 0.0, 0, 0, set(), None, None,
+                              {}, {}, {}, False, availability=metric_availability("unknown"))
+    finally:
+        work_turns, _WORK_TURNS.turns = getattr(_WORK_TURNS, "turns", None), None
+    if work_insights_settings()["enabled"]:
+        service = work_insights_service()
+        if work_turns and not _work_is_child_row(row):
+            service.observe(row["id"], work_turns)
+        else:
+            service.forget(row["id"])
     with _summary_cache_lock:
         _summary_cache[source["path"]] = {"signature": signature, "row": row}
     return row
@@ -7417,14 +7423,20 @@ def _work_output_price(model, provider):
     return float(value) if isinstance(value, (int, float)) and value > 0 else None
 
 
+_work_source_keys = {"sources": None, "salt": None, "keys": {}}
+
+
 def work_insights_refill(session_keys):
     """Re-load backlog sources through the normal adapter path so their turns re-enter the queue."""
-    wanted = set(session_keys)
     service = work_insights_service()
-    found = []
-    for source in tuple(_SOURCE_INVENTORY.get("sources") or ()):
-        key = service.session_key(source.get("id") or "")
-        if key not in wanted:
+    sources = _SOURCE_INVENTORY.get("sources") or ()
+    salt = service.ledger.salt if service.ledger else ""
+    if _work_source_keys["sources"] is not sources or _work_source_keys["salt"] != salt:
+        _work_source_keys.update(sources=sources, salt=salt, keys={
+            service.session_key(source.get("id") or ""): source for source in sources})
+    for key in session_keys:
+        source = _work_source_keys["keys"].get(key)
+        if source is None:
             continue
         with _summary_cache_lock:
             _summary_cache.pop(source["path"], None)
@@ -7432,8 +7444,6 @@ def work_insights_refill(session_keys):
             session_summary(source)
         except Exception:
             continue
-        found.append(key)
-    return found
 
 
 def work_insights_service():
@@ -7453,10 +7463,33 @@ def work_insights_service():
 
 
 def work_insights_watcher():
-    """Run the classifier worker once sources are known; it paces and pauses itself."""
-    while not _SOURCE_INVENTORY.get("ready"):
-        time.sleep(1.0)
+    """Run the classifier worker once enabled and sources are known; it paces and pauses itself."""
+    while not (_SOURCE_INVENTORY.get("ready") and work_insights_settings()["enabled"]):
+        time.sleep(2.0)
     work_insights_service().run_forever()
+
+
+def work_insights_service_if_started():
+    return _work_service_instance
+
+
+def notify_work_insights():
+    service = work_insights_service_if_started()
+    if service is not None:
+        service.settings_changed()
+
+
+def clear_work_insights():
+    """Delete every label; without a running service, remove the ledger files directly."""
+    service = work_insights_service_if_started()
+    if service is not None:
+        service.clear()
+        return
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        try:
+            os.remove(TOKEN_METER_WORK_INSIGHTS_DB + suffix)
+        except FileNotFoundError:
+            pass
 
 
 def requeue_work_insights():
@@ -7488,6 +7521,10 @@ def work_insights_public_settings(settings=None):
 
 
 def work_insights_status():
+    if work_insights_service_if_started() is None and not work_insights_settings()["enabled"]:
+        return {"state": "disabled", "reason": "", "pending": 0, "queued": 0, "eta_s": 0,
+                "retry_at": None, "paused_until": work_insights_settings()["paused_until"],
+                "model": work_insights_settings()["model"], "model_versions": 0, "labels": 0}
     status = work_insights_service().status()
     return {key: status[key] for key in (
         "state", "reason", "pending", "queued", "eta_s", "retry_at", "paused_until",
@@ -7535,9 +7572,10 @@ def work_insights_state(months="6", runtime="", project=""):
 
     rows = tuple(dict(row, project=public_project(row.get("project")))
                  for row in (_xsess.get("internal_rows") or ()))
-    service = work_insights_service()
+    service = work_insights_service() if settings["enabled"] else None
     insights = _domain_build_work_insights(
-        rows, service.snapshot() if settings["enabled"] else {}, service.session_key,
+        rows, service.snapshot() if service else {},
+        service.session_key if service else (lambda _row_id: ""),
         settings["areas"], _work_output_price, months=months,
         runtime=str(runtime or "")[:40], project=str(project or "")[:240],
         today=time.strftime("%Y-%m-%d"),
@@ -10219,7 +10257,7 @@ class H(BaseHTTPRequestHandler):
                 if result.pop("requeue", False):
                     requeue_work_insights()
                 else:
-                    work_insights_service().settings_changed()
+                    notify_work_insights()
                 result["work_insights"] = work_insights_public_settings()
                 result["status"] = work_insights_status()
             self._send(json.dumps(result), "application/json",
@@ -10229,7 +10267,7 @@ class H(BaseHTTPRequestHandler):
             result = set_work_insights_settings({"pause": payload.get("duration")})
             if result.get("ok"):
                 result.pop("requeue", None)
-                work_insights_service().settings_changed()
+                notify_work_insights()
                 result["work_insights"] = work_insights_public_settings()
                 result["status"] = work_insights_status()
             self._send(json.dumps(result), "application/json",
@@ -10239,7 +10277,7 @@ class H(BaseHTTPRequestHandler):
             if payload.get("confirm") is not True:
                 result = {"ok": False, "error": "Explicit confirmation is required."}
             else:
-                work_insights_service().clear()
+                clear_work_insights()
                 if work_insights_settings()["enabled"]:
                     requeue_work_insights()
                 result = {"ok": True, "status": work_insights_status()}

@@ -13,7 +13,7 @@ usage() {
 Usage: scripts/setup-work-classifier [--model NAME] [--remove-download]
 
 Downloads the Jet decision model (about 8.4 GB) from Hugging Face with curl,
-verifies every file size, and imports it into Ollama as a 4-bit model that
+verifies every file's size and SHA-256, and imports it into Ollama as a 4-bit model that
 Token Meter's Work insights use. Requires Ollama 0.34 or newer, running locally.
 
   --model NAME        Ollama model name to create (default: token-meter-jet)
@@ -57,8 +57,9 @@ wanted = {"config.json", "tokenizer.json", "tokenizer_config.json", "chat_templa
 for entry in json.load(sys.stdin):
     path = entry.get("path", "")
     if path in wanted or (path.startswith("model-") and path.endswith(".safetensors")):
-        size = (entry.get("lfs") or {}).get("size", entry.get("size", 0))
-        print(f"{path}\t{size}")
+        lfs = entry.get("lfs") or {}
+        size = lfs.get("size", entry.get("size", 0))
+        print("\t".join([path, str(size), lfs.get("oid") or "-"]))
 ')"
 if [ -z "$FILES" ]; then
   echo "Could not read the model file list from Hugging Face." >&2
@@ -66,11 +67,23 @@ if [ -z "$FILES" ]; then
 fi
 
 file_size() { stat -f %z "$1" 2>/dev/null || stat -c %s "$1"; }
+file_sha256() {
+  if command -v shasum >/dev/null; then shasum -a 256 "$1" | cut -d' ' -f1; else sha256sum "$1" | cut -d' ' -f1; fi
+}
+
+COMMIT="$(curl -fsSL "https://huggingface.co/api/models/$REPO/revision/$REVISION" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sha", ""))')"
+echo "Jet $REVISION resolves to commit ${COMMIT:-unknown}"
 
 echo "Downloading Jet $REVISION to $TARGET"
-while IFS=$'\t' read -r path size; do
+verify() {
+  local destination="$1" size="$2" sha="$3"
+  [ -f "$destination" ] && [ "$(file_size "$destination")" = "$size" ] || return 1
+  [ "$sha" = "-" ] || [ "$(file_sha256 "$destination")" = "$sha" ]
+}
+
+while IFS=$'\t' read -r path size sha; do
   destination="$TARGET/$path"
-  if [ -f "$destination" ] && [ "$(file_size "$destination")" = "$size" ]; then
+  if verify "$destination" "$size" "$sha"; then
     echo "  ok       $path"
     continue
   fi
@@ -79,9 +92,9 @@ while IFS=$'\t' read -r path size; do
     rm -f "$destination"
     curl -fL --retry 3 --retry-delay 2 -o "$destination" "$BASE/$path"
   }
-  actual="$(file_size "$destination")"
-  if [ "$actual" != "$size" ]; then
-    echo "Size mismatch for $path: expected $size bytes, got $actual." >&2
+  if ! verify "$destination" "$size" "$sha"; then
+    echo "Verification failed for $path (size or SHA-256 does not match Hugging Face)." >&2
+    rm -f "$destination"
     exit 1
   fi
 done <<< "$FILES"

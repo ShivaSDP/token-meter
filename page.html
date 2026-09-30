@@ -1108,7 +1108,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 	   <div class=workCardHead><div><h2 class=fieldtip tabindex=0 aria-description="Session complexity from the opening request against the session's main model price tier (terciles of catalog output price among your models). Flags are estimates, not verdicts." data-tip="Session complexity from the opening request against the session's main model price tier (terciles of catalog output price among your models). Flags are estimates, not verdicts.">Model right-sizing</h2><div class=subline>Complexity of the request × price tier of the model that did it.</div></div></div>
 	   <div class=workSizingGrid id=w-sizing role=table aria-label="Right-sizing grid"></div>
 	  </section>
-	  <div class=efficiencyEvidence>Local model labels · estimates · no prompt text leaves this machine.</div>
+	  <div class=efficiencyEvidence>Local model labels · estimates · text goes only to Ollama on this machine.</div>
 	 </div>
 	 <div class=view id=view-git>
 	  <div class="spectrumPageHeadFrame hasPageActions">
@@ -1349,7 +1349,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
     <div class=settingsActions><button class=tbtn id=frustration-save type=button>Save and recalculate</button><button class="tbtn clearFilters" id=frustration-reset type=button>Restore defaults</button><span class=settingsStatus id=frustration-settings-status>Saved locally</span></div>
    </section>
    <section class="card pad workSettings" id=work-insights-settings>
-    <div class=softwareUpdateHead><div><h2 class=fieldtip tabindex=0 aria-description="A local model labels each session's area, work type, complexity, and pushback so the Work page can show what spend went into." data-tip="A local model labels each session's area, work type, complexity, and pushback so the Work page can show what spend went into.">Work insights</h2><div class=subline>A local model on this machine reads only the prompts you typed, not responses, tool output, or files. Text goes only to Ollama on this machine; Token Meter stores labels, never text.</div></div><span class=agentAccessBadge id=work-settings-badge>Off</span></div>
+    <div class=softwareUpdateHead><div><h2 class=fieldtip tabindex=0 aria-description="A local model labels each session's area, work type, complexity, and pushback so the Work page can show what spend went into." data-tip="A local model labels each session's area, work type, complexity, and pushback so the Work page can show what spend went into.">Work insights</h2><div class=subline>A local model reads the prompts you typed, plus the last few lines of the assistant reply before each one (to spot pushback). It never reads tool output or files. Text goes only to the Ollama address below on this machine, cloud models are refused, and Token Meter stores labels, never text.</div></div><span class=agentAccessBadge id=work-settings-badge>Off</span></div>
     <div class=softwareUpdateToggles>
      <label class=softwareUpdateToggle><input id=work-enabled type=checkbox><span><b>Label sessions with a local model</b><small>Off by default. Requires Ollama and the classifier model.</small></span></label>
      <label class=softwareUpdateToggle><input id=work-battery type=checkbox checked><span><b>Pause while on battery</b><small>Resumes automatically on power.</small></span></label>
@@ -5672,7 +5672,7 @@ function renderWorkStatus(payload){
  const progress=`Labeled ${share}% of sessions in this period${status.pending?` · ${status.pending.toLocaleString()} pending`:''}${status.eta_s&&state==='running'?` · ${workDuration(status.eta_s)}`:''}`;
  const copy={
   disabled:['Off','Work insights are off','Turn on local classification in Settings to label sessions.'],
-  setup_needed:['Setup','Classifier model not found',status.reason==='model_missing'?`Run scripts/setup-work-classifier, then keep Ollama running. Looking for “${settings.model||'token-meter-jet'}”.`:'Start Ollama on this machine, then Token Meter retries automatically.'],
+  setup_needed:['Setup',status.reason==='remote_model'?'Cloud model refused':'Classifier model not found',status.reason==='model_missing'?`Run scripts/setup-work-classifier, then keep Ollama running. Looking for “${settings.model||'token-meter-jet'}”.`:status.reason==='remote_model'?'That Ollama model runs on another host. Choose a local model in Settings.':'Start Ollama on this machine, then Token Meter retries automatically.'],
   running:['Running','Labeling sessions',progress],
   idle:['Ready','Up to date',progress],
   paused:['Paused','Paused',status.paused_until==='indefinite'?'Paused until you resume.':`Paused until ${workClock(status.paused_until)}.`],

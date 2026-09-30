@@ -1,3 +1,4 @@
+import http.client
 import http.server
 import json
 import os
@@ -70,9 +71,13 @@ def make_service(tmp, settings=None, **kwargs):
     values = W.normalize_settings({"enabled": True, "backfill_days": 0, "pause_on_battery": True,
                                    **(settings or {})})
     clock = kwargs.pop("clock", Clock())
+
+    def sleep(seconds):
+        clock.now += seconds
+
     service = W.WorkInsightsService(
         os.path.join(tmp, "work.sqlite3"), lambda: values, client_factory=FakeClient,
-        clock=clock, monotonic=clock, sleep=lambda s: None,
+        clock=clock, monotonic=clock, sleep=sleep,
         load_probe=kwargs.pop("load_probe", lambda: 0.1),
         power_probe=kwargs.pop("power_probe", lambda: "ac"), **kwargs)
     return service, values, clock
@@ -119,7 +124,7 @@ class TextPreparationTests(unittest.TestCase):
 class SettingsValidationTests(unittest.TestCase):
     def test_ollama_url_must_be_loopback_http(self):
         self.assertEqual(W.validate_ollama_url("http://127.0.0.1:11434/"), "http://127.0.0.1:11434")
-        self.assertEqual(W.validate_ollama_url("http://localhost"), "http://localhost:11434")
+        self.assertEqual(W.validate_ollama_url("http://localhost"), "http://127.0.0.1:11434")
         self.assertEqual(W.validate_ollama_url("http://[::1]:9000"), "http://[::1]:9000")
         for bad in ("https://127.0.0.1:11434", "http://10.0.0.5:11434", "http://example.com",
                     "http://user:pw@127.0.0.1", "http://127.0.0.1/api", "file:///tmp/x"):
@@ -218,6 +223,7 @@ class ServiceTests(unittest.TestCase):
             blob = handle.read()
         self.assertNotIn(b"zebra-kumquat", blob)
         self.assertNotIn(b"still broken", blob)
+        self.assertNotIn(b"I changed the chart", blob)
         self.assertNotIn(b"s1", blob.replace(b"s1_", b""))
         self.assertEqual(service.observe("s1", turns(SECRET_TEXT, "no that's wrong, still broken")), 0)
 
@@ -288,14 +294,90 @@ class ServiceTests(unittest.TestCase):
         service.step()
         self.assertEqual(service.reason, "system_busy")
 
-    def test_rate_limit_spaces_requests(self):
+    def test_rate_limit_spaces_every_request(self):
         service, values, clock = make_service(self.tmp.name, {"rate_per_minute": 10})
+        stamps = []
+        FakeClient.responder = lambda prompt: stamps.append(clock.now) or jet_response("A")
         service.observe("s1", turns("a"))
-        service.observe("s2", turns("b"))
         self.assertEqual(service.step(), 0.0)
-        wait = service.step()
-        self.assertGreater(wait, 0)
-        self.assertEqual(len(FakeClient.prompts), 5)
+        self.assertEqual(len(stamps), 5)
+        gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+        self.assertTrue(all(gap >= 6.0 - 1e-6 for gap in gaps), gaps)
+
+    def test_pause_mid_item_stops_before_the_next_request(self):
+        service, values, clock = make_service(self.tmp.name)
+        calls = []
+
+        def respond(prompt):
+            calls.append(prompt)
+            values["paused_until"] = "indefinite"
+            return jet_response("A")
+
+        FakeClient.responder = respond
+        service.observe("s1", turns("hello"))
+        service.step()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(service.queue), 1)
+
+    def test_clear_during_a_request_writes_nothing_afterwards(self):
+        service, values, clock = make_service(self.tmp.name)
+        FakeClient.responder = lambda prompt: service.clear() or jet_response("A")
+        service.observe("s1", turns("hello"))
+        service.step()
+        self.assertEqual(service.snapshot(), {})
+        self.assertEqual(service.status()["labels"], 0)
+
+    def test_disable_clears_queued_text_immediately(self):
+        service, values, _ = make_service(self.tmp.name)
+        service.observe("s1", turns("hello", "more"))
+        self.assertTrue(service.queue)
+        values["enabled"] = False
+        service.settings_changed()
+        self.assertEqual(service.queue, [])
+
+    def test_model_digest_change_is_detected(self):
+        service, values, clock = make_service(self.tmp.name)
+        service.observe("s1", turns("hello"))
+        drain(service)
+        version = service.labels_version
+        with mock.patch.object(FakeClient, "model_digest", lambda self: "digest-2"):
+            clock.now += W.DIGEST_RECHECK_S + 1
+            service.step()
+        self.assertEqual(service.model_digest, "digest-2")
+        self.assertGreater(service.labels_version, version)
+
+    def test_failed_items_schedule_a_content_free_retry(self):
+        service, values, clock = make_service(self.tmp.name)
+        FakeClient.responder = lambda prompt: jet_response("Sure")
+        service.observe("s1", turns("hello"))
+        service.step()
+        key = service.session_key("s1")
+        self.assertEqual(service.ledger.next_backlog(5, clock.now), [])
+        self.assertEqual(service.ledger.next_backlog(5, clock.now + W.ITEM_RETRY_DELAYS_S[0] + 1), [key])
+
+    def test_overflow_is_credited_to_the_session_it_came_from(self):
+        service, values, clock = make_service(self.tmp.name)
+        with mock.patch.object(W, "QUEUE_LIMIT", 2):
+            service.observe("old", [{"ts": clock.now - 5000 + i, "text": f"t{i}", "model": "m"} for i in range(2)])
+            service.observe("live", [{"ts": clock.now - 10 + i, "text": f"l{i}", "model": "m"} for i in range(2)])
+        with service.ledger._connect() as connection:
+            rows = dict(connection.execute("SELECT session_key, pending FROM work_backlog").fetchall())
+        self.assertEqual(rows, {service.session_key("old"): 2})
+
+    def test_backlog_rows_that_yield_nothing_are_dropped_after_refill(self):
+        service, values, clock = make_service(self.tmp.name, refill=lambda keys: None)
+        service.ledger.upsert_backlog(service.session_key("gone"), clock.now, 3, clock.now)
+        service.step()
+        self.assertEqual(service.ledger.backlog_pending(), 0)
+
+    def test_latency_baseline_adapts(self):
+        service, _, _ = make_service(self.tmp.name)
+        for _ in range(W.LATENCY_WINDOW):
+            service._record_latency(1.0)
+        self.assertEqual(service.baseline, 1.0)
+        for _ in range(200):
+            service._record_latency(2.0)
+        self.assertGreater(service.baseline, 1.9)
 
     def test_queue_overflow_goes_to_content_free_backlog_and_refills(self):
         refilled = []
@@ -411,6 +493,14 @@ class OllamaClientTests(unittest.TestCase):
             client.classify("p", 5)
         self.assertEqual(failed.exception.kind, "transport")
 
+    def test_remote_and_cloud_models_are_refused(self):
+        for entry in ({"name": "token-meter-jet:latest", "remote_host": "https://ollama.com"},
+                      {"name": "token-meter-jet:cloud"}):
+            FakeOllama.responses = {"/api/tags": (200, {"models": [dict(entry, digest="x")]})}
+            with self.assertRaises(W.ClassifierError) as caught:
+                W.OllamaClient(self.url, entry["name"].split(":")[0] if "remote_host" in entry else entry["name"]).model_digest()
+            self.assertEqual(caught.exception.reason, "remote_model")
+
     def test_unreachable_is_transport(self):
         self.server.shutdown()
         self.server.server_close()
@@ -448,11 +538,27 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(august["sessions"], {"Pending": 1})
         self.assertEqual(out["areas"][-2:], ["Unclear", "Pending"])
 
-    def test_child_rows_are_excluded(self):
+    def test_child_rows_are_excluded_but_parents_with_children_are_kept(self):
         child = row("kid")
         child["_agent_records"] = [{"parent_id": "p1"}]
-        out = self.build([child], {})
-        self.assertEqual(out["coverage"]["sessions"], 0)
+        parent = row("parent")
+        parent["_agent_records"] = [{"id": "root", "parent_id": None}, {"id": "c", "parent_id": "root"}]
+        self.assertTrue(domain.is_child_row(child))
+        self.assertFalse(domain.is_child_row(parent))
+        out = self.build([child, parent], {})
+        self.assertEqual(out["coverage"]["sessions"], 1)
+
+    def test_workstream_rework_counts_once_in_the_start_month(self):
+        spanning = row("a")
+        spanning["_language_signal_events"] = {"positive": [{"day": "2026-08-30"}, {"day": "2026-09-02"}]}
+        spanning["start"] = "2026-08-30 10:00"
+        spanning["_day_cost"] = {"2026-08-30": 1.0, "2026-09-02": 1.0}
+        labels = {"a": {"area": "Personal", "corrections": 1, "correction_labels": 1}}
+        out = self.build([spanning], labels)
+        august = out["workstreams"]["2026-08"]["rows"][0]["rework"]
+        september = out["workstreams"]["2026-09"]["rows"][0]["rework"]
+        self.assertEqual(august["samples"], 1)
+        self.assertIsNone(september)
 
     def test_workstreams_economics_and_few_samples(self):
         rows = [row("a"), row("b", project="beta", turns_=5)]
@@ -552,12 +658,13 @@ class SurfaceContractTests(unittest.TestCase):
     def test_work_page_shows_estimates_unclear_and_pending(self):
         for marker in ("id=view-work", "Monthly activity allocation", "Workstreams", "Cost by work type",
                        "Model right-sizing", "Possible overspend (estimate)", "View as table",
-                       "no prompt text leaves this machine", "'var(--w-pending)'", "'var(--w-unclear)'"):
+                       "text goes only to Ollama on this machine", "'var(--w-pending)'", "'var(--w-unclear)'"):
             self.assertTrue(marker in self.page, marker)
 
     def test_settings_card_explains_what_text_is_read(self):
         self.assertIn("id=work-insights-settings", self.page)
-        self.assertIn("reads only the prompts you typed", self.page)
+        self.assertIn("reads the prompts you typed, plus the last few lines of the assistant reply", self.page)
+        self.assertIn("cloud models are refused", self.page)
         self.assertIn("Token Meter stores labels, never text", self.page)
         self.assertIn("./scripts/setup-work-classifier", self.page)
 
@@ -572,7 +679,75 @@ class SurfaceContractTests(unittest.TestCase):
         with open(path, encoding="utf-8") as handle:
             script = handle.read()
         self.assertIn('ollama create "$MODEL_NAME" -q int4', script)
+        self.assertIn("file_sha256", script)
         self.assertNotIn("sudo", script)
+
+
+class AppIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.settings = os.path.join(self.tmp.name, "settings.json")
+        self.db = os.path.join(self.tmp.name, "work.sqlite3")
+
+    def test_disabled_feature_creates_no_ledger(self):
+        with mock.patch.object(meter, "TOKEN_METER_SETTINGS", self.settings), \
+                mock.patch.object(meter, "TOKEN_METER_WORK_INSIGHTS_DB", self.db), \
+                mock.patch.object(meter, "_work_service_instance", None):
+            self.assertEqual(meter.work_insights_status()["state"], "disabled")
+            meter.clear_work_insights()
+            meter.notify_work_insights()
+        self.assertFalse(os.path.exists(self.db))
+
+    def test_thread_local_turns_are_cleared_when_a_summarizer_raises(self):
+        class Boom:
+            def summarize_legacy(self, source, conn=None):
+                meter.analyze_language_signal_turns([{"ts": 1, "text": SECRET_TEXT, "model": "m"}])
+                raise RuntimeError("parse failure")
+
+        registry = mock.Mock()
+        registry.get.return_value = Boom()
+        source = {"path": os.path.join(self.tmp.name, "x.jsonl"), "provider": "codex", "id": "x"}
+        with mock.patch.object(meter, "work_insights_settings", return_value=W.normalize_settings({"enabled": True})), \
+                mock.patch.object(meter, "runtime_registry", return_value=registry), \
+                mock.patch.object(meter, "source_revision_signature", return_value="sig"):
+            with self.assertRaises(RuntimeError):
+                meter.session_summary(source)
+        self.assertIsNone(getattr(meter._WORK_TURNS, "turns", None))
+
+    def post(self, path, body, token=True):
+        server = meter.TokenMeterHTTPServer(("127.0.0.1", 0), meter.H)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            data = json.dumps(body)
+            headers = {"Content-Type": "application/json", "Content-Length": str(len(data))}
+            if token:
+                headers["X-Token-Meter-Action"] = meter._ACTION_TOKEN
+            conn.request("POST", path, body=data, headers=headers)
+            response = conn.getresponse()
+            payload = json.loads(response.read())
+            conn.close()
+            return response.status, payload
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_post_routes_validate_over_http(self):
+        with mock.patch.object(meter, "TOKEN_METER_SETTINGS", self.settings), \
+                mock.patch.object(meter, "TOKEN_METER_WORK_INSIGHTS_DB", self.db), \
+                mock.patch.object(meter, "_work_service_instance", None):
+            self.assertEqual(self.post("/settings/work-insights", {"ollama_url": "http://10.0.0.2"})[0], 400)
+            self.assertEqual(self.post("/settings/work-insights", {"bogus": 1})[0], 400)
+            self.assertEqual(self.post("/work-insights/pause", {"duration": "forever"})[0], 400)
+            self.assertEqual(self.post("/work-insights/clear", {"confirm": False})[0], 400)
+            self.assertEqual(self.post("/work-insights/pause", {"duration": "1h"}, token=False)[0], 403)
+            status, payload = self.post("/work-insights/pause", {"duration": "1h"})
+            self.assertEqual(status, 200)
+            self.assertIsInstance(payload["work_insights"]["paused_until"], float)
+        self.assertFalse(os.path.exists(self.db))
 
 
 class SessionTagProjectionTests(unittest.TestCase):
