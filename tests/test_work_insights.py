@@ -1525,6 +1525,29 @@ class OpenerPositionAndWindowTests(unittest.TestCase):
         by_key = {item.turn_key: item.questions for item in service.queue}
         self.assertEqual(by_key, {service._turn_key("s1", 1): W.SESSION_QUESTIONS})
 
+    def test_pushback_labels_before_a_moved_opener_no_longer_count(self):
+        service, clock = self.service()
+        base = FakeClient.responder
+        FakeClient.responder = lambda prompt: (jet_response("yes") if "Answer yes or no" in prompt
+                                               and "wrong!!" in prompt else base(prompt))
+        service.observe("s1", turns("hi", "wrong!!"))
+        drain(service)
+        self.assertEqual(service.session_corrections("s1", 2), [(1, True)])
+        service.observe("s1", turns("hi", "wrong!!", self.RELEASE, "wrong!! again"))
+        drain(service)
+        self.assert_real_opener(service)
+        self.assertEqual(service.session_corrections("s1", 4), [(3, True)])
+
+    def test_sessions_past_the_backfill_horizon_still_record_their_opener(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        service, _values, clock = make_service(tmp.name, {"backfill_days": 30})
+        clock.now = 1_799_999_000.0 + 40 * 86400
+        self.assertEqual(service.observe("s1", turns(self.RELEASE, "thanks, looks good")), 0)
+        self.assertFalse(service.queue)
+        self.assertEqual(service._openers[service.session_key("s1")],
+                         (service._turn_key("s1", 0), 1))
+
     def build(self, rows, labels, today, **kwargs):
         return domain.build_work_insights(rows, labels, lambda ident: ident.split("\0")[0], self.AREAS,
                                           lambda m, p: None, today=today, **kwargs)

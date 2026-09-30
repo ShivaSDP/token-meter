@@ -821,19 +821,22 @@ class WorkInsightsService:
             self._remove_backlog(session_key)
             return 0
         now = self.clock()
-        horizon = settings["backfill_days"]
-        newest = max([float(t.get("ts") or 0) for t in turns] + [float(last_ts or 0)])
-        if horizon and newest and newest < now - horizon * 86400:
-            self._remove_backlog(session_key)
-            return 0
-        tags = question_tags(settings)
-        active = bool(newest and newest >= now - ACTIVE_WINDOW_S)
         prepared = [prepare_text(turn.get("text") or "") for turn in turns]
         # Label the session from its first substantive request, not a greeting.
         opener_index = next((i for i, text in enumerate(prepared) if text and is_substantive(text)),
                             next((i for i, text in enumerate(prepared) if text), None))
         opener_key = self._turn_key(row_id, opener_index) if opener_index is not None else None
         follow_ups = sum(1 for text in prepared[opener_index + 1:] if text) if opener_key else 0
+        horizon = settings["backfill_days"]
+        newest = max([float(t.get("ts") or 0) for t in turns] + [float(last_ts or 0)])
+        if horizon and newest and newest < now - horizon * 86400:
+            # Record the opener so older labeled sessions keep a follow-up count, but queue nothing.
+            if opener_key:
+                self._note_opener(session_key, opener_key, follow_ups, generation)
+            self._remove_backlog(session_key)
+            return 0
+        tags = question_tags(settings)
+        active = bool(newest and newest >= now - ACTIVE_WINDOW_S)
         items = []
         retry_count, retry_at = 0, None
         for ordinal, turn in enumerate(turns):
@@ -1351,10 +1354,14 @@ class WorkInsightsService:
         cached = self._corrections_memo[1].get(memo_key)
         if cached is not None:
             return cached
+        with self.lock:
+            opener_key = (self._openers.get(self.session_key(row_id)) or (None,))[0]
         found = []
-        for ordinal in range(1, max(0, int(count))):
+        for ordinal in range(max(0, int(count))):
             key = self._turn_key(row_id, ordinal)
-            if key in values:
+            if key == opener_key:
+                found = []  # Labels on turns before the current opener are no longer follow-ups.
+            elif ordinal and key in values:
                 found.append((ordinal, values[key]))
         self._corrections_memo[1][memo_key] = found
         return found

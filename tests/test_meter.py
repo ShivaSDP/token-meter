@@ -5557,12 +5557,41 @@ class SessionDeleteTests(unittest.TestCase):
             self.assertTrue(first.exists())
             self.assertTrue(second.exists())
 
-    def test_delete_route_forwards_the_trace_key(self):
-        with mock.patch.object(meter, "find_session", return_value=None), \
-                mock.patch.object(meter, "trash_session_log",
-                                  return_value={"ok": False, "error_code": "not_found"}) as trash:
-            meter.request_session_delete("shared", "rollout-b.jsonl")
-        trash.assert_called_once_with("shared", trace="rollout-b.jsonl")
+    def test_delete_route_checks_the_provider_of_the_exact_trace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first, second, sources = self.rollout_pair(root)
+            sources[1]["provider"] = "opencode"
+            with mock.patch.object(meter, "all_session_sources", return_value=sources), \
+                    mock.patch.object(meter, "trash_session_log",
+                                      return_value={"ok": True}) as trash:
+                refused = meter.request_session_delete("shared", "rollout-b.jsonl")
+                allowed = meter.request_session_delete("shared", "rollout-a.jsonl")
+            self.assertEqual(refused["error_code"], "read_only_provider")
+            self.assertTrue(allowed["ok"])
+            trash.assert_called_once_with("shared", sources=sources, trace="rollout-a.jsonl")
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+
+    def test_trace_delete_keeps_the_claude_duplicate_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            canonical, duplicate = root / "canonical.jsonl", root / "duplicate.jsonl"
+            canonical.write_text("{}\n")
+            duplicate.write_text("{}\n")
+            source = {
+                "id": "shared", "session": canonical.name, "path": str(canonical),
+                "provider": "claude", "project": "/repo", "mtime": 2,
+                "_aggregation_key": "claude:shared", "_aggregation_canonical": True,
+                "_duplicate_paths": (str(canonical), str(duplicate)),
+            }
+            result = meter.trash_session_log(
+                "shared", trace=canonical.name, sources=[source],
+                trash_dir=str(root / "Trash"),
+            )
+            self.assertEqual(result["error_code"], "ambiguous_id")
+            self.assertTrue(canonical.exists())
+            self.assertTrue(duplicate.exists())
 
     def test_cursor_delete_moves_only_transcript_and_preserves_shared_database(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -9980,7 +10009,8 @@ console.log(JSON.stringify({
             "function sessionRowKey(row){return String(row?.session||row?.id||'');}",
             "function stateSessionKey(state){return String(state?.session||stateSessionId(state)||'');}",
             "renderedAllSessions=new Map(all.map(row=>[sessionRowKey(row),row]));",
-            "const key=sessionRowKey(s),active=pinned?key===pinned:Boolean(LATEST&&key===stateSessionKey(LATEST));",
+            "const pinnedKey=pinned?(renderedAllSessions.has(pinned)?pinned:stateSessionKey(CURRENT)):'';",
+            "const key=sessionRowKey(s),active=pinned?key===pinnedKey:Boolean(LATEST&&key===stateSessionKey(LATEST));",
             "row.dataset.id=key;",
             "data-delete-session=\"${esc(sessionRowKey(s))}\"",
             "body:JSON.stringify({session_id:target.id,trace:target.session||''})",

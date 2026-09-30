@@ -6675,8 +6675,9 @@ function reconcileLogRows(sessions,maxCost,liveSessionIds=new Set()){
  const existing=new Map([...root.children].filter(row=>row.dataset.id).map(row=>[row.dataset.id,row]));
  const desired=new Set();
  let cursor=root.firstElementChild;
+ const pinnedKey=pinned?(renderedAllSessions.has(pinned)?pinned:stateSessionKey(CURRENT)):'';
  sessions.forEach(s=>{
-  const key=sessionRowKey(s),active=pinned?key===pinned:Boolean(LATEST&&key===stateSessionKey(LATEST));
+  const key=sessionRowKey(s),active=pinned?key===pinnedKey:Boolean(LATEST&&key===stateSessionKey(LATEST));
   desired.add(key);
   let row=existing.get(key);
   if(!row){

@@ -3449,13 +3449,8 @@ def find_session(sid, sources=None):
     return max(matches, key=selection_rank)
 
 
-def trash_session_log(session_id, sources=None, trash_dir=None, mover=None, trace=None):
-    """Move one exact, currently discovered session log to Trash."""
-    session_id = str(session_id or "").strip()
-    trace = str(trace or "").strip()
-    if not session_id or len(session_id) > 240 or len(trace) > 240:
-        return {"ok": False, "error": "A valid session ID is required.", "error_code": "invalid_id"}
-    source_pool = list(sources) if sources is not None else all_session_sources()
+def _session_delete_source(session_id, trace, source_pool):
+    """Resolve the one trace file a delete request names, or a public error."""
     not_found = {"ok": False, "error": "Session is not in the discovered log inventory.",
                  "error_code": "not_found"}
     if trace:
@@ -3464,24 +3459,34 @@ def trash_session_log(session_id, sources=None, trash_dir=None, mover=None, trac
             if str(candidate.get("session") or "") == trace
             and str(candidate.get("id") or "") == session_id
         ]
-        if len(traced) != 1:
-            return not_found
-        source = traced[0]
-    else:
-        source = find_session(session_id, sources=source_pool)
-        if not source or str(source.get("id") or "") != session_id:
-            return not_found
-        logical_paths = {
-            str(candidate.get("path") or "")
-            for candidate in canonical_aggregation_sources(source_pool)
-            if str(candidate.get("id") or "") == session_id
+        return (traced[0], None) if len(traced) == 1 else (None, not_found)
+    source = find_session(session_id, sources=source_pool)
+    if not source or str(source.get("id") or "") != session_id:
+        return None, not_found
+    logical_paths = {
+        str(candidate.get("path") or "")
+        for candidate in canonical_aggregation_sources(source_pool)
+        if str(candidate.get("id") or "") == session_id
+    }
+    if len(logical_paths) > 1:
+        return None, {
+            "ok": False,
+            "error": "This session has multiple trace files; choose one trace to delete.",
+            "error_code": "ambiguous_id",
         }
-        if len(logical_paths) > 1:
-            return {
-                "ok": False,
-                "error": "This session has multiple trace files; choose one trace to delete.",
-                "error_code": "ambiguous_id",
-            }
+    return source, None
+
+
+def trash_session_log(session_id, sources=None, trash_dir=None, mover=None, trace=None):
+    """Move one exact, currently discovered session log to Trash."""
+    session_id = str(session_id or "").strip()
+    trace = str(trace or "").strip()
+    if not session_id or len(session_id) > 240 or len(trace) > 240:
+        return {"ok": False, "error": "A valid session ID is required.", "error_code": "invalid_id"}
+    source_pool = list(sources) if sources is not None else all_session_sources()
+    source, error = _session_delete_source(session_id, trace, source_pool)
+    if error:
+        return error
     duplicate_paths = {
         str(path) for path in (source.get("_duplicate_paths") or ()) if path
     }
@@ -6349,7 +6354,11 @@ def session_action_capability():
 
 def request_session_delete(session_id, trace=None):
     """Apply the public read-only-provider boundary before any trash action."""
-    source = find_session(str(trace or session_id)) if (trace or session_id) else None
+    session_id, trace = str(session_id or "").strip(), str(trace or "").strip()
+    source_pool = all_session_sources()
+    source = None
+    if session_id and len(session_id) <= 240 and len(trace) <= 240:
+        source, _error = _session_delete_source(session_id, trace, source_pool)
     provider = str((source or {}).get("provider") or "").strip().lower()
     read_only = {
         str(value).strip().lower()
@@ -6363,7 +6372,7 @@ def request_session_delete(session_id, trace=None):
             ),
             "error_code": "read_only_provider",
         }
-    return trash_session_log(session_id, trace=trace)
+    return trash_session_log(session_id, sources=source_pool, trace=trace)
 
 
 def agent_access_launcher():
