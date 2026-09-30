@@ -881,8 +881,12 @@ class DomainTests(unittest.TestCase):
     def test_right_sizing_flags_premium_routine(self):
         rows = [row("a", model="gpt-5.6"), row("b", model="cheap"), row("c", model="mid")]
         labels = {"a": {"complexity": "routine"}, "b": {"complexity": "complex"}, "c": {"complexity": "everyday"}}
-        cells = {(c["complexity"], c["tier"]): c for c in self.build(rows, labels)["right_sizing"]["cells"]}
+        out = self.build(rows, labels)
+        cells = {(c["complexity"], c["tier"]): c for c in out["right_sizing"]["cells"]}
         self.assertEqual(cells[("routine", "premium")]["flag"], "possible_overspend")
+        self.assertEqual(out["opportunities"][0]["kind"], "premium_routine")
+        card = next(c for c in out["headlines"] if c["key"] == "top_opportunity")
+        self.assertEqual((card["kind"], card["opportunity"]), ("warn", "premium_routine"))
         self.assertEqual(cells[("complex", "light")]["sessions"], 1)
 
     def test_filters_and_period(self):
@@ -912,23 +916,21 @@ class OutcomeInsightTests(unittest.TestCase):
         self.assertEqual(domain.session_outcome(3, [(1, None), (2, None)]), "unclear")
         self.assertEqual(domain.session_outcome(4, [(1, False), (2, False)]), "accepted")
         self.assertEqual(domain.session_outcome(4, [(1, False), (2, False)], pending=True), "pending")
-        self.assertEqual(domain.rework_share(4, [(1, False), (2, True)]), 0.5)
-        self.assertEqual(domain.rework_share(4, [(1, False)]), 0.0)
 
-    def test_outcomes_rework_cost_and_position(self):
+    def test_value_by_work_type_and_position(self):
         rows = [row("a", cost=4.0, turns_=4), row("b", cost=2.0, turns_=3), row("c", cost=1.0, turns_=1)]
-        labels = {"a": {"area": "Personal", "corrections": 1, "correction_labels": 3},
-                  "b": {"area": "Personal", "corrections": 0, "correction_labels": 2}}
+        labels = {"a": {"area": "Personal", "work_type": "debug", "corrections": 1, "correction_labels": 3},
+                  "b": {"area": "Personal", "work_type": "debug", "corrections": 0, "correction_labels": 2}}
         sequences = {"a": [(1, False), (2, True), (3, False)], "b": [(1, False), (2, False)]}
         out = self.build(rows, labels, sequences)
-        buckets = {b["outcome"]: b for b in out["outcomes"]["buckets"]}
-        self.assertEqual(buckets["recovered"]["sessions"], 1)
-        self.assertEqual(buckets["accepted"]["sessions"], 1)
-        self.assertEqual(buckets["single_shot"]["sessions"], 1)
-        self.assertAlmostEqual(out["outcomes"]["rework_cost"], 4.0 * 0.5)
-        positions = {p["bucket"]: p for p in out["position"]}
+        debug = next(e for e in out["economics"] if e["work_type"] == "debug")
+        self.assertEqual((debug["judged_sessions"], debug["resolved_sessions"], debug["resolved_rate"]), (2, 2, 1.0))
+        self.assertEqual(debug["cost_per_resolved"], 3.0)
+        positions = {p["bucket"]: p for p in out["rework_by_position"]}
         self.assertEqual(positions["1–2"]["samples"], 4)
         self.assertEqual(positions["3–5"]["samples"], 1)
+        self.assertNotIn("outcomes", out)
+        self.assertEqual(out["kpis"]["current"]["ended_spend"], 0.0)
 
     def test_model_fit_marks_best_only_with_enough_samples(self):
         rows = [row(f"x{i}", model="gpt-5.6") for i in range(3)] + [row(f"y{i}", model="mid") for i in range(3)]
@@ -953,10 +955,11 @@ class OutcomeInsightTests(unittest.TestCase):
         sequences = {f"s{i}": [(1, False), (2, False), (3, False), (4, True)] for i in range(24)}
         cards = self.build(rows, labels, sequences)["headlines"]
         keys = [c["key"] for c in cards]
-        self.assertIn("ended_on_pushback", keys)
         self.assertIn("pushback_trend", keys)
+        self.assertNotIn("ended_on_pushback", keys)
         self.assertLessEqual(len(cards), domain.MAX_HEADLINES)
-        self.assertEqual(cards[0]["kind"], "warn")
+        order = {"warn": 0, "good": 1, "neutral": 2}
+        self.assertEqual([c["kind"] for c in cards], sorted((c["kind"] for c in cards), key=order.get))
         trend = next(c for c in cards if c["key"] == "pushback_trend")
         self.assertEqual(trend["kind"], "good")
 
@@ -995,7 +998,7 @@ class OperatingRhythmTests(unittest.TestCase):
         self.assertEqual(effort["efforts"], ["low", "xhigh"])
         flagged = [c for c in effort["cells"] if c["flag"]]
         self.assertEqual([(c["complexity"], c["effort"], c["spend"]) for c in flagged], [("routine", "xhigh", 8.0)])
-        self.assertIn("effort_routine", [h["key"] for h in out["headlines"]])
+        self.assertEqual(out["opportunities"][0]["kind"], "effort_routine")
 
     def test_value_flat_uses_complete_months_only(self):
         rows, labels, sequences = [], {}, {}
@@ -1009,13 +1012,15 @@ class OperatingRhythmTests(unittest.TestCase):
         self.assertEqual((flat["month"], flat["previous_month"]), ("2026-08", "2026-07"))
         self.assertLess(flat["resolved_change"], 0)
 
-    def test_cost_per_resolved_needs_enough_labeled_sessions(self):
-        rows = [row(f"r{i}", cost=2.0, turns_=3) for i in range(25)]
-        labels = {f"r{i}": {"correction_labels": 2, "corrections": 1 if i < 5 else 0} for i in range(25)}
-        sequences = {f"r{i}": [(1, False), (2, True)] if i < 5 else [(1, False), (2, False)] for i in range(25)}
-        card = next(c for c in self.build(rows, labels, sequences)["headlines"] if c["key"] == "cost_per_resolved")
-        self.assertEqual((card["sessions"], card["cost"], card["ended_cost"]), (20, 2.0, 2.0))
-
+    def test_model_choices_need_a_clear_gap(self):
+        rows = [row(f"u{i}", model="gpt-5.6") for i in range(3)] + [row(f"b{i}", model="mid") for i in range(3)]
+        labels = {f"u{i}": {"work_type": "debug", "corrections": 3, "correction_labels": 10} for i in range(3)}
+        labels.update({f"b{i}": {"work_type": "debug", "corrections": 1, "correction_labels": 10} for i in range(3)})
+        rows.append(row("u9", model="gpt-5.6"))
+        labels["u9"] = {"work_type": "debug", "corrections": 3, "correction_labels": 10}
+        choices = self.build(rows, labels, {})["choices"]
+        self.assertEqual([(c["work_type"], c["best"]["model"], c["used"]["model"]) for c in choices],
+                         [("debug", "mid", "gpt-5.6")])
 
 class DrillDownTests(unittest.TestCase):
     AREAS = DomainTests.AREAS
@@ -1150,9 +1155,10 @@ class SurfaceContractTests(unittest.TestCase):
         self.assertIn("if(h==='work'){", self.page)
 
     def test_work_page_shows_estimates_unclear_and_pending(self):
-        for marker in ("id=view-work", "Spend in, outcomes out", "Pushback over time", "Cost by kind of work",
-                       "id=w-kpis", "Model fit by work type", "By turn position", "id=w-headlines",
-                       "Model right-sizing", "Possible overspend (estimate)", "View as table",
+        for marker in ("id=view-work", "Spend in, outcomes out", "Pushback over time", "Value by kind of work",
+                       "Model choices", "Right-sizing opportunities",
+                       "id=w-kpis", "id=w-headlines",
+                       "View as table",
                        "text goes only to Ollama on this machine", "'var(--w-pending)'", "'var(--w-unclear)'"):
             self.assertTrue(marker in self.page, marker)
 

@@ -273,6 +273,33 @@ one Codex session id can span several rollout files. Drill-downs return session
 ids, matching the All sessions list. The ledger schema moved to version 3 to
 drop labels keyed by id alone.
 
+## Less but more useful (iteration 5)
+
+Every module now answers one decision, and nothing restates another:
+
+- KPIs: resolved share, pushback rate, cost per resolved session, and spend on
+  unresolved sessions (last labeled follow-up was a pushback). The earlier
+  "spent after first pushback" estimate assumed every later turn was rework and
+  was dropped.
+- At most three headline cards, only for change or opportunity: spend up while
+  resolved sessions stay flat, pushback trend, the largest right-sizing
+  opportunity, long-session drift (turns 11+ at 1.5× the first two follow-ups),
+  area share shift, and a kind of work whose resolved sessions cost 2× the
+  median.
+- The ledger's lower half shows judged outcomes only; single-request and
+  not-yet-labeled sessions are counted in the note.
+- **Value by kind of work**: cost per resolved session and resolved rate per
+  work type (rows with fewer than five judged sessions are dimmed).
+- **Model choices**: per work type, a model that needed at least 3 points less
+  pushback than the most-used one, both with 20+ labeled turns; the full matrix
+  is behind a toggle.
+- **Right-sizing opportunities**: premium models on routine work (with a
+  standard-tier estimate), very high reasoning effort on routine work, and light
+  models on complex work with above-median pushback, ranked by spend; the grids
+  are behind a toggle.
+- The turn-position strip was removed as a module; it only surfaces as the drift
+  headline when it matters.
+
 ## Privacy
 
 - User-turn text and the preceding assistant-reply tail (600 characters) exist

@@ -88,7 +88,7 @@ def _rate(corrections, samples):
 OUTCOMES = ("single_shot", "accepted", "recovered", "ended_on_pushback", "unclear", "pending")
 POSITION_BUCKETS = ((1, 2, "1–2"), (3, 5, "3–5"), (6, 10, "6–10"), (11, 20, "11–20"), (21, 10**9, "21+"))
 MAX_FIT_MODELS = 5
-MAX_HEADLINES = 4
+MAX_HEADLINES = 3
 MAX_TREND_MODELS = 6
 EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max", "ultra")
 HIGH_EFFORTS = ("xhigh", "max", "ultra")
@@ -110,14 +110,6 @@ def session_outcome(turns, sequence, pending=False):
     if not any(confident):
         return "accepted"
     return "ended_on_pushback" if confident[-1] else "recovered"
-
-
-def rework_share(turns, sequence):
-    """Share of a session's turns that came after its first pushback (0 when none)."""
-    first = next((ordinal for ordinal, value in sequence if value), None)
-    if first is None or turns <= 0:
-        return 0.0
-    return max(0.0, min(1.0, (turns - first) / turns))
 
 
 def build_work_insights(rows, labels, key_for, areas, output_price, months=6,
@@ -241,9 +233,16 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
         if not group:
             continue
         spend = sum(float(s["row"].get("cost") or 0) for s in group)
+        outcomes_here = [session_outcome(s["turns"], s["sequence"], s["pending"]) for s in group]
+        judged = sum(o in ("accepted", "recovered", "ended_on_pushback") for o in outcomes_here)
+        resolved = [s for s, o in zip(group, outcomes_here) if o in ("accepted", "recovered")]
         economics.append({
             "work_type": work_type, "sessions": len(group), "spend": round(spend, 6),
             "cost_per_session": spend / len(group),
+            "judged_sessions": judged,
+            "resolved_sessions": len(resolved),
+            "resolved_rate": len(resolved) / judged if judged else None,
+            "cost_per_resolved": (sum(_cost(s) for s in resolved) / len(resolved)) if resolved else None,
             "median_turns": statistics.median([s["turns"] for s in group]),
             "rework": _rate(sum(s["corrections"] for s in group), sum(s["correction_labels"] for s in group)),
         })
@@ -299,14 +298,14 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
               and cell["rework"]["rate"] > median_rate):
             cell["flag"] = "possible_false_economy"
 
-    outcomes = _outcomes(in_window)
     effort = _effort(in_window)
     kpis = {"current": _kpis(in_window), "previous": _kpis(earlier) if earlier else None,
             "previous_months": sorted(previous_months)}
     position = _position(in_window)
     model_fit = _model_fit(in_window)
-    headlines = _headlines(sessions, all_months, area_names, economics, cells, tier_prices, outcomes, today,
-                           effort, corrections_for)
+    opportunities = _opportunities(cells, effort, tier_prices)
+    headlines = _headlines(sessions, all_months, area_names, economics, tier_prices, position, opportunities,
+                           today, corrections_for)
 
     labeled_sessions = sum(1 for s in in_window if s["area"] != PENDING)
     labeled_turns = sum(s["correction_labels"] for s in in_window)
@@ -318,10 +317,11 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
         "economics": economics,
         "rework": rework,
         "right_sizing": {"cells": cells, "tiers_known": bool(tiers), "effort": effort},
-        "outcomes": outcomes,
+        "rework_by_position": position,
         "kpis": kpis,
-        "position": position,
         "model_fit": model_fit,
+        "choices": _choices(model_fit),
+        "opportunities": opportunities,
         "headlines": headlines,
         "coverage": {
             "sessions": len(in_window), "labeled_sessions": labeled_sessions,
@@ -350,12 +350,10 @@ def _kpis(group):
     """Period KPIs: resolved share, pushback rate, cost per resolved session, spend after first pushback."""
     counts = collections.Counter()
     spend = collections.Counter()
-    rework_spend = 0.0
     for s in group:
         outcome = session_outcome(s["turns"], s["sequence"], s["pending"])
         counts[outcome] += 1
         spend[outcome] += _cost(s)
-        rework_spend += _cost(s) * rework_share(s["turns"], s["sequence"])
     judged = counts["accepted"] + counts["recovered"] + counts["ended_on_pushback"]
     resolved = counts["accepted"] + counts["recovered"]
     total = sum(spend.values())
@@ -365,35 +363,10 @@ def _kpis(group):
         "resolved_rate": resolved / judged if judged else None,
         "pushback": _rate(sum(s["corrections"] for s in group), sum(s["correction_labels"] for s in group)),
         "cost_per_resolved": (spend["accepted"] + spend["recovered"]) / resolved if resolved else None,
-        "rework_spend": round(rework_spend, 6),
-        "rework_share": rework_spend / total if total else None,
+        "ended_spend": round(spend["ended_on_pushback"], 6),
+        "ended_share": spend["ended_on_pushback"] / total if total else None,
         "spend": round(total, 6),
         "few_samples": judged < MIN_RATE_SAMPLES,
-    }
-
-
-def _outcomes(in_window):
-    buckets = {key: {"outcome": key, "sessions": 0, "spend": 0.0} for key in OUTCOMES}
-    rework_cost = total = 0.0
-    for s in in_window:
-        key = session_outcome(s["turns"], s["sequence"], s["pending"])
-        buckets[key]["sessions"] += 1
-        buckets[key]["spend"] += _cost(s)
-        total += _cost(s)
-        rework_cost += _cost(s) * rework_share(s["turns"], s["sequence"])
-    rows = []
-    for key in OUTCOMES:
-        bucket = buckets[key]
-        bucket["spend"] = round(bucket["spend"], 6)
-        bucket["cost_per_session"] = bucket["spend"] / bucket["sessions"] if bucket["sessions"] else None
-        rows.append(bucket)
-    labeled = sum(b["sessions"] for b in rows if b["outcome"] in ("accepted", "recovered", "ended_on_pushback"))
-    return {
-        "buckets": rows,
-        "labeled_sessions": labeled,
-        "rework_cost": round(rework_cost, 6),
-        "rework_share": rework_cost / total if total else None,
-        "few_samples": labeled < MIN_RATE_SAMPLES,
     }
 
 
@@ -478,42 +451,52 @@ def _resolved(group, corrections_for):
             in ("accepted", "recovered")]
 
 
-def _headlines(sessions, months, area_names, economics, cells, tier_prices, outcomes, today="",
-               effort=None, corrections_for=None):
-    """Deterministic, evidence-backed statements; each names the module that supports it."""
+def _headlines(sessions, months, area_names, economics, tier_prices, position, opportunities, today="",
+               corrections_for=None):
+    """Up to three statements about change or opportunity; each links to the module that supports it.
+
+    KPIs already state the period's levels, so cards only report movement, the largest opportunity,
+    and patterns that are otherwise easy to miss.
+    """
     cards = []
-    buckets = {b["outcome"]: b for b in outcomes["buckets"]}
-    resolved_n = buckets["accepted"]["sessions"] + buckets["recovered"]["sessions"]
-    if not outcomes["few_samples"] and resolved_n and buckets["ended_on_pushback"]["sessions"]:
-        resolved_cost = (buckets["accepted"]["spend"] + buckets["recovered"]["spend"]) / resolved_n
-        ended = buckets["ended_on_pushback"]
-        cards.append({"key": "cost_per_resolved", "kind": "neutral", "target": "outcomes",
-                      "cost": resolved_cost, "sessions": resolved_n,
-                      "ended_cost": ended["spend"] / ended["sessions"]})
+    current = months[-1] if months else ""
+    previous = months[-2] if len(months) > 1 else ""
+    partial = bool(today and today[:7] == current)
     complete = [m for m in months if not (today and today[:7] == m)]
     if len(complete) >= 2:
         last, before = complete[-1], complete[-2]
-        spend_last = sum(float(c or 0) for s in sessions for d, c in (s["row"].get("_day_cost") or {}).items()
-                         if str(d)[:7] == last)
-        spend_before = sum(float(c or 0) for s in sessions for d, c in (s["row"].get("_day_cost") or {}).items()
-                           if str(d)[:7] == before)
+
+        def month_spend(month):
+            return sum(float(c or 0) for s in sessions for d, c in (s["row"].get("_day_cost") or {}).items()
+                       if str(d)[:7] == month)
+
         resolved_last = len(_resolved([s for s in sessions if s["start_month"] == last], corrections_for))
         resolved_before = len(_resolved([s for s in sessions if s["start_month"] == before], corrections_for))
+        spend_last, spend_before = month_spend(last), month_spend(before)
         if spend_before > 0 and resolved_before >= MIN_RATE_SAMPLES:
-            spend_change = spend_last / spend_before - 1
-            resolved_change = resolved_last / resolved_before - 1
+            spend_change, resolved_change = spend_last / spend_before - 1, resolved_last / resolved_before - 1
             if spend_change >= 0.25 and resolved_change <= 0.05:
-                cards.append({"key": "value_flat", "kind": "warn", "target": "outcomes", "month": last,
+                cards.append({"key": "value_flat", "kind": "warn", "target": "allocation", "month": last,
                               "previous_month": before, "spend_change": spend_change,
                               "resolved_change": resolved_change})
-    if effort:
-        overthinking = [c for c in effort["cells"] if c["flag"] == "possible_overthinking"]
-        spend = sum(c["spend"] for c in overthinking)
-        if spend >= 1:
-            cards.append({"key": "effort_routine", "kind": "warn", "target": "sizing", "spend": spend,
-                          "sessions": sum(c["sessions"] for c in overthinking)})
-    current = months[-1] if months else ""
-    previous = months[-2] if len(months) > 1 else ""
+    if current and previous:
+        now_rate, before_rate = _month_rework(sessions, current), _month_rework(sessions, previous)
+        if now_rate and before_rate and not now_rate["few_samples"] and not before_rate["few_samples"]:
+            change = now_rate["rate"] - before_rate["rate"]
+            if abs(change) >= 0.03:
+                cards.append({"key": "pushback_trend", "kind": "good" if change < 0 else "warn",
+                              "target": "rework", "month": current, "previous_month": previous,
+                              "partial": partial, "rate": now_rate["rate"], "previous_rate": before_rate["rate"]})
+    if opportunities and opportunities[0]["spend"] >= 1:
+        top = opportunities[0]
+        cards.append({"key": "top_opportunity", "kind": "warn", "target": "sizing",
+                      **{k: v for k, v in top.items() if k != "kind"}, "opportunity": top["kind"]})
+    early = next((p for p in position if p["bucket"] == "1–2"), None)
+    late = next((p for p in position if p["bucket"] in ("11–20", "21+") and p["rate"] is not None
+                 and not p["few_samples"]), None)
+    if early and late and early["rate"] and not early["few_samples"] and late["rate"] >= 1.5 * early["rate"]:
+        cards.append({"key": "long_sessions_drift", "kind": "warn", "target": "rework",
+                      "bucket": late["bucket"], "rate": late["rate"], "early_rate": early["rate"]})
     if current and previous:
         now_shares, now_total = _month_spend_shares(sessions, current, area_names)
         before_shares, before_total = _month_spend_shares(sessions, previous, area_names)
@@ -521,44 +504,59 @@ def _headlines(sessions, months, area_names, economics, cells, tier_prices, outc
             deltas = {a: now_shares.get(a, 0) - before_shares.get(a, 0) for a in set(now_shares) | set(before_shares)}
             area, delta = max(deltas.items(), key=lambda item: abs(item[1]), default=("", 0))
             if area and abs(delta) >= 0.10:
-                cards.append({"key": "area_shift", "kind": "neutral", "target": "allocation",
-                              "area": area, "month": current, "previous_month": previous,
-                              "partial": bool(today and today[:7] == current),
+                cards.append({"key": "area_shift", "kind": "neutral", "target": "allocation", "area": area,
+                              "month": current, "previous_month": previous, "partial": partial,
                               "share": now_shares.get(area, 0), "previous_share": before_shares.get(area, 0)})
-        now_rate, before_rate = _month_rework(sessions, current), _month_rework(sessions, previous)
-        if now_rate and before_rate and not now_rate["few_samples"] and not before_rate["few_samples"]:
-            change = now_rate["rate"] - before_rate["rate"]
-            if abs(change) >= 0.03:
-                cards.append({"key": "pushback_trend", "kind": "good" if change < 0 else "warn",
-                              "target": "rework", "month": current, "previous_month": previous,
-                              "partial": bool(today and today[:7] == current),
-                              "rate": now_rate["rate"], "previous_rate": before_rate["rate"]})
-    ended = next(b for b in outcomes["buckets"] if b["outcome"] == "ended_on_pushback")
-    if not outcomes["few_samples"] and outcomes["labeled_sessions"]:
-        share = ended["sessions"] / outcomes["labeled_sessions"]
-        if share >= 0.10:
-            cards.append({"key": "ended_on_pushback", "kind": "warn", "target": "outcomes",
-                          "share": share, "sessions": ended["sessions"], "spend": ended["spend"]})
-    overspend = next((c for c in cells if c["flag"] == "possible_overspend"), None)
-    if overspend and overspend["spend"] >= 1 and tier_prices.get("premium") and tier_prices.get("standard"):
-        ratio = tier_prices["standard"] / tier_prices["premium"]
-        cards.append({"key": "right_size", "kind": "warn", "target": "sizing", "spend": overspend["spend"],
-                      "sessions": overspend["sessions"], "estimate": round(overspend["spend"] * ratio, 6)})
-    typed = [e for e in economics if e["work_type"] not in ("unclear", "other") and e["sessions"] >= 3]
-    if len(typed) >= 2:
-        costliest = max(typed, key=lambda e: e["cost_per_session"])
-        median = statistics.median(e["cost_per_session"] for e in typed)
-        if median and costliest["cost_per_session"] >= 1.5 * median:
+    judged = [e for e in economics if e["work_type"] not in ("unclear", "other")
+              and e.get("cost_per_resolved") is not None and e["resolved_sessions"] >= 3]
+    if len(judged) >= 2:
+        costliest = max(judged, key=lambda e: e["cost_per_resolved"])
+        median = statistics.median(e["cost_per_resolved"] for e in judged)
+        if median and costliest["cost_per_resolved"] >= 2 * median:
             cards.append({"key": "costliest_work", "kind": "neutral", "target": "economics",
-                          "work_type": costliest["work_type"], "cost_per_session": costliest["cost_per_session"],
-                          "multiple": costliest["cost_per_session"] / median})
-    if rework_value := outcomes.get("rework_share"):
-        if rework_value >= 0.10 and not outcomes["few_samples"]:
-            cards.append({"key": "rework_cost", "kind": "warn", "target": "outcomes",
-                          "spend": outcomes["rework_cost"], "share": rework_value})
+                          "work_type": costliest["work_type"], "cost_per_resolved": costliest["cost_per_resolved"],
+                          "multiple": costliest["cost_per_resolved"] / median})
     order = {"warn": 0, "good": 1, "neutral": 2}
     cards.sort(key=lambda card: order[card["kind"]])
     return cards[:MAX_HEADLINES]
+
+
+def _choices(model_fit):
+    """Per work type: the least-pushback model vs the model used most, when both have enough evidence."""
+    rows = []
+    for work_type in model_fit["work_types"]:
+        cells = [c for c in model_fit["cells"] if c["work_type"] == work_type and c["sessions"]]
+        eligible = [c for c in cells if c["rework"] and not c["rework"]["few_samples"]]
+        if len(eligible) < 2:
+            continue
+        best = min(eligible, key=lambda c: (c["rework"]["rate"], c["cost_per_session"] or 0))
+        used = max(cells, key=lambda c: c["sessions"])
+        if best is used or best["rework"]["rate"] + 0.03 > (used["rework"] or {"rate": 1})["rate"]:
+            continue
+        rows.append({"work_type": work_type, "best": best, "used": used,
+                     "gap": used["rework"]["rate"] - best["rework"]["rate"]})
+    return sorted(rows, key=lambda row: -row["gap"])
+
+
+def _opportunities(cells, effort, tier_prices):
+    """Flagged right-sizing cells as one ranked list, with a savings estimate where prices allow."""
+    rows = []
+    ratio = (tier_prices["standard"] / tier_prices["premium"]
+             if tier_prices.get("premium") and tier_prices.get("standard") else None)
+    for cell in cells:
+        if cell["flag"] == "possible_overspend":
+            rows.append({"kind": "premium_routine", "complexity": cell["complexity"], "tier": cell["tier"],
+                         "sessions": cell["sessions"], "spend": cell["spend"],
+                         "estimate": round(cell["spend"] * ratio, 6) if ratio else None})
+        elif cell["flag"] == "possible_false_economy":
+            rows.append({"kind": "light_complex", "complexity": cell["complexity"], "tier": cell["tier"],
+                         "sessions": cell["sessions"], "spend": cell["spend"], "rework": cell["rework"],
+                         "estimate": None})
+    for cell in (effort or {}).get("cells", []):
+        if cell["flag"] == "possible_overthinking":
+            rows.append({"kind": "effort_routine", "complexity": cell["complexity"], "effort": cell["effort"],
+                         "sessions": cell["sessions"], "spend": cell["spend"], "estimate": None})
+    return sorted(rows, key=lambda row: -row["spend"])
 
 
 MAX_DRILL_SESSIONS = 50
