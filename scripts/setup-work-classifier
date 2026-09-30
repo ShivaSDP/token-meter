@@ -5,6 +5,8 @@ set -euo pipefail
 MODEL_NAME="token-meter-jet"
 REPO="michaljach/jet"
 REVISION="v6.2.0"
+# Pinned commit for the v6.2.0 tag; tags can move, commits cannot.
+COMMIT="fbc3d2daa679e0d4bd9f99c9912b6496d5a41f0a"
 CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/token-meter"
 KEEP_DOWNLOAD=1
 
@@ -47,8 +49,8 @@ fi
 
 TARGET="$CACHE_ROOT/jet-$REVISION"
 mkdir -p "$TARGET"
-BASE="https://huggingface.co/$REPO/resolve/$REVISION"
-LISTING="$(curl -fsSL "https://huggingface.co/api/models/$REPO/tree/$REVISION")"
+BASE="https://huggingface.co/$REPO/resolve/$COMMIT"
+LISTING="$(curl -fsSL "https://huggingface.co/api/models/$REPO/tree/$COMMIT")"
 
 FILES="$(printf '%s' "$LISTING" | python3 -c '
 import json, sys
@@ -59,7 +61,8 @@ for entry in json.load(sys.stdin):
     if path in wanted or (path.startswith("model-") and path.endswith(".safetensors")):
         lfs = entry.get("lfs") or {}
         size = lfs.get("size", entry.get("size", 0))
-        print("\t".join([path, str(size), lfs.get("oid") or "-"]))
+        digest = ("sha256:" + lfs["oid"]) if lfs.get("oid") else ("git:" + str(entry.get("oid") or ""))
+        print("\t".join([path, str(size), digest]))
 ')"
 if [ -z "$FILES" ]; then
   echo "Could not read the model file list from Hugging Face." >&2
@@ -67,18 +70,26 @@ if [ -z "$FILES" ]; then
 fi
 
 file_size() { stat -f %z "$1" 2>/dev/null || stat -c %s "$1"; }
-file_sha256() {
-  if command -v shasum >/dev/null; then shasum -a 256 "$1" | cut -d' ' -f1; else sha256sum "$1" | cut -d' ' -f1; fi
+file_digest() {
+  # sha256:<hex> for LFS weights, git:<hex> (git blob SHA-1) for small tracked files.
+  python3 - "$1" "$2" <<'PY'
+import hashlib, sys
+path, kind = sys.argv[1], sys.argv[2]
+data = open(path, "rb").read()
+if kind == "sha256":
+    print("sha256:" + hashlib.sha256(data).hexdigest())
+else:
+    print("git:" + hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest())
+PY
 }
 
-COMMIT="$(curl -fsSL "https://huggingface.co/api/models/$REPO/revision/$REVISION" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sha", ""))')"
-echo "Jet $REVISION resolves to commit ${COMMIT:-unknown}"
+echo "Jet $REVISION pinned to commit $COMMIT"
 
 echo "Downloading Jet $REVISION to $TARGET"
 verify() {
-  local destination="$1" size="$2" sha="$3"
+  local destination="$1" size="$2" digest="$3"
   [ -f "$destination" ] && [ "$(file_size "$destination")" = "$size" ] || return 1
-  [ "$sha" = "-" ] || [ "$(file_sha256 "$destination")" = "$sha" ]
+  [ "$(file_digest "$destination" "${digest%%:*}")" = "$digest" ]
 }
 
 while IFS=$'\t' read -r path size sha; do
@@ -93,7 +104,7 @@ while IFS=$'\t' read -r path size sha; do
     curl -fL --retry 3 --retry-delay 2 -o "$destination" "$BASE/$path"
   }
   if ! verify "$destination" "$size" "$sha"; then
-    echo "Verification failed for $path (size or SHA-256 does not match Hugging Face)." >&2
+    echo "Verification failed for $path (size or hash does not match the pinned commit)." >&2
     rm -f "$destination"
     exit 1
   fi

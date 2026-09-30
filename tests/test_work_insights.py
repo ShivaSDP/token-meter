@@ -370,6 +370,76 @@ class ServiceTests(unittest.TestCase):
         service.step()
         self.assertEqual(service.ledger.backlog_pending(), 0)
 
+    def test_pacing_wait_does_not_spin_when_wake_is_set(self):
+        clock = Clock()
+        calls = []
+        service = None
+
+        def event_sleep(seconds):
+            # Mirror Event.wait: a set event returns immediately without time passing.
+            calls.append(seconds)
+            if service.wake.is_set():
+                return
+            clock.now += seconds
+
+        FakeClient.script, FakeClient.prompts, FakeClient.responder, FakeClient.digest_error = [], [], None, None
+        values = W.normalize_settings({"enabled": True, "backfill_days": 0, "rate_per_minute": 10})
+        service = W.WorkInsightsService(os.path.join(self.tmp.name, "spin.sqlite3"), lambda: values,
+                                        client_factory=FakeClient, clock=clock, monotonic=clock,
+                                        sleep=event_sleep, load_probe=lambda: 0.1)
+        service.observe("s1", turns("hello"))
+        service.wake.set()
+        service.step()
+        self.assertEqual(len(FakeClient.prompts), 5)
+        self.assertLess(len(calls), 12)
+
+    def test_multiple_failures_in_one_session_all_keep_a_retry(self):
+        service, values, clock = make_service(self.tmp.name)
+        FakeClient.responder = lambda prompt: jet_response("Sure")
+        session = [{"ts": clock.now - 100 + i, "text": f"turn {i}", "model": "m", "context": "done"} for i in range(3)]
+        service.observe("s1", session)
+        for _ in range(3):
+            service.step()
+            clock.now += 30
+        key = service.session_key("s1")
+        service.observe("s1", session)
+        self.assertEqual(service.ledger.next_backlog(5, clock.now + 3_600), [key])
+        clock.now += W.ITEM_RETRY_DELAYS_S[0] + 1
+        FakeClient.responder = lambda prompt: jet_response(letter_for(prompt, "debug")) \
+            if "What kind of work" in prompt else jet_response("A") if "Which area" in prompt \
+            else jet_response("1") if "Scale" in prompt else jet_response("no")
+        drain(service)
+        entry = service.snapshot()[key]
+        self.assertEqual(entry.get("correction_labels"), 2)
+
+    def test_digest_is_rechecked_when_the_model_changes(self):
+        service, values, clock = make_service(self.tmp.name)
+        service.observe("s1", turns("hello"))
+        drain(service)
+        checks = []
+        with mock.patch.object(FakeClient, "model_digest", lambda self: checks.append(self.model) or "d"):
+            values["model"] = "other-model"
+            service.observe("s2", turns("more"))
+            service.step()
+        self.assertEqual(checks, ["other-model"])
+
+    def test_turn_keys_ignore_text(self):
+        service, _, _ = make_service(self.tmp.name)
+        self.assertEqual(service._turn_key("s1", 2), service._turn_key("s1", 2))
+        self.assertNotEqual(service._turn_key("s1", 2), service._turn_key("s1", 3))
+
+    def test_v1_ledger_is_recreated_not_dropped_in_place(self):
+        import sqlite3
+        path = os.path.join(self.tmp.name, "old.sqlite3")
+        with sqlite3.connect(path) as connection:
+            connection.execute("CREATE TABLE work_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            connection.execute("INSERT INTO work_metadata VALUES ('salt', 'old-salt-value')")
+            connection.execute("PRAGMA user_version = 1")
+        ledger = W.LabelLedger(path)
+        self.assertNotEqual(ledger.salt, "old-salt-value")
+        with open(path, "rb") as handle:
+            self.assertNotIn(b"old-salt-value", handle.read())
+
     def test_latency_baseline_adapts(self):
         service, _, _ = make_service(self.tmp.name)
         for _ in range(W.LATENCY_WINDOW):
@@ -495,10 +565,13 @@ class OllamaClientTests(unittest.TestCase):
 
     def test_remote_and_cloud_models_are_refused(self):
         for entry in ({"name": "token-meter-jet:latest", "remote_host": "https://ollama.com"},
+                      {"name": "token-meter-jet:latest", "remote_model": "gpt-oss:120b"},
+                      {"name": "token-meter-jet-cloud"},
                       {"name": "token-meter-jet:cloud"}):
             FakeOllama.responses = {"/api/tags": (200, {"models": [dict(entry, digest="x")]})}
             with self.assertRaises(W.ClassifierError) as caught:
-                W.OllamaClient(self.url, entry["name"].split(":")[0] if "remote_host" in entry else entry["name"]).model_digest()
+                name = entry["name"].split(":")[0] if entry["name"].endswith(":latest") else entry["name"]
+                W.OllamaClient(self.url, name).model_digest()
             self.assertEqual(caught.exception.reason, "remote_model")
 
     def test_unreachable_is_transport(self):
@@ -679,7 +752,8 @@ class SurfaceContractTests(unittest.TestCase):
         with open(path, encoding="utf-8") as handle:
             script = handle.read()
         self.assertIn('ollama create "$MODEL_NAME" -q int4', script)
-        self.assertIn("file_sha256", script)
+        self.assertIn("file_digest", script)
+        self.assertIn('COMMIT="fbc3d2daa679e0d4bd9f99c9912b6496d5a41f0a"', script)
         self.assertNotIn("sudo", script)
 
 

@@ -71,7 +71,7 @@ Token Meter reads local agent traces, calculates clearly labeled usage estimates
 - Keep `meter.py` and `token_meter_mcp.py` on the Python standard library.
 - Keep the dashboard local-only; do not add hosted assets, analytics, or telemetry.
 - Never output, commit, persist, or transmit prompts, responses, reasoning, tool contents, credentials, account data, or raw traces.
-- Work insights are the only sanctioned consumer of typed user-turn text: it stays in the bounded in-memory queue, is sent only to the validated loopback Ollama URL, and only salted keys and labels persist. Do not add other consumers.
+- Work insights are the only sanctioned consumer of typed user-turn text and the preceding assistant-reply tail (600 characters): it stays in the bounded in-memory queue, is sent only to the validated loopback Ollama URL, and only salted keys and labels persist. Do not add other consumers.
 - Provider-account requests must remain narrow, bounded, sanitized, and read-only.
 - Cursor databases, transcripts, and request logs are read-only inputs.
 - Label estimates as estimates. Unavailable evidence must not become a measured zero.

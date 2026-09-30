@@ -1,7 +1,7 @@
 """Local work classification: bounded queue, label ledger, pacing, and a loopback Ollama client.
 
-User-turn text lives only in the bounded in-memory queue and is sent only to a
-loopback Ollama URL. The ledger stores salted keys, enum labels, confidences,
+Typed user-turn text and the preceding assistant-reply tail live only in the
+bounded in-memory queue and are sent only to a loopback Ollama URL. The ledger stores salted keys, enum labels, confidences,
 and reason codes; it never stores text.
 """
 
@@ -474,15 +474,10 @@ class LabelLedger:
         directory = os.path.dirname(self.path)
         if directory:
             os.makedirs(directory, exist_ok=True)
+        if self._incompatible():
+            # Recreate rather than DROP TABLE so freed pages with old keys do not linger in the file.
+            self._remove_files()
         with self._connect() as connection:
-            version = connection.execute("PRAGMA user_version").fetchone()[0]
-            stale = 0 < version < LEDGER_SCHEMA_VERSION
-            for table, expected in _TABLES.items():
-                columns = tuple(row[1] for row in connection.execute(f'PRAGMA table_info("{table}")'))
-                if columns and (stale or columns != expected):
-                    for name in _TABLES:
-                        connection.execute(f'DROP TABLE IF EXISTS "{name}"')
-                    break
             connection.execute("""CREATE TABLE IF NOT EXISTS work_labels (
                 turn_key TEXT NOT NULL, question TEXT NOT NULL, session_key TEXT NOT NULL,
                 value TEXT NOT NULL, confidence REAL NOT NULL, taxonomy TEXT NOT NULL,
@@ -509,6 +504,29 @@ class LabelLedger:
             os.chmod(self.path, 0o600)
         except OSError:
             pass
+
+    def _incompatible(self):
+        if not os.path.exists(self.path):
+            return False
+        try:
+            with self._connect() as connection:
+                version = connection.execute("PRAGMA user_version").fetchone()[0]
+                if 0 < version < LEDGER_SCHEMA_VERSION:
+                    return True
+                for table, expected in _TABLES.items():
+                    columns = tuple(row[1] for row in connection.execute(f'PRAGMA table_info("{table}")'))
+                    if columns and columns != expected:
+                        return True
+        except sqlite3.DatabaseError:
+            return True
+        return False
+
+    def _remove_files(self):
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            try:
+                os.remove(self.path + suffix)
+            except FileNotFoundError:
+                pass
 
     def record_label(self, turn_key, question, session_key, value, confidence, taxonomy, model, now):
         with self._connect() as connection:
@@ -558,13 +576,18 @@ class LabelLedger:
             return {r["model"]: int(r["n"]) for r in connection.execute(
                 "SELECT model, COUNT(*) AS n FROM work_labels GROUP BY model")}
 
-    def upsert_backlog(self, session_key, newest_ts, pending, eligible_at):
-        """Record content-free pending work; ``added_at`` holds the earliest refill time."""
+    def upsert_backlog(self, session_key, newest_ts, pending, eligible_at, merge=False):
+        """Record content-free pending work; ``added_at`` holds the earliest refill time.
+
+        ``merge`` adds to an existing row (overflow from another parse, a failed item);
+        otherwise the row is replaced with a parse's authoritative view of the session.
+        """
+        update = ("pending = work_backlog.pending + excluded.pending, added_at = MIN(added_at, excluded.added_at)"
+                  if merge else "pending = excluded.pending, added_at = excluded.added_at")
         with self._connect() as connection:
             connection.execute(
-                """INSERT INTO work_backlog VALUES (?, ?, ?, ?) ON CONFLICT (session_key)
-                   DO UPDATE SET newest_ts = MAX(newest_ts, excluded.newest_ts),
-                   pending = excluded.pending, added_at = MIN(added_at, excluded.added_at)""",
+                f"""INSERT INTO work_backlog VALUES (?, ?, ?, ?) ON CONFLICT (session_key)
+                    DO UPDATE SET newest_ts = MAX(newest_ts, excluded.newest_ts), {update}""",
                 (session_key, int(newest_ts or 0), int(pending), int(eligible_at)))
 
     def remove_backlog(self, session_key):
@@ -583,11 +606,7 @@ class LabelLedger:
         return int(row["n"])
 
     def clear(self):
-        for suffix in ("", "-wal", "-shm", "-journal"):
-            try:
-                os.remove(self.path + suffix)
-            except FileNotFoundError:
-                pass
+        self._remove_files()
         self.initialize()
 
 
@@ -636,6 +655,7 @@ class WorkInsightsService:
         self.power_probe = power_probe or (lambda: None)
         self.refill = refill
         self.lock = threading.Lock()
+        self.write_lock = threading.Lock()
         self.wake = threading.Event()
         self.sleep = sleep or (lambda seconds: self.wake.wait(seconds))
         self.queue = []
@@ -658,6 +678,7 @@ class WorkInsightsService:
         self._failures = {}
         self._recent_added = set()
         self._digest_checked = None
+        self._digest_target = None
         self._last_refill = None
         self._rate_window = collections.deque(maxlen=50)
         self._open_ledger()
@@ -719,6 +740,7 @@ class WorkInsightsService:
         taxonomy = taxonomy_hash(settings["areas"])
         active = bool(newest and newest >= now - ACTIVE_WINDOW_S)
         items, opener_seen = [], False
+        retry_count, retry_at = 0, None
         for ordinal, turn in enumerate(turns):
             text = prepare_text(turn.get("text") or "")
             if not text:
@@ -727,6 +749,11 @@ class WorkInsightsService:
             opener = not opener_seen
             opener_seen = True
             questions = SESSION_QUESTIONS if opener else TURN_QUESTIONS
+            for question in questions:
+                failure = self._failures.get((turn_key, question))
+                if failure and not failure[1] and failure[0] > now:
+                    retry_count += 1
+                    retry_at = failure[0] if retry_at is None else min(retry_at, failure[0])
             wanted = tuple(q for q in questions if self._needs(turn_key, q, taxonomy, now))
             if not wanted:
                 continue
@@ -734,7 +761,7 @@ class WorkInsightsService:
             state = (f"User's message:\n{text}" if opener or not context else
                      f"Assistant's previous message (end):\n{context}\n\nUser's latest message:\n{text}")
             items.append((turn_key, wanted, state, float(turn.get("ts") or newest or 0)))
-        if not items:
+        if not items and not retry_count:
             self._remove_backlog(session_key)
             return 0
         added = 0
@@ -761,12 +788,18 @@ class WorkInsightsService:
                     self.queued.discard(item.turn_key)
                     overflow[item.session_key][0] += 1
                     overflow[item.session_key][1] = max(overflow[item.session_key][1], item.newest_ts)
-            if added:
+            if added or retry_count or session_key in overflow:
+                # Refill keeps a backlog row only for sessions that queued or rescheduled work.
                 self._recent_added.add(session_key)
         try:
+            own = overflow.pop(session_key, None)
             for key, (count, ts) in overflow.items():
-                self.ledger.upsert_backlog(key, ts or newest, count, now)
-            if session_key not in overflow:
+                self.ledger.upsert_backlog(key, ts or newest, count, now, merge=True)
+            if own:
+                self.ledger.upsert_backlog(session_key, own[1] or newest, own[0] + retry_count, now)
+            elif retry_count:
+                self.ledger.upsert_backlog(session_key, newest, retry_count, retry_at)
+            else:
                 self.ledger.remove_backlog(session_key)
         except sqlite3.Error:
             self.state, self.reason = STATE_STORAGE, "ledger_write_failed"
@@ -814,7 +847,7 @@ class WorkInsightsService:
         if not keys:
             return
         with self.lock:
-            self._recent_added.difference_update(keys)
+            self._recent_added.clear()
         self.refill(keys)
         with self.lock:
             requeued = set(self._recent_added)
@@ -856,11 +889,15 @@ class WorkInsightsService:
             if wait <= 0:
                 return True
             self.sleep(wait)
+            # Queue activity sets ``wake``; clear it so the next wait sleeps instead of spinning.
+            self.wake.clear()
 
-    def _check_digest(self, client):
+    def _check_digest(self, client, settings):
         now = self.monotonic()
+        target = (settings["ollama_url"], settings["model"])
         due = (not self.model_digest or self.state in (STATE_SETUP, STATE_BACKOFF)
-               or self._digest_checked is None or now - self._digest_checked >= DIGEST_RECHECK_S)
+               or self._digest_checked is None or now - self._digest_checked >= DIGEST_RECHECK_S
+               or target != self._digest_target)
         if not due:
             return None
         try:
@@ -868,6 +905,7 @@ class WorkInsightsService:
         except ClassifierError as error:
             return self._fail_global(error)
         self._digest_checked = now
+        self._digest_target = target
         if digest != self.model_digest:
             self.model_digest = digest
             self._bump()
@@ -895,7 +933,7 @@ class WorkInsightsService:
         if self.state in (STATE_BACKOFF, STATE_SETUP, STATE_STORAGE) and now < self.retry_at:
             return min(5.0, self.retry_at - now)
         client = self.client_factory(settings["ollama_url"], settings["model"])
-        failed = self._check_digest(client)
+        failed = self._check_digest(client, settings)
         if failed is not None:
             return failed
         self._maybe_refill()
@@ -954,14 +992,15 @@ class WorkInsightsService:
             self.baseline += LATENCY_BASELINE_ALPHA * (seconds - self.baseline)
 
     def _store(self, item, question, value, confidence, taxonomy, generation):
-        if generation != self.generation:
-            return True
-        try:
-            self.ledger.record_label(item.turn_key, question, item.session_key, value, confidence,
-                                     taxonomy if question == "area" else "", self.model_digest, self.clock())
-        except sqlite3.Error:
-            self._set(STATE_STORAGE, "ledger_write_failed", STORAGE_RETRY_S)
-            return False
+        with self.write_lock:
+            if generation != self.generation:
+                return True
+            try:
+                self.ledger.record_label(item.turn_key, question, item.session_key, value, confidence,
+                                         taxonomy if question == "area" else "", self.model_digest, self.clock())
+            except sqlite3.Error:
+                self._set(STATE_STORAGE, "ledger_write_failed", STORAGE_RETRY_S)
+                return False
         with self.lock:
             self._labeled[(item.turn_key, question)] = taxonomy if question == "area" else ""
             self._failures.pop((item.turn_key, question), None)
@@ -969,18 +1008,20 @@ class WorkInsightsService:
         return True
 
     def _fail_item(self, item, question, reason, generation):
-        if generation != self.generation:
-            return
-        try:
-            attempts, terminal = self.ledger.record_failure(
-                item.turn_key, question, item.session_key, reason, self.clock())
-            delay = ITEM_RETRY_DELAYS_S[min(attempts - 1, len(ITEM_RETRY_DELAYS_S) - 1)]
-            if not terminal:
-                # Schedule a re-load so the retry happens even if the session is never parsed again.
-                self.ledger.upsert_backlog(item.session_key, item.newest_ts, 1, self.clock() + delay)
-        except sqlite3.Error:
-            self._set(STATE_STORAGE, "ledger_write_failed", STORAGE_RETRY_S)
-            return
+        with self.write_lock:
+            if generation != self.generation:
+                return
+            try:
+                attempts, terminal = self.ledger.record_failure(
+                    item.turn_key, question, item.session_key, reason, self.clock())
+                delay = ITEM_RETRY_DELAYS_S[min(attempts - 1, len(ITEM_RETRY_DELAYS_S) - 1)]
+                if not terminal:
+                    # Schedule a re-load so the retry happens even if the session is never parsed again.
+                    self.ledger.upsert_backlog(item.session_key, item.newest_ts, 1,
+                                               self.clock() + delay, merge=True)
+            except sqlite3.Error:
+                self._set(STATE_STORAGE, "ledger_write_failed", STORAGE_RETRY_S)
+                return
         with self.lock:
             self._failures[(item.turn_key, question)] = (int(self.clock() + delay), terminal)
             if terminal:
@@ -1086,16 +1127,17 @@ class WorkInsightsService:
         return sessions
 
     def clear(self):
-        with self.lock:
-            self.generation += 1
-            self.queue.clear()
-            self.queued.clear()
-            self._labeled, self._failures = {}, {}
-            self._recent_added.clear()
-            self.labels_version += 1
-        self.model_digest = ""
-        if self.ledger is not None:
-            self.ledger.clear()
+        with self.write_lock:
+            with self.lock:
+                self.generation += 1
+                self.queue.clear()
+                self.queued.clear()
+                self._labeled, self._failures = {}, {}
+                self._recent_added.clear()
+                self.labels_version += 1
+            self.model_digest = ""
+            if self.ledger is not None:
+                self.ledger.clear()
 
     def settings_changed(self):
         settings = self.settings_provider()
