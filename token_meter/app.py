@@ -6356,15 +6356,23 @@ def request_session_delete(session_id, trace=None):
     """Apply the public read-only-provider boundary before any trash action."""
     session_id, trace = str(session_id or "").strip(), str(trace or "").strip()
     source_pool = all_session_sources()
-    source = None
+    candidates = []
     if session_id and len(session_id) <= 240 and len(trace) <= 240:
-        source, _error = _session_delete_source(session_id, trace, source_pool)
-    provider = str((source or {}).get("provider") or "").strip().lower()
+        source, error = _session_delete_source(session_id, trace, source_pool)
+        if source:
+            candidates = [source]
+        elif (error or {}).get("error_code") == "ambiguous_id":
+            candidates = [
+                candidate for candidate in canonical_aggregation_sources(source_pool)
+                if str(candidate.get("id") or "") == session_id
+            ]
     read_only = {
         str(value).strip().lower()
         for value in session_action_capability().get("read_only_providers") or ()
     }
-    if source and provider in read_only:
+    providers = {str(candidate.get("provider") or "").strip().lower() for candidate in candidates}
+    if providers and providers <= read_only:
+        provider = next(iter(sorted(providers)))
         return {
             "ok": False,
             "error": "{} sessions are read-only in Token Meter.".format(

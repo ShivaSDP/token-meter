@@ -1238,9 +1238,9 @@ class WorkInsightsService:
     def snapshot(self):
         """Return {session_key: labels} for aggregation; cached by labels_version.
 
-        Session labels come only from the turn intake last recorded as the session's opener
-        (its first substantive request, by position), whatever order the labels were written in.
-        Sessions without an opener record (older ledgers) fall back to the newest label.
+        Session labels come from the turn last recorded as the session's opener (its first
+        substantive request, by position), whatever order the labels were written in. Until that
+        turn has a label, and for sessions without an opener record, the newest label is used.
         Labels from the current prompt version win; older ones are shown until relabeled.
         """
         version = self.labels_version
@@ -1259,15 +1259,26 @@ class WorkInsightsService:
         except sqlite3.Error:
             return sessions
 
-        def superseded(row):
-            opener = recorded.get(row["session_key"])
-            return row["question"] != "correction" and opener is not None and row["turn_key"] != opener[0]
-
         def usable(row):
             if row["question"] == "area":
                 # Current tag, or a pre-versioning label for the same areas.
                 return row["taxonomy"] in (tags["area"], area_hash)
             return True
+
+        # A recorded opener replaces other turns' labels only once it has its own label, so a
+        # session whose opener moved but was never relabeled (e.g. past the backfill horizon)
+        # keeps its earlier labels instead of losing them.
+        opener_labeled = {
+            (row["session_key"], row["question"]) for row in rows
+            if row["question"] != "correction" and usable(row)
+            and (recorded.get(row["session_key"]) or (None,))[0] == row["turn_key"]
+        }
+
+        def superseded(row):
+            opener = recorded.get(row["session_key"])
+            return (row["question"] != "correction" and opener is not None
+                    and row["turn_key"] != opener[0]
+                    and (row["session_key"], row["question"]) in opener_labeled)
 
         def cutoff(question):
             return UNCLEAR_BY_QUESTION.get(question, UNCLEAR_CONFIDENCE)

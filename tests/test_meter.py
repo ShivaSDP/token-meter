@@ -5573,6 +5573,19 @@ class SessionDeleteTests(unittest.TestCase):
             self.assertTrue(first.exists())
             self.assertTrue(second.exists())
 
+    def test_id_only_delete_of_a_read_only_multi_file_session_reports_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first, second, sources = self.rollout_pair(Path(tmp))
+            for source in sources:
+                source["provider"] = "opencode"
+            with mock.patch.object(meter, "all_session_sources", return_value=sources), \
+                    mock.patch.object(meter, "trash_session_log") as trash:
+                result = meter.request_session_delete("shared")
+            self.assertEqual(result["error_code"], "read_only_provider")
+            trash.assert_not_called()
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+
     def test_trace_delete_keeps_the_claude_duplicate_guard(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -10009,7 +10022,7 @@ console.log(JSON.stringify({
             "function sessionRowKey(row){return String(row?.session||row?.id||'');}",
             "function stateSessionKey(state){return String(state?.session||stateSessionId(state)||'');}",
             "renderedAllSessions=new Map(all.map(row=>[sessionRowKey(row),row]));",
-            "const pinnedKey=pinned?(renderedAllSessions.has(pinned)?pinned:stateSessionKey(CURRENT)):'';",
+            "const pinnedKey=pinned?(renderedAllSessions.has(pinned)?pinned:(stateSessionId(CURRENT)===pinned?stateSessionKey(CURRENT):'')):'';",
             "const key=sessionRowKey(s),active=pinned?key===pinnedKey:Boolean(LATEST&&key===stateSessionKey(LATEST));",
             "row.dataset.id=key;",
             "data-delete-session=\"${esc(sessionRowKey(s))}\"",

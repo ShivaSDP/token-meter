@@ -1470,10 +1470,10 @@ class OpenerPositionAndWindowTests(unittest.TestCase):
     AREAS = DomainTests.AREAS
     RELEASE = "please build a new agent tool for the release flow"
 
-    def service(self):
+    def service(self, settings=None):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        service, values, clock = make_service(tmp.name)
+        service, values, clock = make_service(tmp.name, settings)
 
         def respond(prompt):
             real = self.RELEASE in prompt
@@ -1547,6 +1547,18 @@ class OpenerPositionAndWindowTests(unittest.TestCase):
         self.assertFalse(service.queue)
         self.assertEqual(service._openers[service.session_key("s1")],
                          (service._turn_key("s1", 0), 1))
+
+    def test_past_horizon_opener_move_keeps_the_labels_it_cannot_replace(self):
+        service, clock = self.service({"backfill_days": 30})
+        clock.now = 1_799_999_100.0
+        service.observe("s1", turns("hi"))
+        drain(service)
+        self.assertEqual(service.snapshot()[service.session_key("s1")]["work_type"], "ops")
+        clock.now += 40 * 86400
+        self.assertEqual(service.observe("s1", turns("hi", self.RELEASE)), 0)
+        self.assertEqual(service._openers[service.session_key("s1")][0], service._turn_key("s1", 1))
+        entry = service.snapshot()[service.session_key("s1")]
+        self.assertEqual((entry["work_type"], entry["area"]), ("ops", "Personal"))
 
     def build(self, rows, labels, today, **kwargs):
         return domain.build_work_insights(rows, labels, lambda ident: ident.split("\0")[0], self.AREAS,
