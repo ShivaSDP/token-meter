@@ -23,8 +23,8 @@ import urllib.parse
 
 LEDGER_SCHEMA_VERSION = 2
 QUEUE_LIMIT = 256
-QUEUE_LOW_WATER = 64
-REFILL_BATCH = 4
+QUEUE_LOW_WATER = 16
+REFILL_BATCH = 3
 MAX_ITEM_CHARS = 2_000
 SKELETON_HEAD = 1_200
 SKELETON_TAIL = 500
@@ -44,8 +44,7 @@ UNCLEAR_CONFIDENCE = 0.5
 MIN_GAP_S = 0.25
 NUM_CTX = 4_096
 KEEP_ALIVE = "2m"
-DIGEST_RECHECK_S = 0
-REFILL_INTERVAL_S = 10
+REFILL_INTERVAL_S = 30
 LATENCY_BASELINE_ALPHA = 0.02
 
 DEFAULT_MODEL = "token-meter-jet"
@@ -114,6 +113,10 @@ _CITATION_RE = re.compile(
 _FILES_WRAPPER_RE = re.compile(r"^\s*# (?:Files mentioned by the user|Context from my IDE setup):.*?## My request(?: for Codex)?:\s*", re.S)
 _LOG_LINE_RE = re.compile(r'(^\s{4,}\S|^\s*at |Traceback|^\s*File "|^\d{4}-\d\d-\d\d|[{}\[\];<>=]{3,}|^\s*[\w./-]+:\d+|^\$ |^\s*[|│])')
 _OUTLINE_RE = re.compile(r"^\s*(#{1,6}\s|[-*•]\s|\d+[.)]\s)")
+
+
+class LabelDeleteError(Exception):
+    """Deleting the label ledger failed; labels may still be on disk."""
 
 
 class ClassifierError(Exception):
@@ -525,9 +528,13 @@ class LabelLedger:
         return False
 
     def _remove_files(self):
+        LabelLedger.remove(self.path)
+
+    @staticmethod
+    def remove(path):
         for suffix in ("", "-wal", "-shm", "-journal"):
             try:
-                os.remove(self.path + suffix)
+                os.remove(path + suffix)
             except FileNotFoundError:
                 pass
 
@@ -569,7 +576,8 @@ class LabelLedger:
     def session_labels(self):
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT session_key, question, value, confidence, taxonomy, model FROM work_labels").fetchall()
+                "SELECT turn_key, session_key, question, value, confidence, taxonomy, model "
+                "FROM work_labels").fetchall()
             failures = connection.execute(
                 "SELECT session_key, question FROM work_failures WHERE terminal = 1").fetchall()
         return [dict(row) for row in rows], [dict(row) for row in failures]
@@ -681,15 +689,22 @@ class WorkInsightsService:
         self._labeled = {}
         self._failures = {}
         self._recent_added = set()
-        self._digest_checked = None
-        self._digest_target = None
         self._last_refill = None
         self._rate_window = collections.deque(maxlen=50)
+        self._pending_delete = False
         self._open_ledger()
 
     # ---- ledger lifecycle
 
     def _open_ledger(self):
+        if self._pending_delete:
+            try:
+                LabelLedger.remove(self.ledger_path)
+            except OSError:
+                self.ledger = None
+                self.state, self.reason = STATE_STORAGE, "delete_pending"
+                return
+            self._pending_delete = False
         try:
             self.ledger = LabelLedger(self.ledger_path)
             self._labeled, self._failures = self.ledger.labeled_keys()
@@ -798,6 +813,15 @@ class WorkInsightsService:
             if added or retry_count or session_key in overflow:
                 # Refill keeps a backlog row only for sessions that queued or rescheduled work.
                 self._recent_added.add(session_key)
+        with self.write_lock:
+            if generation != self.generation:
+                return 0
+            self._write_backlog(session_key, overflow, retry_count, retry_at, newest, now)
+        if added:
+            self.wake.set()
+        return added
+
+    def _write_backlog(self, session_key, overflow, retry_count, retry_at, newest, now):
         try:
             own = overflow.pop(session_key, None)
             for key, (count, ts) in overflow.items():
@@ -810,9 +834,6 @@ class WorkInsightsService:
                 self.ledger.remove_backlog(session_key)
         except sqlite3.Error:
             self.state, self.reason = STATE_STORAGE, "ledger_write_failed"
-        if added:
-            self.wake.set()
-        return added
 
     def _remove_backlog(self, session_key):
         try:
@@ -900,19 +921,11 @@ class WorkInsightsService:
             self.wake.clear()
 
     def _check_digest(self, client, settings):
-        now = self.monotonic()
-        target = (settings["ollama_url"], settings["model"])
-        due = (not self.model_digest or self.state in (STATE_SETUP, STATE_BACKOFF)
-               or self._digest_checked is None or now - self._digest_checked >= DIGEST_RECHECK_S
-               or target != self._digest_target)
-        if not due:
-            return None
+        """Re-read the local model entry (cheap); refuses remote or cloud models before any request."""
         try:
             digest = client.model_digest()
         except ClassifierError as error:
             return self._fail_global(error)
-        self._digest_checked = now
-        self._digest_target = target
         if digest != self.model_digest:
             self.model_digest = digest
             self._bump()
@@ -1124,11 +1137,13 @@ class WorkInsightsService:
             rows, terminal = self.ledger.session_labels()
         except sqlite3.Error:
             return sessions
+        turn_values = {}
         for row in rows:
             entry = sessions.setdefault(row["session_key"], {})
             unclear = float(row["confidence"]) < UNCLEAR_CONFIDENCE
             if row["question"] == "correction":
                 entry["correction_labels"] = entry.get("correction_labels", 0) + 1
+                turn_values[row["turn_key"]] = None if unclear else row["value"] == "True"
                 if row["value"] == "True" and not unclear:
                     entry["corrections"] = entry.get("corrections", 0) + 1
             elif row["question"] == "area":
@@ -1144,8 +1159,23 @@ class WorkInsightsService:
                 entry["correction_labels"] = entry.get("correction_labels", 0) + 1
             elif row["question"] in ("area", "work_type"):
                 entry.setdefault(row["question"], "Unclear" if row["question"] == "area" else "unclear")
+        self._turn_values = turn_values
         self._snapshot = (version, sessions)
         return sessions
+
+    def session_corrections(self, row_id, count):
+        """Ordered (ordinal, pushback) pairs for a session's labeled follow-up turns.
+
+        ``pushback`` is True, False, or None when the label was low-confidence.
+        """
+        self.snapshot()
+        values = getattr(self, "_turn_values", {})
+        found = []
+        for ordinal in range(1, max(0, int(count))):
+            key = self._turn_key(row_id, ordinal)
+            if key in values:
+                found.append((ordinal, values[key]))
+        return found
 
     def clear(self):
         with self.write_lock:
@@ -1157,17 +1187,24 @@ class WorkInsightsService:
                 self._recent_added.clear()
                 self.labels_version += 1
             self.model_digest = ""
+            failed = False
             if self.ledger is not None:
                 try:
                     self.ledger.clear()
                 except (sqlite3.Error, OSError):
+                    # Keep the ledger closed and retry the delete before any reopen,
+                    # so labels the user asked to delete never come back.
                     self.ledger = None
-                    self._set(STATE_STORAGE, "ledger_unavailable", STORAGE_RETRY_S)
+                    self._pending_delete = True
+                    self._set(STATE_STORAGE, "delete_pending", STORAGE_RETRY_S)
+                    failed = True
             with self.lock:
                 # Fence again after the salt rotated: intake that began mid-clear is discarded.
                 self.generation += 1
                 self.queue.clear()
                 self.queued.clear()
+        if failed:
+            raise LabelDeleteError("delete_failed")
 
     def settings_changed(self):
         settings = self.settings_provider()
@@ -1176,7 +1213,6 @@ class WorkInsightsService:
             if not settings["enabled"]:
                 self.queue.clear()
                 self.queued.clear()
-        self._digest_checked = None
         self.wake.set()
 
 

@@ -177,6 +177,30 @@ and setup command, pause controls, pause on battery, rate, backfill horizon,
 areas editor (2–8 areas, name ≤ 40 characters, description ≤ 160 characters,
 reset to defaults), and "Delete all labels" with confirmation.
 
+## Outcome insights (iteration 2)
+
+All derived from existing labels; no extra model calls.
+
+- **Session outcomes.** Using the ordered pushback labels on follow-up turns:
+  single request (no follow-ups), accepted without pushback, recovered after
+  pushback (last labeled follow-up is not pushback), ended on pushback (last
+  labeled follow-up is pushback), or not labeled yet. Spend and cost per session
+  per outcome.
+- **Spent after first pushback (estimate).** Session cost × share of the
+  session's turns after its first pushback, summed.
+- **Pushback by turn position.** Rate for follow-up ordinals 1–2, 3–5, 6–10,
+  11–20, 21+; flat means long sessions are not drifting.
+- **Model fit by work type.** Pushback rate and cost per session for each work
+  type on the five most-used runtime-scoped models; "Best" marks the lowest
+  pushback per row only when at least two models have 20+ labeled turns.
+- **What stands out.** Up to four deterministic cards, warn first: sessions
+  ending on pushback (≥ 10%), possible right-sizing savings (premium-on-routine
+  spend × standard/premium median output price), rework spend (≥ 10% of
+  spend), pushback trend month over month (≥ 3 points, both months 20+ turns),
+  the biggest area share shift (≥ 10 points), and the costliest work type
+  (≥ 1.5× the median). Every card needs 20+ labeled sessions where it uses
+  rates and links to the module that supports it.
+
 ## Privacy
 
 - User-turn text and the preceding assistant-reply tail (600 characters) exist

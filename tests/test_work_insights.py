@@ -520,16 +520,25 @@ class ServiceTests(unittest.TestCase):
         service.step()
         self.assertEqual(service.ledger.backlog_pending(), 1)
 
-    def test_failed_clear_reopens_the_ledger_and_requeues(self):
+    def test_failed_clear_raises_retries_the_delete_and_never_restores_labels(self):
         recovered = []
         service, values, clock = make_service(self.tmp.name, recovered=lambda: recovered.append(1))
-        with mock.patch.object(W.LabelLedger, "clear", side_effect=OSError("disk")):
-            service.clear()
-        self.assertIsNone(service.ledger)
-        clock.now += W.STORAGE_RETRY_S + 1
-        service.state = W.STATE_IDLE
+        service.observe("s1", turns("hello"))
+        drain(service)
+        old_salt = service.ledger.salt
+        self.assertTrue(service.snapshot())
+        with mock.patch.object(W.LabelLedger, "remove", side_effect=PermissionError("denied")):
+            with self.assertRaises(W.LabelDeleteError):
+                service.clear()
+            self.assertIsNone(service.ledger)
+            clock.now += W.STORAGE_RETRY_S + 1
+            service.step()
+            self.assertIsNone(service.ledger)
+            self.assertEqual(service.reason, "delete_pending")
         service.step()
         self.assertIsNotNone(service.ledger)
+        self.assertNotEqual(service.ledger.salt, old_salt)
+        self.assertEqual(service.snapshot(), {})
         self.assertEqual(recovered, [1])
 
     def test_latency_baseline_adapts(self):
@@ -753,6 +762,71 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(set(out["filters"]["projects"]), {"alpha", "beta"})
 
 
+class OutcomeInsightTests(unittest.TestCase):
+    AREAS = DomainTests.AREAS
+
+    def build(self, rows, labels, sequences, **kwargs):
+        prices = {"gpt-5.6": 10.0, "cheap": 1.0, "mid": 4.0}
+        return domain.build_work_insights(
+            rows, labels, lambda rid: rid, self.AREAS, lambda m, p: prices.get(m), today="2026-09-30",
+            corrections_for=lambda rid, n: sequences.get(rid, []), **kwargs)
+
+    def test_session_outcome_classification(self):
+        self.assertEqual(domain.session_outcome(1, []), "single_shot")
+        self.assertEqual(domain.session_outcome(3, []), "pending")
+        self.assertEqual(domain.session_outcome(3, [(1, False), (2, False)]), "accepted")
+        self.assertEqual(domain.session_outcome(3, [(1, True), (2, False)]), "recovered")
+        self.assertEqual(domain.session_outcome(3, [(1, False), (2, True)]), "ended_on_pushback")
+        self.assertEqual(domain.session_outcome(3, [(1, True), (2, None)]), "ended_on_pushback")
+        self.assertEqual(domain.rework_share(4, [(1, False), (2, True)]), 0.5)
+        self.assertEqual(domain.rework_share(4, [(1, False)]), 0.0)
+
+    def test_outcomes_rework_cost_and_position(self):
+        rows = [row("a", cost=4.0, turns_=4), row("b", cost=2.0, turns_=3), row("c", cost=1.0, turns_=1)]
+        labels = {"a": {"area": "Personal", "corrections": 1, "correction_labels": 3},
+                  "b": {"area": "Personal", "corrections": 0, "correction_labels": 2}}
+        sequences = {"a": [(1, False), (2, True), (3, False)], "b": [(1, False), (2, False)]}
+        out = self.build(rows, labels, sequences)
+        buckets = {b["outcome"]: b for b in out["outcomes"]["buckets"]}
+        self.assertEqual(buckets["recovered"]["sessions"], 1)
+        self.assertEqual(buckets["accepted"]["sessions"], 1)
+        self.assertEqual(buckets["single_shot"]["sessions"], 1)
+        self.assertAlmostEqual(out["outcomes"]["rework_cost"], 4.0 * 0.5)
+        positions = {p["bucket"]: p for p in out["position"]}
+        self.assertEqual(positions["1–2"]["samples"], 4)
+        self.assertEqual(positions["3–5"]["samples"], 1)
+
+    def test_model_fit_marks_best_only_with_enough_samples(self):
+        rows = [row(f"x{i}", model="gpt-5.6") for i in range(3)] + [row(f"y{i}", model="mid") for i in range(3)]
+        labels = {f"x{i}": {"work_type": "debug", "corrections": 3, "correction_labels": 10} for i in range(3)}
+        labels.update({f"y{i}": {"work_type": "debug", "corrections": 1, "correction_labels": 10} for i in range(3)})
+        fit = self.build(rows, labels, {})["model_fit"]
+        best = [c for c in fit["cells"] if c["best"]]
+        self.assertEqual([(c["model"], c["work_type"]) for c in best], [("mid", "debug")])
+        few = {f"z{i}": {"work_type": "debug", "corrections": 0, "correction_labels": 2} for i in range(2)}
+        fit = self.build([row("z0", model="gpt-5.6"), row("z1", model="mid")], few, {})["model_fit"]
+        self.assertFalse(any(c["best"] for c in fit["cells"]))
+
+    def test_headlines_are_evidence_gated(self):
+        rows = []
+        labels = {}
+        for i in range(24):
+            month_day = "2026-08-10" if i < 12 else "2026-09-10"
+            area = "Personal" if (i < 12 and i % 3) or (i >= 12 and i % 3 == 0) else "Product engineering"
+            rows.append(row(f"s{i}", day=month_day, cost=3.0, turns_=5))
+            labels[f"s{i}"] = {"area": area, "work_type": "debug", "corrections": 1 if i >= 12 else 3,
+                               "correction_labels": 10, "complexity": "routine"}
+        sequences = {f"s{i}": [(1, False), (2, False), (3, False), (4, True)] for i in range(24)}
+        cards = self.build(rows, labels, sequences)["headlines"]
+        keys = [c["key"] for c in cards]
+        self.assertIn("ended_on_pushback", keys)
+        self.assertIn("pushback_trend", keys)
+        self.assertLessEqual(len(cards), domain.MAX_HEADLINES)
+        self.assertEqual(cards[0]["kind"], "warn")
+        trend = next(c for c in cards if c["key"] == "pushback_trend")
+        self.assertEqual(trend["kind"], "good")
+
+
 class AppContractTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -822,6 +896,7 @@ class SurfaceContractTests(unittest.TestCase):
 
     def test_work_page_shows_estimates_unclear_and_pending(self):
         for marker in ("id=view-work", "Monthly activity allocation", "Workstreams", "Cost by work type",
+                       "Session outcomes", "Model fit by work type", "By turn position", "id=w-headlines",
                        "Model right-sizing", "Possible overspend (estimate)", "View as table",
                        "text goes only to Ollama on this machine", "'var(--w-pending)'", "'var(--w-unclear)'"):
             self.assertTrue(marker in self.page, marker)
@@ -900,6 +975,16 @@ class AppIntegrationTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+    def test_http_clear_reports_a_failed_delete(self):
+        service = mock.Mock()
+        service.clear.side_effect = W.LabelDeleteError("delete_failed")
+        with mock.patch.object(meter, "TOKEN_METER_SETTINGS", self.settings), \
+                mock.patch.object(meter, "_work_service_instance", service):
+            status, payload = self.post("/work-insights/clear", {"confirm": True})
+        self.assertEqual(status, 400)
+        self.assertFalse(payload["ok"])
+        self.assertNotIn("delete_failed", payload["error"])
 
     def test_post_routes_validate_over_http(self):
         with mock.patch.object(meter, "TOKEN_METER_SETTINGS", self.settings), \

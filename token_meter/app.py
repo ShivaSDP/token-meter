@@ -2131,8 +2131,8 @@ def set_work_insights_settings(values, path=None):
     settings["work_insights"] = updated
     try:
         atomic_write_text(path, json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
-    except OSError as error:
-        return {"ok": False, "error": f"Token Meter could not save settings: {error}"}
+    except OSError:
+        return {"ok": False, "error": "Token Meter could not save settings."}
     return {"ok": True, "changed": changed, "work_insights": updated,
             "requeue": changed and (updated["enabled"] and (
                 not current["enabled"] or updated["areas"] != current["areas"]
@@ -7580,6 +7580,7 @@ def work_insights_state(months="6", runtime="", project=""):
         settings["areas"], _work_output_price, months=months,
         runtime=str(runtime or "")[:40], project=str(project or "")[:240],
         today=time.strftime("%Y-%m-%d"),
+        corrections_for=service.session_corrections if service else None,
     )
     runtimes = insights["filters"]["runtimes"]
     if runtime and runtime not in runtimes:
@@ -10283,7 +10284,7 @@ class H(BaseHTTPRequestHandler):
                     if work_insights_settings()["enabled"]:
                         requeue_work_insights()
                     result = {"ok": True, "status": work_insights_status()}
-                except (OSError, sqlite3.Error):
+                except (OSError, sqlite3.Error, _work.LabelDeleteError):
                     result = {"ok": False, "error": "Token Meter could not delete the labels. Try again."}
             self._send(json.dumps(result), "application/json",
                        status=200 if result.get("ok") else 400)

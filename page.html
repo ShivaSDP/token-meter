@@ -281,6 +281,11 @@ body.sessionRoute #view-session.sessionAll{--view-spectrum-a:rgba(0,188,235,.6);
 @media(max-width:1180px){.workGrid{grid-template-columns:1fr}.workStatus{flex-wrap:wrap}}
 .workSettingsGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.workSettingsGrid input,.workAreaRow input{width:100%;min-width:0;padding:7px 9px;border:1px solid var(--line2);border-radius:7px;background:rgba(255,255,255,.035);color:var(--fg);font:inherit;font-size:12px}.workSettingsGrid .settingsField>span{font-size:10px;color:var(--faint);font-weight:780;text-transform:uppercase}.workSetupHint{margin-top:10px;color:var(--dim);font-size:11px}.workSetupHint code{padding:2px 6px;border-radius:5px;background:rgba(255,255,255,.06);color:var(--fg)}.workAreasHead{display:flex;align-items:baseline;gap:10px;margin-top:16px}.workAreasHead h3{margin:0;font-size:13px}.workAreas{display:grid;gap:6px;margin-top:8px}.workAreaRow{display:grid;grid-template-columns:14px minmax(140px,220px) minmax(0,1fr) auto;align-items:center;gap:8px}.workAreaRow .tbtn{padding:5px 8px}
 @media(max-width:1180px){.workSettingsGrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.workHeadlines{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin-bottom:10px}.workHeadline{display:grid;gap:4px;padding:12px 14px;border:1px solid var(--line2);border-radius:8px;background:rgba(255,255,255,.03);color:var(--fg);text-align:left;font:inherit;cursor:pointer}.workHeadline:hover,.workHeadline:focus-visible{border-color:var(--orange);outline:none}.workHeadline b{font-size:13.5px;line-height:1.3}.workHeadline span{color:var(--dim);font-size:11px;line-height:1.4}.workHeadline i{font-style:normal;font-size:10px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:var(--faint)}.workHeadline[data-kind=warn] i{color:var(--warn)}.workHeadline[data-kind=good] i{color:var(--good)}
+.workOutcomes,.workFit{position:relative;padding:15px 16px;margin-top:10px}.workOutcomeRework{display:grid;justify-items:end;gap:1px;text-align:right}.workOutcomeRework span{color:var(--faint);font-size:10px;font-weight:780;text-transform:uppercase;letter-spacing:.04em}.workOutcomeRework strong{font-size:22px;font-weight:840}.workOutcomeRework small{color:var(--dim);font-size:10.5px}.workOutcomeBar{display:flex;gap:2px;height:14px;margin-bottom:12px;border-radius:4px;overflow:hidden;background:rgba(255,255,255,.03)}.workOutcomeBar i{display:block;height:100%;min-width:2px;background:var(--swatch)}
+:root{--w-accepted:#199e70;--w-recovered:#3987e5;--w-ended:#d95926;--w-single:#56606d}
+.workPositionHead h3{margin:4px 0 6px;font-size:12px;color:var(--dim)}.workPosition{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;margin-bottom:12px}.workPositionCell{display:grid;gap:4px;padding:6px 7px;border:1px solid var(--line);border-radius:7px;font-size:10.5px;color:var(--dim)}.workPositionCell strong{color:var(--fg);font:700 13px ui-monospace,"SF Mono",Menlo,monospace}.workPositionCell i{display:block;height:4px;border-radius:2px;background:var(--w1)}.workPositionCell[data-few=true] i{background:var(--w-unclear)}
+.workFit .workTableWrap{max-height:none}.workFitBest{display:inline-block;margin-left:5px;padding:1px 6px;border:1px solid rgba(102,217,144,.5);border-radius:999px;color:var(--good);font-size:9.5px;font-weight:800;text-transform:uppercase;letter-spacing:.04em}.workFitCell small{display:block;color:var(--faint);font-size:10px}
 #view-git{--view-spectrum-a:rgba(88,214,162,.5);--view-spectrum-b:rgba(0,188,235,.4);--view-spectrum-c:rgba(127,219,242,.24);--view-haze-a:rgba(88,214,162,.18);--view-haze-b:rgba(0,188,235,.14)}
 #view-learn{--view-spectrum-a:rgba(127,219,242,.56);--view-spectrum-b:rgba(0,188,235,.34);--view-spectrum-c:rgba(255,180,87,.26);--view-haze-a:rgba(127,219,242,.25);--view-haze-b:rgba(255,180,87,.11)}
 #view-settings{--view-spectrum-a:rgba(199,167,255,.5);--view-spectrum-b:rgba(27,160,225,.36);--view-spectrum-c:rgba(0,188,235,.32);--view-haze-a:rgba(199,167,255,.22);--view-haze-b:rgba(0,188,235,.17)}
@@ -1079,7 +1084,8 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 	    <button class=tbtn id=w-open-settings type=button>Settings</button>
 	   </div>
 	  </section>
-	  <section class="card workAllocation">
+	  <section class=workHeadlines id=w-headlines aria-label="What stands out" hidden></section>
+	  <section class="card workAllocation" id=w-module-allocation>
 	   <div class=workCardHead><div><h2 class=fieldtip tabindex=0 aria-description="Share of each month's activity by area. Labels are estimates from a local model; Unclear means low confidence and Pending means not labeled yet." data-tip="Share of each month's activity by area. Labels are estimates from a local model; Unclear means low confidence and Pending means not labeled yet.">Monthly activity allocation</h2><div class=subline id=w-allocation-note>Waiting for labels.</div></div>
 	    <label class=filterControl><span>Measure</span><select class=filterSelect id=w-measure aria-label="Activity measure"><option value=turns>User turns</option><option value=sessions>Sessions</option><option value=spend>Spend</option></select></label></div>
 	   <div class=workLegend id=w-legend aria-label="Area legend"></div>
@@ -1088,23 +1094,34 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 	   <div class=workChartTip id=w-tip role=tooltip hidden></div>
 	   <details class=workTableToggle><summary>View as table</summary><div class=workTableWrap><table class=tbl id=w-allocation-table></table></div></details>
 	  </section>
+	  <section class="card workOutcomes" id=w-module-outcomes>
+	   <div class=workCardHead><div><h2 class=fieldtip tabindex=0 aria-description="Each session with follow-up turns, grouped by how the pushback labels on those turns played out. Estimates from a local model." data-tip="Each session with follow-up turns, grouped by how the pushback labels on those turns played out. Estimates from a local model.">Session outcomes</h2><div class=subline id=w-outcomes-note>Waiting for labeled sessions.</div></div><div class=workOutcomeRework><span>Spent after first pushback</span><strong class=mono id=w-rework-cost>--</strong><small id=w-rework-share></small></div></div>
+	   <div class=workOutcomeBar id=w-outcome-bar role=img aria-label="Sessions by outcome"></div>
+	   <div class=workTableWrap><table class=tbl id=w-outcomes-table><thead><tr><th>Outcome</th><th class=num>Sessions</th><th class=num>Share</th><th class=num>Spend</th><th class=num>Per session</th></tr></thead><tbody></tbody></table></div>
+	  </section>
 	  <section class="card workStreams">
 	   <div class=workCardHead><div><h2 class=fieldtip tabindex=0 aria-description="Project and area pairs for the selected month, ranked by user turns. Rework is the share of follow-up turns that push back on the previous work." data-tip="Project and area pairs for the selected month, ranked by user turns. Rework is the share of follow-up turns that push back on the previous work.">Workstreams</h2><div class=subline id=w-streams-note></div></div>
 	    <label class=filterControl><span>Month</span><select class=filterSelect id=w-month aria-label="Workstream month"></select></label></div>
 	   <div class=workTableWrap><table class=tbl id=w-streams-table><thead><tr><th>Approximate workstream</th><th>Work type</th><th class=num>Turns</th><th class=num>Share</th><th class=num>Sessions</th><th class=num>Spend</th><th class=num>Rework</th></tr></thead><tbody></tbody></table></div>
 	  </section>
 	  <div class=workGrid>
-	   <section class="card workEconomics">
+	   <section class="card workEconomics" id=w-module-economics>
 	    <div class=workCardHead><div><h2 class=fieldtip tabindex=0 aria-description="Sessions grouped by the kind of work their opening request asked for." data-tip="Sessions grouped by the kind of work their opening request asked for.">Cost by work type</h2><div class=subline>Sessions started in the selected period.</div></div></div>
 	    <div class=workTableWrap><table class=tbl id=w-economics-table><thead><tr><th>Work type</th><th class=num>Sessions</th><th class=num>Spend</th><th class=num>Per session</th><th class=num>Median turns</th><th class=num>Rework</th></tr></thead><tbody></tbody></table></div>
 	   </section>
-	   <section class="card workRework">
+	   <section class="card workRework" id=w-module-rework>
 	    <div class=workCardHead><div><h2 class=fieldtip tabindex=0 aria-description="Share of labeled follow-up turns where you pushed back on the previous work: wrong, broken, still failing, not good enough, or undo." data-tip="Share of labeled follow-up turns where you pushed back on the previous work: wrong, broken, still failing, not good enough, or undo.">Rework</h2><div class=subline id=w-rework-note></div></div><div class="workRate mono" id=w-rework-rate>--</div></div>
 	    <svg class=workWeekly id=w-weekly viewBox="0 0 520 90" preserveAspectRatio=none role=img aria-label="Weekly rework rate"></svg>
+	    <div class=workPositionHead><h3 class=fieldtip tabindex=0 aria-description="Pushback rate by how far into a session the follow-up turn was. A rising rate suggests long sessions drift; consider starting fresh." data-tip="Pushback rate by how far into a session the follow-up turn was. A rising rate suggests long sessions drift; consider starting fresh.">By turn position</h3></div>
+	    <div class=workPosition id=w-position></div>
 	    <div class=workTableWrap><table class=tbl id=w-rework-table><thead><tr><th>Model</th><th>App</th><th class=num>Turns</th><th class=num>Rework</th></tr></thead><tbody></tbody></table></div>
 	   </section>
 	  </div>
-	  <section class="card workSizing">
+	  <section class="card workFit" id=w-module-fit>
+	   <div class=workCardHead><div><h2 class=fieldtip tabindex=0 aria-description="Pushback rate and cost per session for each kind of work on your most-used models. The lowest-pushback model per row is marked when at least two models have 20+ labeled turns." data-tip="Pushback rate and cost per session for each kind of work on your most-used models. The lowest-pushback model per row is marked when at least two models have 20+ labeled turns.">Model fit by work type</h2><div class=subline>Which model needed the least pushback for each kind of work.</div></div></div>
+	   <div class=workTableWrap><table class=tbl id=w-fit-table></table></div>
+	  </section>
+	  <section class="card workSizing" id=w-module-sizing>
 	   <div class=workCardHead><div><h2 class=fieldtip tabindex=0 aria-description="Session complexity from the opening request against the session's main model price tier (terciles of catalog output price among your models). Flags are estimates, not verdicts." data-tip="Session complexity from the opening request against the session's main model price tier (terciles of catalog output price among your models). Flags are estimates, not verdicts.">Model right-sizing</h2><div class=subline>Complexity of the request × price tier of the model that did it.</div></div></div>
 	   <div class=workSizingGrid id=w-sizing role=table aria-label="Right-sizing grid"></div>
 	  </section>
@@ -5678,7 +5695,7 @@ function renderWorkStatus(payload){
   paused:['Paused','Paused',status.paused_until==='indefinite'?'Paused until you resume.':`Paused until ${workClock(status.paused_until)}.`],
   throttled:['Waiting',{on_battery:'Waiting: on battery power',system_busy:'Waiting: this Mac is busy',model_slow:'Waiting: the model is responding slowly'}[status.reason]||'Waiting',`${progress} · checks again in a minute.`],
   backoff:['Retrying',status.reason==='internal_error'?'Recovering from an internal error':'Can’t reach Ollama',status.retry_at?`Retrying at ${workClock(status.retry_at)}. Queued work is kept.`:'Retrying shortly. Queued work is kept.'],
-  storage_error:['Error','Can’t save labels','Token Meter retries every five minutes.'],
+  storage_error:['Error',status.reason==='delete_pending'?'Deleting labels didn’t finish':'Can’t save labels',status.reason==='delete_pending'?'Labeling is stopped until the delete succeeds. Token Meter retries every five minutes.':'Token Meter retries every five minutes.'],
  }[state]||['Ready','Up to date',progress];
  const pill=$('w-state');pill.dataset.state=state;pill.textContent=copy[0];
  $('w-status-title').textContent=copy[1];$('w-status-detail').textContent=copy[2];
@@ -5764,11 +5781,54 @@ function renderWorkFilters(insights){
  if(workProject&&!projects.includes(workProject))projects.unshift(workProject);
  $('w-project').innerHTML='<option value="">All projects</option>'+projects.map(value=>`<option value="${esc(value)}"${value===workProject?' selected':''}>${esc(deliveryProjectName(value))}</option>`).join('');
 }
+const WORK_OUTCOME_LABELS={accepted:'Accepted without pushback',recovered:'Recovered after pushback',ended_on_pushback:'Ended on pushback',single_shot:'Single request',pending:'Not labeled yet'};
+const WORK_OUTCOME_COLORS={accepted:'var(--w-accepted)',recovered:'var(--w-recovered)',ended_on_pushback:'var(--w-ended)',single_shot:'var(--w-single)',pending:'var(--w-pending)'};
+function workHeadlineCopy(card){
+ const month=value=>workMonthLabel(value,false);
+ switch(card.key){
+  case 'area_shift':return[`${card.area} ${card.share>=card.previous_share?'grew':'shrank'} to ${workPercent(card.share)} of spend`,`${month(card.month)}, from ${workPercent(card.previous_share)} in ${month(card.previous_month)}.`];
+  case 'pushback_trend':return[`Pushback ${card.rate<card.previous_rate?'fell':'rose'} to ${workPercent(card.rate)}`,`Share of follow-up turns in ${month(card.month)}, from ${workPercent(card.previous_rate)} in ${month(card.previous_month)}.`];
+  case 'ended_on_pushback':return[`${workPercent(card.share)} of sessions ended right after a pushback`,`${card.sessions} sessions · ${money(card.spend)}. Restating the goal or starting fresh may help.`];
+  case 'right_size':return[`Routine work on premium models cost ${money(card.spend)}`,`A standard-tier model might have cost about ${money(card.estimate)} (estimate).`];
+  case 'costliest_work':return[`${WORK_TYPE_LABELS[card.work_type]||card.work_type} costs ${money(card.cost_per_session)} per session`,`${Number(card.multiple).toFixed(1)}× the median across work types.`];
+  case 'rework_cost':return[`About ${money(card.spend)} went to rework`,`${workPercent(card.share)} of spend came after a session's first pushback (estimate).`];
+  default:return[card.key,''];
+ }
+}
+function renderWorkHeadlines(insights){
+ const cards=insights?.headlines||[],host=$('w-headlines');
+ host.hidden=!cards.length;
+ host.innerHTML=cards.map(card=>{const[title,detail]=workHeadlineCopy(card);const tag={warn:'Worth a look',good:'Improving',neutral:'Notable'}[card.kind]||'Notable';return `<button class=workHeadline type=button data-kind="${esc(card.kind)}" data-target="${esc(card.target)}"><i>${esc(tag)}</i><b>${esc(title)}</b><span>${esc(detail)}</span></button>`;}).join('');
+}
+function renderWorkOutcomes(insights){
+ const outcomes=insights?.outcomes,buckets=(outcomes?.buckets||[]).filter(bucket=>bucket.sessions);
+ const total=buckets.reduce((sum,bucket)=>sum+bucket.sessions,0);
+ $('w-outcome-bar').innerHTML=buckets.map(bucket=>`<i style="--swatch:${WORK_OUTCOME_COLORS[bucket.outcome]};width:calc(${(100*bucket.sessions/total).toFixed(3)}% - 2px)" title="${esc(WORK_OUTCOME_LABELS[bucket.outcome])}: ${bucket.sessions}"></i>`).join('');
+ $('w-outcomes-table').querySelector('tbody').innerHTML=buckets.length?buckets.map(bucket=>`<tr><td><span class=workStreamName><i class=workSwatch style="--swatch:${WORK_OUTCOME_COLORS[bucket.outcome]}"></i><b>${esc(WORK_OUTCOME_LABELS[bucket.outcome])}</b></span></td><td class="num mono">${bucket.sessions}</td><td class="num mono">${workPercent(bucket.sessions/total)}</td><td class="num mono">${money(bucket.spend)}</td><td class="num mono">${bucket.cost_per_session==null?'--':money(bucket.cost_per_session)}</td></tr>`).join(''):'<tr><td colspan=5><div class=workEmpty>Waiting for labeled sessions.</div></td></tr>';
+ $('w-rework-cost').textContent=outcomes?money(outcomes.rework_cost):'--';
+ $('w-rework-share').textContent=outcomes?.rework_share==null?'':`${workPercent(outcomes.rework_share)} of spend · estimate`;
+ $('w-outcomes-note').textContent=outcomes?`${outcomes.labeled_sessions.toLocaleString()} sessions with labeled follow-ups${outcomes.few_samples?' · few samples':''}.`:'Waiting for labeled sessions.';
+}
+function renderWorkPosition(insights){
+ const rows=insights?.position||[],max=Math.max(.05,...rows.map(row=>row.rate||0));
+ $('w-position').innerHTML=rows.map(row=>`<div class=workPositionCell data-few="${row.few_samples?'true':'false'}" title="${row.samples} labeled turns"><span>Turn ${esc(row.bucket)}</span><strong>${row.rate==null?'--':workPercent(row.rate)}</strong><i style="width:${row.rate==null?0:Math.max(4,100*row.rate/max)}%"></i><span>${row.samples} turns${row.few_samples?' · few':''}</span></div>`).join('');
+}
+function renderWorkFit(insights){
+ const fit=insights?.model_fit||{},models=fit.models||[],table=$('w-fit-table');
+ if(!models.length||!(fit.work_types||[]).length){table.innerHTML='<tbody><tr><td><div class=workEmpty>Waiting for labeled sessions.</div></td></tr></tbody>';return;}
+ const cell=(work,model)=>(fit.cells||[]).find(item=>item.work_type===work&&item.model===model.model&&item.runtime===model.runtime);
+ table.innerHTML=`<thead><tr><th>Work type</th>${models.map(model=>`<th class=num title="${esc(model.runtime)} · ${model.sessions} sessions">${esc(model.model)}<br><small class=workMuted>${esc(model.runtime)}</small></th>`).join('')}</tr></thead><tbody>${fit.work_types.map(work=>`<tr><td>${esc(WORK_TYPE_LABELS[work]||work)}</td>${models.map(model=>{const item=cell(work,model);if(!item||!item.sessions)return '<td class="num workMuted">--</td>';return `<td class="num mono workFitCell">${workRateText(item.rework)}${item.best?'<span class=workFitBest>Best</span>':''}<small>${item.sessions} · ${money(item.cost_per_session)}/session</small></td>`;}).join('')}</tr>`).join('')}</tbody>`;
+}
+$('w-headlines').addEventListener('click',event=>{
+ const card=event.target.closest('[data-target]');if(!card)return;
+ $(`w-module-${card.dataset.target}`)?.scrollIntoView({behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'});
+});
 function renderWork(payload){
  WORK=payload;renderWorkStatus(payload);
  const insights=payload?.insights,areas=(payload?.settings?.areas||[]).map(area=>area.name);
  renderWorkFilters(insights);renderWorkAllocation(insights,areas);renderWorkStreams(insights,areas);
  renderWorkEconomics(insights);renderWorkRework(insights);renderWorkSizing(insights);
+ renderWorkHeadlines(insights);renderWorkOutcomes(insights);renderWorkPosition(insights);renderWorkFit(insights);
 }
 async function loadWork(){
  const request=++workRequest,query=new URLSearchParams({months:workMonths});
