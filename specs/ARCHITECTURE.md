@@ -299,7 +299,7 @@ Work insights read typed user-turn text and the preceding assistant-reply tail
 only in process memory, only when the user enables them, and send them only to
 a loopback (`127.0.0.1`, `::1`; `localhost` pinned to `127.0.0.1`) plain-HTTP
 Ollama endpoint with redirects refused; remote or cloud Ollama models are
-rejected. The ledger, logs, and
+rejected by a local `/api/tags` check before every model request. The ledger, logs, and
 projections carry labels and reason codes only; `/work` and session tags are
 allowlisted aggregates and enums.
 

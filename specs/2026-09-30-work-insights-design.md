@@ -135,7 +135,7 @@ Answer readout, chosen from the evaluation below:
 | HTTP 400, no usable label in logprobs | Item | Attempt +1; a content-free backlog row schedules a re-load after 1 min, 10 min, 1 h; after 3 attempts record terminal `unclassifiable` with a reason code. Shown as Unclear. |
 | Ledger I/O error | Storage | State `storage_error`; worker stops writing and retries every 5 min. Incompatible schema is moved aside and recreated, like the Git ledger. |
 | Worker exception | Internal | Supervisor loop logs a sanitized reason code (no text, no exception message), sleeps with backoff, restarts. |
-| Model digest changes | Version | Before every item the worker re-reads the local `/api/tags` entry, so a changed digest or a name re-pointed to a remote or cloud model is caught before the next request. New labels record the new digest; existing labels stay valid. Relabeling with a new model is v2. |
+| Model digest changes | Version | Before every model request the worker re-reads the local `/api/tags` entry, so a changed digest or a name re-pointed to a remote or cloud model is caught before the next request. New labels record the new digest; existing labels stay valid. Relabeling with a new model is v2. |
 | Areas edited | Taxonomy | Area labels carry a taxonomy hash. Stale area labels count as Pending and are re-queued newest first. Work type and turn labels are unaffected. |
 
 Request timeouts: connect 2 s; read 10 s plus 1 s per 1,000 prompt characters,

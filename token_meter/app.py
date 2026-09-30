@@ -7458,6 +7458,7 @@ def work_insights_service():
                 work_insights_settings,
                 power_probe=power if callable(power) else None,
                 refill=work_insights_refill,
+                recovered=lambda: requeue_work_insights(),
             )
         return _work_service_instance
 
@@ -10277,10 +10278,13 @@ class H(BaseHTTPRequestHandler):
             if payload.get("confirm") is not True:
                 result = {"ok": False, "error": "Explicit confirmation is required."}
             else:
-                clear_work_insights()
-                if work_insights_settings()["enabled"]:
-                    requeue_work_insights()
-                result = {"ok": True, "status": work_insights_status()}
+                try:
+                    clear_work_insights()
+                    if work_insights_settings()["enabled"]:
+                        requeue_work_insights()
+                    result = {"ok": True, "status": work_insights_status()}
+                except (OSError, sqlite3.Error):
+                    result = {"ok": False, "error": "Token Meter could not delete the labels. Try again."}
             self._send(json.dumps(result), "application/json",
                        status=200 if result.get("ok") else 400)
             return

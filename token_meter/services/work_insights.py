@@ -648,7 +648,7 @@ class WorkInsightsService:
 
     def __init__(self, ledger_path, settings_provider, client_factory=OllamaClient,
                  clock=time.time, monotonic=time.monotonic, sleep=None,
-                 load_probe=None, power_probe=None, refill=None):
+                 load_probe=None, power_probe=None, refill=None, recovered=None):
         self.ledger_path = ledger_path
         self.settings_provider = settings_provider
         self.client_factory = client_factory
@@ -657,6 +657,7 @@ class WorkInsightsService:
         self.load_probe = load_probe or _default_load_probe
         self.power_probe = power_probe or (lambda: None)
         self.refill = refill
+        self.recovered = recovered
         self.lock = threading.Lock()
         self.write_lock = threading.Lock()
         self.wake = threading.Event()
@@ -728,6 +729,7 @@ class WorkInsightsService:
     def observe(self, row_id, turns, last_ts=0.0):
         """Queue unlabeled work for one parsed session. Text is kept only in the bounded queue."""
         settings = self.settings_provider()
+        generation = self.generation
         if not settings["enabled"] or self.ledger is None:
             return 0
         session_key = self.session_key(row_id)
@@ -741,7 +743,6 @@ class WorkInsightsService:
             self._remove_backlog(session_key)
             return 0
         taxonomy = taxonomy_hash(settings["areas"])
-        generation = self.generation
         active = bool(newest and newest >= now - ACTIVE_WINDOW_S)
         items, opener_seen = [], False
         retry_count, retry_at = 0, None
@@ -932,6 +933,10 @@ class WorkInsightsService:
             self._open_ledger()
             if self.ledger is None:
                 return STORAGE_RETRY_S
+            self._set(STATE_IDLE)
+            if self.recovered is not None:
+                # Sessions parsed during the outage were not queued; re-parse them now.
+                self.recovered()
         if is_paused(settings, now):
             self._unload(settings)
             self._set(STATE_PAUSED, "manual")
@@ -942,13 +947,13 @@ class WorkInsightsService:
         self._maybe_refill()
         item = self._next_item()
         if item is None:
+            if self.state in (STATE_SETUP, STATE_BACKOFF):
+                failed = self._check_digest(client, settings)
+                if failed is not None:
+                    return failed
             self.loaded = False
             self._set(STATE_IDLE)
             return 5.0
-        # A cheap local /api/tags lookup before every item, so a name re-pointed to a cloud model is caught.
-        failed = self._check_digest(client, settings)
-        if failed is not None:
-            return failed
         reason = self._throttle_reason(settings)
         if reason:
             self._unload(settings)
@@ -956,6 +961,7 @@ class WorkInsightsService:
             return THROTTLE_WAIT_S
         self._set(STATE_RUNNING)
         taxonomy = taxonomy_hash(settings["areas"])
+        retry_scheduled = False
         for question_name in item.questions:
             if not self._needs(item.turn_key, question_name, taxonomy, self.clock()):
                 continue
@@ -968,6 +974,11 @@ class WorkInsightsService:
                 for prompt, *_ in rendered:
                     if not self._may_send(generation):
                         return 0.0
+                    # A cheap local /api/tags lookup before every request, so a name re-pointed
+                    # to a remote or cloud model is refused before any text is sent to it.
+                    failed = self._check_digest(client, settings)
+                    if failed is not None:
+                        return failed
                     self.pacer.consume()
                     started = self.monotonic()
                     responses.append(client.classify(prompt, timeout))
@@ -976,7 +987,8 @@ class WorkInsightsService:
             except ClassifierError as error:
                 if error.kind in ("transport", "setup"):
                     return self._fail_global(error)
-                self._fail_item(item, question_name, error.reason, generation)
+                retry_scheduled = self._fail_item(item, question_name, error.reason, generation,
+                                                  schedule_retry=not retry_scheduled) or retry_scheduled
                 continue
             self.loaded = True
             if question_name == "complexity":
@@ -1014,10 +1026,11 @@ class WorkInsightsService:
             self.labels_version += 1
         return True
 
-    def _fail_item(self, item, question, reason, generation):
+    def _fail_item(self, item, question, reason, generation, schedule_retry=True):
+        """Record a failed question; returns True when a retry row was scheduled for the item."""
         with self.write_lock:
             if generation != self.generation:
-                return
+                return False
             try:
                 attempts, terminal = self.ledger.record_failure(
                     item.turn_key, question, item.session_key, reason, self.clock())
@@ -1026,12 +1039,14 @@ class WorkInsightsService:
                     self._failures[(item.turn_key, question)] = (int(self.clock() + delay), terminal)
                     if terminal:
                         self.labels_version += 1
-                if not terminal:
-                    # Schedule a re-load so the retry happens even if the session is never parsed again.
+                if not terminal and schedule_retry:
+                    # One retry row per item, so pending stays in item units.
                     self.ledger.upsert_backlog(item.session_key, item.newest_ts, 1,
                                                self.clock() + delay, merge=True)
+                    return True
             except sqlite3.Error:
                 self._set(STATE_STORAGE, "ledger_write_failed", STORAGE_RETRY_S)
+            return False
 
     def _fail_global(self, error):
         if error.kind == "setup":
@@ -1143,7 +1158,16 @@ class WorkInsightsService:
                 self.labels_version += 1
             self.model_digest = ""
             if self.ledger is not None:
-                self.ledger.clear()
+                try:
+                    self.ledger.clear()
+                except (sqlite3.Error, OSError):
+                    self.ledger = None
+                    self._set(STATE_STORAGE, "ledger_unavailable", STORAGE_RETRY_S)
+            with self.lock:
+                # Fence again after the salt rotated: intake that began mid-clear is discarded.
+                self.generation += 1
+                self.queue.clear()
+                self.queued.clear()
 
     def settings_changed(self):
         settings = self.settings_provider()

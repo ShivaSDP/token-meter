@@ -421,7 +421,7 @@ class ServiceTests(unittest.TestCase):
             values["model"] = "other-model"
             service.observe("s2", turns("more"))
             service.step()
-        self.assertEqual(checks, ["other-model"])
+        self.assertEqual(set(checks), {"other-model"})
 
     def test_turn_keys_ignore_text(self):
         service, _, _ = make_service(self.tmp.name)
@@ -470,6 +470,67 @@ class ServiceTests(unittest.TestCase):
         service._turn_key = racing_key
         self.assertEqual(service.observe("s1", turns("hello")), 0)
         self.assertEqual(service.queue, [])
+
+    def test_clear_before_intake_reads_generation_discards_old_salt_keys(self):
+        service, values, _ = make_service(self.tmp.name)
+        original = service.session_key
+        state = {"cleared": False}
+
+        def racing_session_key(row_id):
+            key = original(row_id)
+            if not state["cleared"]:
+                state["cleared"] = True
+                service.clear()
+            return key
+
+        service.session_key = racing_session_key
+        self.assertEqual(service.observe("s1", turns("hello")), 0)
+        self.assertEqual(service.queue, [])
+
+    def test_setup_state_persists_with_an_empty_queue(self):
+        service, values, clock = make_service(self.tmp.name)
+        service.observe("s1", turns("hello"))
+        FakeClient.digest_error = W.ClassifierError("setup", "model_missing")
+        service.step()
+        service.queue.clear()
+        service.queued.clear()
+        clock.now += W.SETUP_PROBE_S + 1
+        service.step()
+        self.assertEqual((service.state, service.reason), (W.STATE_SETUP, "model_missing"))
+
+    def test_model_repointed_to_cloud_between_requests_sends_nothing_more(self):
+        service, values, clock = make_service(self.tmp.name)
+        calls = []
+
+        def respond(prompt):
+            calls.append(prompt)
+            FakeClient.digest_error = W.ClassifierError("setup", "remote_model")
+            return jet_response("A")
+
+        FakeClient.responder = respond
+        service.observe("s1", turns("hello"))
+        service.step()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((service.state, service.reason), (W.STATE_SETUP, "remote_model"))
+
+    def test_an_item_with_several_failed_questions_adds_one_retry(self):
+        service, values, clock = make_service(self.tmp.name)
+        FakeClient.responder = lambda prompt: jet_response("Sure")
+        service.observe("s1", turns("hello"))
+        service.step()
+        self.assertEqual(service.ledger.backlog_pending(), 1)
+
+    def test_failed_clear_reopens_the_ledger_and_requeues(self):
+        recovered = []
+        service, values, clock = make_service(self.tmp.name, recovered=lambda: recovered.append(1))
+        with mock.patch.object(W.LabelLedger, "clear", side_effect=OSError("disk")):
+            service.clear()
+        self.assertIsNone(service.ledger)
+        clock.now += W.STORAGE_RETRY_S + 1
+        service.state = W.STATE_IDLE
+        service.step()
+        self.assertIsNotNone(service.ledger)
+        self.assertEqual(recovered, [1])
 
     def test_latency_baseline_adapts(self):
         service, _, _ = make_service(self.tmp.name)
