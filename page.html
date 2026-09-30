@@ -5684,7 +5684,7 @@ function workDuration(seconds){
 }
 function renderWorkStatus(payload){
  const status=payload?.status||{},settings=payload?.settings||{},coverage=payload?.insights?.coverage||{};
- const state=settings.enabled?status.state||'idle':'disabled';
+ const state=status.reason==='delete_pending'?'storage_error':settings.enabled?status.state||'idle':'disabled';
  const share=coverage.sessions?Math.round(100*coverage.labeled_sessions/coverage.sessions):0;
  const progress=`Labeled ${share}% of sessions in this period${status.pending?` · ${status.pending.toLocaleString()} pending`:''}${status.eta_s&&state==='running'?` · ${workDuration(status.eta_s)}`:''}`;
  const copy={
@@ -5807,7 +5807,8 @@ function renderWorkOutcomes(insights){
  $('w-outcomes-table').querySelector('tbody').innerHTML=buckets.length?buckets.map(bucket=>`<tr><td><span class=workStreamName><i class=workSwatch style="--swatch:${WORK_OUTCOME_COLORS[bucket.outcome]}"></i><b>${esc(WORK_OUTCOME_LABELS[bucket.outcome])}</b></span></td><td class="num mono">${bucket.sessions}</td><td class="num mono">${workPercent(bucket.sessions/total)}</td><td class="num mono">${money(bucket.spend)}</td><td class="num mono">${bucket.cost_per_session==null?'--':money(bucket.cost_per_session)}</td></tr>`).join(''):'<tr><td colspan=5><div class=workEmpty>Waiting for labeled sessions.</div></td></tr>';
  $('w-rework-cost').textContent=outcomes?money(outcomes.rework_cost):'--';
  $('w-rework-share').textContent=outcomes?.rework_share==null?'':`${workPercent(outcomes.rework_share)} of spend · estimate`;
- $('w-outcomes-note').textContent=outcomes?`${outcomes.labeled_sessions.toLocaleString()} sessions with labeled follow-ups${outcomes.few_samples?' · few samples':''}.`:'Waiting for labeled sessions.';
+ const ended=buckets.find(bucket=>bucket.outcome==='ended_on_pushback');
+ $('w-outcomes-note').textContent=outcomes?`${outcomes.labeled_sessions.toLocaleString()} sessions with labeled follow-ups${ended&&outcomes.labeled_sessions?` · ${workPercent(ended.sessions/outcomes.labeled_sessions)} of them ended on a pushback`:''}${outcomes.few_samples?' · few samples':''}. Shares below are of all sessions.`:'Waiting for labeled sessions.';
 }
 function renderWorkPosition(insights){
  const rows=insights?.position||[],max=Math.max(.05,...rows.map(row=>row.rate||0));
@@ -5880,7 +5881,7 @@ function renderWorkSettings(payload,{force=false}={}){
  if(!payload)return;
  WORK_SETTINGS=payload;
  const settings=payload.settings||{},status=payload.status||{};
- const badge={disabled:'Off',setup_needed:'Setup needed',running:'Running',idle:'Up to date',paused:'Paused',throttled:'Waiting',backoff:'Retrying',storage_error:'Error'}[settings.enabled?status.state:'disabled']||'On';
+ const badge=status.reason==='delete_pending'?'Delete pending':({disabled:'Off',setup_needed:'Setup needed',running:'Running',idle:'Up to date',paused:'Paused',throttled:'Waiting',backoff:'Retrying',storage_error:'Error'}[settings.enabled?status.state:'disabled']||'On');
  $('work-settings-badge').textContent=badge;
  if(!force&&settingsInteractionActive())return;
  $('work-enabled').checked=Boolean(settings.enabled);$('work-battery').checked=settings.pause_on_battery!==false;

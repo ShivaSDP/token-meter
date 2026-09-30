@@ -7465,7 +7465,15 @@ def work_insights_service():
 
 def work_insights_watcher():
     """Run the classifier worker once enabled and sources are known; it paces and pauses itself."""
+    last_delete_attempt = 0.0
     while not (_SOURCE_INVENTORY.get("ready") and work_insights_settings()["enabled"]):
+        if (os.path.exists(TOKEN_METER_WORK_INSIGHTS_DB + ".delete-pending")
+                and time.monotonic() - last_delete_attempt >= _work.STORAGE_RETRY_S):
+            last_delete_attempt = time.monotonic()
+            try:
+                finish_work_insights_delete()
+            except OSError:
+                pass
         time.sleep(2.0)
     work_insights_service().run_forever()
 
@@ -7487,13 +7495,26 @@ def clear_work_insights():
         service.clear()
         return
     marker = TOKEN_METER_WORK_INSIGHTS_DB + ".delete-pending"
-    if not os.path.exists(TOKEN_METER_WORK_INSIGHTS_DB) and not os.path.exists(marker):
+    files = [TOKEN_METER_WORK_INSIGHTS_DB + suffix for suffix in ("", "-wal", "-shm", "-journal")]
+    if not any(os.path.exists(path) for path in files + [marker]):
         return
     # The marker makes a failed delete finish before the service ever reopens the ledger.
     with open(marker, "w", encoding="utf-8"):
         pass
+    finish_work_insights_delete()
+
+
+def finish_work_insights_delete():
+    """Finish a marker-recorded delete while no service is running; OSError means it is still pending."""
+    marker = TOKEN_METER_WORK_INSIGHTS_DB + ".delete-pending"
+    if not os.path.exists(marker):
+        return True
     _work.LabelLedger.remove(TOKEN_METER_WORK_INSIGHTS_DB)
-    os.remove(marker)
+    try:
+        os.remove(marker)
+    except FileNotFoundError:
+        pass
+    return True
 
 
 def requeue_work_insights():
@@ -7526,7 +7547,9 @@ def work_insights_public_settings(settings=None):
 
 def work_insights_status():
     if work_insights_service_if_started() is None and not work_insights_settings()["enabled"]:
-        return {"state": "disabled", "reason": "", "pending": 0, "queued": 0, "eta_s": 0,
+        pending_delete = os.path.exists(TOKEN_METER_WORK_INSIGHTS_DB + ".delete-pending")
+        return {"state": "storage_error" if pending_delete else "disabled",
+                "reason": "delete_pending" if pending_delete else "", "pending": 0, "queued": 0, "eta_s": 0,
                 "retry_at": None, "paused_until": work_insights_settings()["paused_until"],
                 "model": work_insights_settings()["model"], "model_versions": 0, "labels": 0}
     status = work_insights_service().status()
@@ -7584,6 +7607,7 @@ def work_insights_state(months="6", runtime="", project=""):
         runtime=str(runtime or "")[:40], project=str(project or "")[:240],
         today=time.strftime("%Y-%m-%d"),
         corrections_for=service.session_corrections if service else None,
+        pending_keys=service.pending_session_keys() if service else None,
     )
     runtimes = insights["filters"]["runtimes"]
     if runtime and runtime not in runtimes:

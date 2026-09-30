@@ -693,6 +693,7 @@ class WorkInsightsService:
         self._rate_window = collections.deque(maxlen=50)
         self._turn_values = {}
         self._corrections_memo = (None, {})
+        self._delete_requested = False
         self._open_ledger()
 
     # ---- ledger lifecycle
@@ -703,20 +704,26 @@ class WorkInsightsService:
 
     @property
     def delete_pending(self):
-        return os.path.exists(self._delete_marker)
+        return self._delete_requested or os.path.exists(self._delete_marker)
 
     def _finish_pending_delete(self):
-        """Complete a delete the user asked for; the marker survives restarts until it succeeds."""
-        if not self.delete_pending:
+        """Complete a requested delete before any reopen.
+
+        The request is held in memory and, when the directory allows it, in a marker file that
+        survives restarts; either one blocks reopening until the files are gone.
+        """
+        with self.write_lock:
+            if not self.delete_pending:
+                return True
+            try:
+                LabelLedger.remove(self.ledger_path)
+                _remove_if_present(self._delete_marker)
+            except OSError:
+                self.ledger = None
+                self.state, self.reason = STATE_STORAGE, "delete_pending"
+                return False
+            self._delete_requested = False
             return True
-        try:
-            LabelLedger.remove(self.ledger_path)
-            os.remove(self._delete_marker)
-        except OSError:
-            self.ledger = None
-            self.state, self.reason = STATE_STORAGE, "delete_pending"
-            return False
-        return True
 
     def _open_ledger(self):
         if not self._finish_pending_delete():
@@ -1183,8 +1190,20 @@ class WorkInsightsService:
             elif row["question"] in ("area", "work_type"):
                 entry.setdefault(row["question"], "Unclear" if row["question"] == "area" else "unclear")
         self._turn_values = turn_values
-        self._snapshot = (version, sessions)
+        self._snapshot = (version, sessions, turn_values)
         return sessions
+
+    def pending_session_keys(self):
+        """Session keys that still have queued or backlogged work (content-free)."""
+        with self.lock:
+            keys = {item.session_key for item in self.queue}
+        if self.ledger is not None:
+            try:
+                with self.ledger._connect() as connection:
+                    keys.update(r["session_key"] for r in connection.execute("SELECT session_key FROM work_backlog"))
+            except sqlite3.Error:
+                pass
+        return keys
 
     def session_corrections(self, row_id, count):
         """Ordered (ordinal, pushback) pairs for a session's labeled follow-up turns.
@@ -1192,10 +1211,12 @@ class WorkInsightsService:
         ``pushback`` is True, False, or None when the label was low-confidence.
         """
         self.snapshot()
-        values = self._turn_values
+        cached_snapshot = self._snapshot
+        version = cached_snapshot[0] if cached_snapshot else None
+        values = cached_snapshot[2] if cached_snapshot else {}
         memo_key = (row_id, int(count))
-        if self._corrections_memo[0] != self.labels_version:
-            self._corrections_memo = (self.labels_version, {})
+        if self._corrections_memo[0] != version:
+            self._corrections_memo = (version, {})
         cached = self._corrections_memo[1].get(memo_key)
         if cached is not None:
             return cached
@@ -1220,18 +1241,29 @@ class WorkInsightsService:
             failed = False
             self._turn_values = {}
             self._corrections_memo = (None, {})
+            # Record the request in memory first; the content-free marker makes it survive a
+            # restart when the directory is writable.
+            self._delete_requested = True
+            self.ledger = None
             try:
-                # Content-free marker first, so an interrupted or failed delete is retried
-                # before any reopen, including after a restart.
                 with open(self._delete_marker, "w", encoding="utf-8"):
                     pass
+            except OSError:
+                pass
+            try:
                 LabelLedger.remove(self.ledger_path)
-                os.remove(self._delete_marker)
-                self.ledger = LabelLedger(self.ledger_path)
-            except (sqlite3.Error, OSError):
-                self.ledger = None
+                _remove_if_present(self._delete_marker)
+                self._delete_requested = False
+            except OSError:
                 self._set(STATE_STORAGE, "delete_pending", STORAGE_RETRY_S)
                 failed = True
+            if not failed:
+                try:
+                    self.ledger = LabelLedger(self.ledger_path)
+                    self._set(STATE_IDLE)
+                except (sqlite3.Error, OSError):
+                    # The labels are gone; only reopening failed, which step() retries.
+                    self._set(STATE_STORAGE, "ledger_unavailable", STORAGE_RETRY_S)
             with self.lock:
                 # Fence again after the salt rotated: intake that began mid-clear is discarded.
                 self.generation += 1
@@ -1248,6 +1280,13 @@ class WorkInsightsService:
                 self.queue.clear()
                 self.queued.clear()
         self.wake.set()
+
+
+def _remove_if_present(path):
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
 
 
 def _default_load_probe():

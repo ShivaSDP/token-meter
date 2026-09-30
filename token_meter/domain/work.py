@@ -87,15 +87,15 @@ MAX_FIT_MODELS = 5
 MAX_HEADLINES = 4
 
 
-def session_outcome(turns, sequence):
+def session_outcome(turns, sequence, pending=False):
     """Classify a session from its ordered follow-up pushback labels.
 
-    A session is classified only once its last follow-up turn is labeled; sessions whose
-    labels are all low-confidence are Unclear rather than counted as accepted.
+    A session is classified only once it has no queued or backlogged work (``pending``);
+    sessions whose labels are all low-confidence are Unclear rather than counted as accepted.
     """
     if turns <= 1:
         return "single_shot"
-    if not sequence or sequence[-1][0] != turns - 1:
+    if pending or not sequence:
         return "pending"
     confident = [value for _ordinal, value in sequence if value is not None]
     if not confident:
@@ -114,7 +114,7 @@ def rework_share(turns, sequence):
 
 
 def build_work_insights(rows, labels, key_for, areas, output_price, months=6,
-                        runtime="", project="", today="", corrections_for=None):
+                        runtime="", project="", today="", corrections_for=None, pending_keys=None):
     """Aggregate labeled sessions. ``months`` 0 means all history."""
     area_names = [a["name"] for a in areas]
     tiers, tier_prices = price_tiers(rows, output_price, with_prices=True)
@@ -148,6 +148,7 @@ def build_work_insights(rows, labels, key_for, areas, output_price, months=6,
             "tier": tiers.get((row.get("runtime") or "", primary_model(row))),
             "model": primary_model(row),
             "sequence": [],
+            "pending": bool(pending_keys) and key_for(row.get("id") or "") in pending_keys,
         })
 
     all_months = sorted({m for s in sessions for m in [s["start_month"], *map(_month, s["days"]),
@@ -327,7 +328,7 @@ def _outcomes(in_window):
     buckets = {key: {"outcome": key, "sessions": 0, "spend": 0.0} for key in OUTCOMES}
     rework_cost = total = 0.0
     for s in in_window:
-        key = session_outcome(s["turns"], s["sequence"])
+        key = session_outcome(s["turns"], s["sequence"], s["pending"])
         buckets[key]["sessions"] += 1
         buckets[key]["spend"] += _cost(s)
         total += _cost(s)

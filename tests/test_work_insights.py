@@ -580,6 +580,47 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse(service.delete_pending)
         self.assertEqual(service.status()["state"], W.STATE_DISABLED)
 
+    def test_read_only_directory_delete_never_restores_labels(self):
+        service, values, clock = make_service(self.tmp.name)
+        service.observe("s1", turns("hello"))
+        drain(service)
+        real_open = open
+
+        def refuse_marker(path, *args, **kwargs):
+            if str(path).endswith(".delete-pending"):
+                raise PermissionError("read-only")
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch("builtins.open", refuse_marker), \
+                mock.patch.object(W.LabelLedger, "remove", side_effect=PermissionError("read-only")):
+            with self.assertRaises(W.LabelDeleteError):
+                service.clear()
+            clock.now += W.STORAGE_RETRY_S + 1
+            service.step()
+            self.assertIsNone(service.ledger)
+            self.assertEqual(service.status()["reason"], "delete_pending")
+        service.step()
+        self.assertIsNotNone(service.ledger)
+        self.assertEqual(service.snapshot(), {})
+
+    def test_successful_delete_with_failed_reopen_is_not_reported_as_failed(self):
+        service, values, clock = make_service(self.tmp.name)
+
+        class FlakyLedger(W.LabelLedger):
+            def __init__(self, path):
+                raise sqlite3_error()
+
+        with mock.patch.object(W, "LabelLedger", FlakyLedger):
+            service.clear()
+        self.assertFalse(service.delete_pending)
+        self.assertEqual(service.status()["reason"], "ledger_unavailable")
+
+    def test_pending_sessions_are_not_classified(self):
+        service, values, clock = make_service(self.tmp.name)
+        with mock.patch.object(W, "QUEUE_LIMIT", 0):
+            service.observe("s1", turns("a", "b", "c"))
+        self.assertIn(service.session_key("s1"), service.pending_session_keys())
+
     def test_latency_baseline_adapts(self):
         service, _, _ = make_service(self.tmp.name)
         for _ in range(W.LATENCY_WINDOW):
@@ -818,7 +859,8 @@ class OutcomeInsightTests(unittest.TestCase):
         self.assertEqual(domain.session_outcome(3, [(1, False), (2, True)]), "ended_on_pushback")
         self.assertEqual(domain.session_outcome(3, [(1, True), (2, None)]), "ended_on_pushback")
         self.assertEqual(domain.session_outcome(3, [(1, None), (2, None)]), "unclear")
-        self.assertEqual(domain.session_outcome(4, [(1, False), (2, False)]), "pending")
+        self.assertEqual(domain.session_outcome(4, [(1, False), (2, False)]), "accepted")
+        self.assertEqual(domain.session_outcome(4, [(1, False), (2, False)], pending=True), "pending")
         self.assertEqual(domain.rework_share(4, [(1, False), (2, True)]), 0.5)
         self.assertEqual(domain.rework_share(4, [(1, False)]), 0.0)
 
@@ -917,6 +959,11 @@ class AppContractTests(unittest.TestCase):
             self.assertTrue(route in source, route)
 
 
+def sqlite3_error():
+    import sqlite3
+    return sqlite3.OperationalError("unable to open")
+
+
 class SurfaceContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -971,6 +1018,20 @@ class AppIntegrationTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.settings = os.path.join(self.tmp.name, "settings.json")
         self.db = os.path.join(self.tmp.name, "work.sqlite3")
+
+    def test_disabled_status_shows_a_pending_delete_and_the_watcher_helper_finishes_it(self):
+        marker = self.db + ".delete-pending"
+        open(marker, "w").close()
+        open(self.db, "w").close()
+        with mock.patch.object(meter, "TOKEN_METER_SETTINGS", self.settings), \
+                mock.patch.object(meter, "TOKEN_METER_WORK_INSIGHTS_DB", self.db), \
+                mock.patch.object(meter, "_work_service_instance", None):
+            status = meter.work_insights_status()
+            self.assertEqual((status["state"], status["reason"]), ("storage_error", "delete_pending"))
+            meter.finish_work_insights_delete()
+            self.assertEqual(meter.work_insights_status()["state"], "disabled")
+        self.assertFalse(os.path.exists(self.db))
+        self.assertFalse(os.path.exists(marker))
 
     def test_disabled_feature_creates_no_ledger(self):
         with mock.patch.object(meter, "TOKEN_METER_SETTINGS", self.settings), \
