@@ -116,6 +116,7 @@ from token_meter.services.git_delivery import GitDeliveryLedger, GitDeliveryServ
 from token_meter.services import work_insights as _work
 from token_meter.domain.work import build_work_insights as _domain_build_work_insights
 from token_meter.domain.work import is_child_row as _work_is_child_row
+from token_meter.domain.work import work_identity as _work_identity
 from token_meter.domain.work import find_sessions as _domain_find_sessions
 from token_meter.domain.work import DRILL_FILTERS as _domain_drill_filters
 from token_meter.models.catalog import (
@@ -5835,9 +5836,9 @@ def session_summary(source, opencode_conn=None):
     if work_insights_settings()["enabled"]:
         service = work_insights_service()
         if work_turns and not _work_is_child_row(row):
-            service.observe(row["id"], work_turns)
+            service.observe(_work_identity(row), work_turns)
         else:
-            service.forget(row["id"])
+            service.forget(_work_identity(row))
     with _summary_cache_lock:
         _summary_cache[source["path"]] = {"signature": signature, "row": row}
     return row
@@ -6213,7 +6214,7 @@ def dashboard_state_payload(state):
         )
     payload["runtime_catalog"] = _runtime_catalog(runtime_registry().descriptors)
     source_id = (state.get("source") or {}).get("id") if isinstance(state.get("source"), dict) else None
-    payload["work_tags"] = work_session_tags(source_id) if source_id else None
+    payload["work_tags"] = work_session_tags(state.get("source")) if source_id else None
     cross = state.get("xsession")
     if isinstance(cross, dict):
         public_cross = dict(cross)
@@ -7441,7 +7442,7 @@ def work_insights_refill(session_keys):
     salt = service.ledger.salt if service.ledger else ""
     if _work_source_keys["sources"] is not sources or _work_source_keys["salt"] != salt:
         _work_source_keys.update(sources=sources, salt=salt, keys={
-            service.session_key(source.get("id") or ""): source for source in sources})
+            service.session_key(_work_identity(source)): source for source in sources})
     for key in session_keys:
         source = _work_source_keys["keys"].get(key)
         if source is None:
@@ -7566,13 +7567,13 @@ def work_insights_status():
         "model", "model_versions", "labels")}
 
 
-def work_session_tags(source_id):
+def work_session_tags(source):
     """Allowlisted labels for one session, or None when unlabeled or disabled."""
     settings = work_insights_settings()
     if not settings["enabled"]:
         return None
     service = work_insights_service()
-    entry = service.snapshot().get(service.session_key(source_id or ""))
+    entry = service.snapshot().get(service.session_key(_work_identity(source or {})))
     if not entry:
         return None
     return {
@@ -7645,6 +7646,9 @@ def work_sessions_state(query):
     rows, service = _work_rows_and_service()
     if project and not any((row.get("project") or "") == project for row in rows):
         return {"ok": False, "error": "Project was not found."}, 404
+    ids_only = one("ids") == "1"
+    if "start_month" in filters and not re.fullmatch(r"\d{4}-\d{2}", filters["start_month"]):
+        return {"ok": False, "error": "Choose a valid month."}, 400
     result = _domain_find_sessions(
         rows, service.snapshot() if service else {},
         service.session_key if service else (lambda _row_id: ""),
@@ -7652,6 +7656,7 @@ def work_sessions_state(query):
         runtime=runtime[:40], project=project,
         corrections_for=service.session_corrections if service else None,
         pending_keys=service.pending_session_keys() if service else None,
+        ids_only=ids_only,
     )
     return {"ok": True, "filters": filters, **result}, 200
 
@@ -7667,19 +7672,7 @@ def work_insights_state(months="6", runtime="", project=""):
     settings = work_insights_settings()
     payload = {"ok": True, "settings": work_insights_public_settings(settings),
                "status": work_insights_status()}
-    if _xsess.get("data") is None:
-        cross_session()
-    labels = {}
-
-    def public_project(value):
-        key = str(value or "")
-        if key not in labels:
-            labels[key] = delivery_project_label(key) or "Other local sessions"
-        return labels[key]
-
-    rows = tuple(dict(row, project=public_project(row.get("project")))
-                 for row in (_xsess.get("internal_rows") or ()))
-    service = work_insights_service() if settings["enabled"] else None
+    rows, service = _work_rows_and_service()
     insights = _domain_build_work_insights(
         rows, service.snapshot() if service else {},
         service.session_key if service else (lambda _row_id: ""),

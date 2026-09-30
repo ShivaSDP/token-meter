@@ -246,6 +246,33 @@ is not a correction" to the pushback question dropped precision from 0.81 to
 cutoff labels 58 of 60 sessions at 84% vs 51 at 86%. Rewording "routine"
 complexity changed nothing and was not adopted.
 
+## Page redesign (iteration 4)
+
+The page tells one story, spend in and outcomes out:
+
+1. **Period KPIs**: resolved sessions (accepted or recovered, over sessions with
+   labeled follow-ups), pushback rate, cost per resolved session, and spend after
+   first pushback, each against the equal period before when one exists.
+2. **What stands out** cards.
+3. **Spend in, outcomes out**: one vertical column per month. Above the line,
+   the chosen measure (spend, turns, or sessions) stacked by area; mirrored below,
+   the outcomes of sessions started that month. Month names with the year shown
+   once, and "so far" for the current month. Every segment and key row opens the
+   matching sessions in Sessions → All sessions with a removable "Work:" filter
+   chip (`#sessions-all?work=1&…`, resolved through `/work/sessions?ids=1`).
+4. **Pushback over time** (weekly rate with a model filter; hollow points are
+   under 20 labeled turns) beside **cost by kind of work** (per-session cost bars).
+5. **Model fit by work type** and **model right-sizing** (price tier and
+   reasoning effort).
+
+Workstreams (project × area tables) were removed: the ledger's click-through
+answers the same question with the actual sessions.
+
+Labels are keyed per trace file (session id plus trace path, salted), because
+one Codex session id can span several rollout files. Drill-downs return session
+ids, matching the All sessions list. The ledger schema moved to version 3 to
+drop labels keyed by id alone.
+
 ## Privacy
 
 - User-turn text and the preceding assistant-reply tail (600 characters) exist

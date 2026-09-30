@@ -841,7 +841,7 @@ class DomainTests(unittest.TestCase):
 
     def build(self, rows, labels, **kwargs):
         prices = {"gpt-5.6": 10.0, "cheap": 1.0, "mid": 4.0}
-        return domain.build_work_insights(rows, labels, lambda rid: rid, self.AREAS,
+        return domain.build_work_insights(rows, labels, lambda ident: ident.split("\0")[0], self.AREAS,
                                           lambda m, p: prices.get(m), today="2026-09-30", **kwargs)
 
     def test_allocation_measures_and_pending(self):
@@ -867,26 +867,12 @@ class DomainTests(unittest.TestCase):
         out = self.build([child, parent], {})
         self.assertEqual(out["coverage"]["sessions"], 1)
 
-    def test_workstream_rework_counts_once_in_the_start_month(self):
-        spanning = row("a")
-        spanning["_language_signal_events"] = {"positive": [{"day": "2026-08-30"}, {"day": "2026-09-02"}]}
-        spanning["start"] = "2026-08-30 10:00"
-        spanning["_day_cost"] = {"2026-08-30": 1.0, "2026-09-02": 1.0}
-        labels = {"a": {"area": "Personal", "corrections": 1, "correction_labels": 1}}
-        out = self.build([spanning], labels)
-        august = out["workstreams"]["2026-08"]["rows"][0]["rework"]
-        september = out["workstreams"]["2026-09"]["rows"][0]["rework"]
-        self.assertEqual(august["samples"], 1)
-        self.assertIsNone(september)
-
-    def test_workstreams_economics_and_few_samples(self):
+    def test_economics_and_few_samples(self):
         rows = [row("a"), row("b", project="beta", turns_=5)]
         labels = {"a": {"area": "Personal", "work_type": "docs", "corrections": 1, "correction_labels": 2},
                   "b": {"area": "Personal", "work_type": "docs", "corrections": 0, "correction_labels": 4}}
         out = self.build(rows, labels)
-        ws = out["workstreams"]["2026-09"]["rows"]
-        self.assertEqual([w["project"] for w in ws], ["beta", "alpha"])
-        self.assertAlmostEqual(sum(w["share"] for w in ws), 1.0)
+        self.assertNotIn("workstreams", out)
         docs = out["economics"][0]
         self.assertEqual((docs["work_type"], docs["sessions"], docs["cost_per_session"]), ("docs", 2, 2.0))
         self.assertTrue(docs["rework"]["few_samples"])
@@ -913,8 +899,8 @@ class OutcomeInsightTests(unittest.TestCase):
     def build(self, rows, labels, sequences, **kwargs):
         prices = {"gpt-5.6": 10.0, "cheap": 1.0, "mid": 4.0}
         return domain.build_work_insights(
-            rows, labels, lambda rid: rid, self.AREAS, lambda m, p: prices.get(m), today="2026-09-30",
-            corrections_for=lambda rid, n: sequences.get(rid, []), **kwargs)
+            rows, labels, lambda ident: ident.split("\0")[0], self.AREAS, lambda m, p: prices.get(m), today="2026-09-30",
+            corrections_for=lambda ident, n: sequences.get(ident.split("\0")[0], []), **kwargs)
 
     def test_session_outcome_classification(self):
         self.assertEqual(domain.session_outcome(1, []), "single_shot")
@@ -980,8 +966,26 @@ class OperatingRhythmTests(unittest.TestCase):
 
     def build(self, rows, labels, sequences):
         prices = {"gpt-5.6": 10.0, "cheap": 1.0}
-        return domain.build_work_insights(rows, labels, lambda rid: rid, self.AREAS, lambda m, p: prices.get(m),
-                                          today="2026-09-30", corrections_for=lambda rid, n: sequences.get(rid, []))
+        return domain.build_work_insights(rows, labels, lambda ident: ident.split("\0")[0], self.AREAS, lambda m, p: prices.get(m),
+                                          today="2026-09-30", corrections_for=lambda ident, n: sequences.get(ident.split("\0")[0], []))
+
+    def test_ledger_outcomes_and_period_kpis(self):
+        rows, labels, sequences = [], {}, {}
+        for i in range(8):
+            day = "2026-08-10" if i < 4 else "2026-09-10"
+            rows.append(row(f"k{i}", day=day, cost=2.0, turns_=3))
+            labels[f"k{i}"] = {"correction_labels": 2, "corrections": 1 if i % 2 else 0}
+            sequences[f"k{i}"] = [(1, False), (2, bool(i % 2))]
+        out = domain.build_work_insights(rows, labels, lambda ident: ident.split("\0")[0], self.AREAS, lambda m, p: None, months=1,
+                                         today="2026-09-30", corrections_for=lambda ident, n: sequences[ident.split("\0")[0]])
+        september = out["allocation"][-1]
+        self.assertEqual(september["outcomes"], {"accepted": 2, "ended_on_pushback": 2})
+        self.assertEqual(september["outcome_spend"]["accepted"], 4.0)
+        kpis = out["kpis"]
+        self.assertEqual(kpis["previous_months"], ["2026-08"])
+        self.assertEqual((kpis["current"]["judged_sessions"], kpis["current"]["resolved_rate"]), (4, 0.5))
+        self.assertEqual(kpis["previous"]["judged_sessions"], 4)
+        self.assertEqual(kpis["current"]["cost_per_resolved"], 2.0)
 
     def test_effort_grid_flags_high_effort_routine_work(self):
         a, b = row("a", cost=8.0), row("b", cost=1.0)
@@ -1018,8 +1022,8 @@ class DrillDownTests(unittest.TestCase):
 
     def find(self, rows, labels, filters, sequences=None, **kwargs):
         prices = {"gpt-5.6": 10.0, "cheap": 1.0, "mid": 4.0}
-        return domain.find_sessions(rows, labels, lambda rid: rid, self.AREAS, lambda m, p: prices.get(m),
-                                    filters, corrections_for=lambda rid, n: (sequences or {}).get(rid, []),
+        return domain.find_sessions(rows, labels, lambda ident: ident.split("\0")[0], self.AREAS, lambda m, p: prices.get(m),
+                                    filters, corrections_for=lambda ident, n: (sequences or {}).get(ident.split("\0")[0], []),
                                     **kwargs)
 
     def test_month_and_area_match_the_allocation_cell(self):
@@ -1042,6 +1046,29 @@ class DrillDownTests(unittest.TestCase):
         self.assertEqual({s["id"] for s in mid["sessions"]}, {"s1", "s3", "s5"})
         limited = self.find(rows, labels, {"work_type": "debug"}, sequences, limit=2)
         self.assertEqual((limited["total"], len(limited["sessions"]), limited["truncated"]), (6, 2, True))
+
+    def test_rollouts_sharing_a_session_id_keep_separate_labels(self):
+        first, fork = row("x", cost=5.0), row("x", cost=1.0)
+        first["path"], fork["path"] = "/t/first.jsonl", "/t/fork.jsonl"
+        labels = {domain.work_identity(first): {"area": "Personal", "work_type": "debug"},
+                  domain.work_identity(fork): {"area": "Personal", "work_type": "docs"}}
+        out = domain.find_sessions([first, fork], labels, lambda ident: ident, self.AREAS, lambda m, p: None, {})
+        self.assertEqual(sorted(s["work_type"] for s in out["sessions"]), ["debug", "docs"])
+        ids = domain.find_sessions([first, fork], labels, lambda ident: ident, self.AREAS, lambda m, p: None, {},
+                                   ids_only=True)
+        self.assertEqual((ids["ids"], ids["total"]), (["x"], 2))
+
+    def test_start_month_and_ids_modes(self):
+        rows = [row("a", day="2026-08-30"), row("b", day="2026-09-02")]
+        rows[0]["_language_signal_events"] = {"positive": [{"day": "2026-08-30"}, {"day": "2026-09-01"}]}
+        labels = {"a": {"area": "Personal"}, "b": {"area": "Personal"}}
+        active = self.find(rows, labels, {"month": "2026-09"})
+        started = self.find(rows, labels, {"start_month": "2026-09"})
+        self.assertEqual({s["id"] for s in active["sessions"]}, {"a", "b"})
+        self.assertEqual({s["id"] for s in started["sessions"]}, {"b"})
+        ids = self.find(rows, labels, {}, ids_only=True)
+        self.assertEqual((set(ids["ids"]), ids["total"]), ({"a", "b"}, 2))
+        self.assertNotIn("sessions", ids)
 
     def test_complexity_group_and_tier(self):
         rows = [row("a", model="gpt-5.6"), row("b", model="cheap"), row("c", model="mid")]
@@ -1123,8 +1150,8 @@ class SurfaceContractTests(unittest.TestCase):
         self.assertIn("if(h==='work'){", self.page)
 
     def test_work_page_shows_estimates_unclear_and_pending(self):
-        for marker in ("id=view-work", "Monthly activity allocation", "Workstreams", "Cost by work type",
-                       "Session outcomes", "Model fit by work type", "By turn position", "id=w-headlines",
+        for marker in ("id=view-work", "Spend in, outcomes out", "Pushback over time", "Cost by kind of work",
+                       "id=w-kpis", "Model fit by work type", "By turn position", "id=w-headlines",
                        "Model right-sizing", "Possible overspend (estimate)", "View as table",
                        "text goes only to Ollama on this machine", "'var(--w-pending)'", "'var(--w-unclear)'"):
             self.assertTrue(marker in self.page, marker)
@@ -1138,12 +1165,14 @@ class SurfaceContractTests(unittest.TestCase):
 
     def test_work_state_is_declared_before_the_initial_route_runs(self):
         declaration = self.page.index("let WORK=null,workRequest=0")
-        drill = self.page.index("let workDrillRequest=0")
+        session_filter = self.page.index("let workSessionFilter=null")
         route = self.page.index("function applyHashRoute(){")
         self.assertLess(declaration, route)
-        self.assertLess(drill, route)
-        self.assertIn("if(h.startsWith('work-sessions')){", self.page)
-        self.assertIn("#w-drawer.workDrawer{background:#0d1117;position:fixed;", self.page)
+        self.assertLess(session_filter, route)
+        self.assertIn("if(h.startsWith('work-sessions')||h.startsWith('sessions-all?work=')){", self.page)
+        self.assertIn("if(workSessionFilter&&!workSessionFilter.ids.has(String(s.id)))return false;", self.page)
+        self.assertIn("if(key==='work')workSessionFilter=null;", self.page)
+        self.assertNotIn("w-drawer", self.page)
 
     def test_menu_bar_offers_pause_and_resume(self):
         for marker in ('"Pause work insights"', '"Resume work insights"', '/work-insights/pause"',
@@ -1274,15 +1303,19 @@ class SessionTagProjectionTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         service, values, _ = make_service(tmp.name)
-        service.observe("sess-1", turns(SECRET_TEXT, "that's wrong"))
+        source = {"id": "sess-1", "path": "/traces/one.jsonl"}
+        service.observe(meter._work_identity(source), turns(SECRET_TEXT, "that's wrong"))
         drain(service)
         with mock.patch.object(meter, "work_insights_service", return_value=service), \
                 mock.patch.object(meter, "work_insights_settings", return_value=values):
-            tags = meter.work_session_tags("sess-1")
-            payload = meter.dashboard_state_payload({"source": {"id": "sess-1"}})
+            tags = meter.work_session_tags(source)
+            payload = meter.dashboard_state_payload({"source": dict(source)})
+            other = meter.work_session_tags({"id": "sess-1", "path": "/traces/fork.jsonl"})
+        self.assertIsNone(other)
         self.assertEqual(set(tags), {"area", "work_type", "complexity", "corrections", "labeled_turns"})
         self.assertEqual(payload["work_tags"], tags)
         self.assertNotIn("zebra", json.dumps(payload))
+        self.assertNotIn("/traces", json.dumps(payload["work_tags"]))
 
 
 if __name__ == "__main__":
