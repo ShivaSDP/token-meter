@@ -125,9 +125,7 @@ def _rate(corrections, samples):
 
 
 OUTCOMES = ("single_shot", "accepted", "recovered", "ended_on_pushback", "unclear", "pending")
-POSITION_BUCKETS = ((1, 2, "1–2"), (3, 5, "3–5"), (6, 10, "6–10"), (11, 20, "11–20"), (21, 10**9, "21+"))
 MAX_FIT_MODELS = 5
-MAX_HEADLINES = 3
 MAX_TREND_MODELS = 6
 EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max", "ultra")
 HIGH_EFFORTS = ("xhigh", "max", "ultra")
@@ -369,12 +367,9 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
     flagged = _flagged_spend(in_window, cells, effort, tiers)
     kpis = {"current": _kpis(in_window), "previous": _kpis(earlier) if earlier else None,
             "previous_months": sorted(previous_months)}
-    position = _position(in_window)
     model_fit = _model_fit(in_window)
     scorecard = _model_scorecard(in_window, tiers)
     opportunities = _opportunities(cells, effort, tier_prices)
-    headlines = _headlines(sessions, all_months, area_names, economics, tier_prices, position, opportunities,
-                           today, corrections_for, grain)
 
     labeled_sessions = sum(1 for s in in_window if s["area"] != PENDING)
     labeled_turns = sum(s["correction_labels"] for s in in_window)
@@ -389,10 +384,8 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
         "right_sizing": {"cells": cells, "tiers_known": bool(tiers), "effort": effort, "flagged": flagged},
         "kpis": kpis,
         "model_fit": model_fit,
-        "choices": _choices(model_fit),
         "model_scorecard": scorecard,
         "opportunities": opportunities,
-        "headlines": headlines,
         "coverage": {
             "sessions": len(in_window), "labeled_sessions": labeled_sessions,
             "turns": later_turns, "labeled_turns": min(labeled_turns, later_turns),
@@ -442,21 +435,6 @@ def _kpis(group):
         "spend": round(total, 6),
         "few_samples": judged < MIN_RATE_SAMPLES,
     }
-
-
-def _position(in_window):
-    counts = {label: [0, 0] for _lo, _hi, label in POSITION_BUCKETS}
-    for s in in_window:
-        for ordinal, value in s["sequence"]:
-            if value is None:
-                continue
-            for lo, hi, label in POSITION_BUCKETS:
-                if lo <= ordinal <= hi:
-                    counts[label][0] += int(value)
-                    counts[label][1] += 1
-                    break
-    return [{"bucket": label, **(_rate(*counts[label]) or {"rate": None, "samples": 0, "few_samples": True})}
-            for _lo, _hi, label in POSITION_BUCKETS]
 
 
 def _model_fit(in_window):
@@ -513,23 +491,6 @@ def _model_scorecard(in_window, tiers):
     return rows[:MAX_SCORECARD_MODELS]
 
 
-def _month_spend_shares(sessions, month, area_names):
-    """Area shares of all spend in the month, matching the allocation chart (Unclear and Pending included)."""
-    spend = collections.Counter()
-    for s in sessions:
-        for day, cost in (s["row"].get("_day_cost") or {}).items():
-            if str(day)[:7] == month:
-                spend[s["area"]] += float(cost or 0)
-    total = sum(spend.values())
-    shares = {area: value / total for area, value in spend.items() if area in area_names} if total else {}
-    return shares, total
-
-
-def _month_rework(sessions, month):
-    group = [s for s in sessions if s["start"] == month]
-    return _rate(sum(s["corrections"] for s in group), sum(s["correction_labels"] for s in group))
-
-
 def _effort(in_window):
     """Complexity × reasoning effort: spend, sessions, pushback; high effort on routine work is flagged."""
     efforts = [e for e in EFFORT_ORDER if any(s["effort"] == e for s in in_window)]
@@ -560,103 +521,6 @@ def _flagged_spend(in_window, cells, effort, tiers):
     spend, total = sum(_cost(s) for s in hit), sum(_cost(s) for s in labeled)
     return {"sessions": len(hit), "spend": round(spend, 6), "labeled_spend": round(total, 6),
             "share": spend / total if total else None}
-
-
-def _resolved(group, corrections_for):
-    _attach_sequences([s for s in group if not s["sequence"]], corrections_for)
-    return [s for s in group if _outcome(s)
-            in ("accepted", "recovered")]
-
-
-def _headlines(sessions, months, area_names, economics, tier_prices, position, opportunities, today="",
-               corrections_for=None, grain="month"):
-    """Up to three statements about change or opportunity; each links to the module that supports it.
-
-    KPIs already state the period's levels, so cards only report movement, the largest opportunity,
-    and patterns that are otherwise easy to miss.
-    """
-    cards = []
-    if grain != "month":
-        months = []  # Day-over-day swings are noise; the KPI strip already compares the two periods.
-    current = months[-1] if months else ""
-    previous = months[-2] if len(months) > 1 else ""
-    partial = bool(today and today[:7] == current)
-    complete = [m for m in months if not (today and today[:7] == m)]
-    if len(complete) >= 2:
-        last, before = complete[-1], complete[-2]
-
-        def month_spend(month):
-            return sum(float(c or 0) for s in sessions for d, c in (s["row"].get("_day_cost") or {}).items()
-                       if str(d)[:7] == month)
-
-        resolved_last = len(_resolved([s for s in sessions if s["start"] == last], corrections_for))
-        resolved_before = len(_resolved([s for s in sessions if s["start"] == before], corrections_for))
-        spend_last, spend_before = month_spend(last), month_spend(before)
-        if spend_before > 0 and resolved_before >= MIN_RATE_SAMPLES:
-            spend_change, resolved_change = spend_last / spend_before - 1, resolved_last / resolved_before - 1
-            if spend_change >= 0.25 and resolved_change <= 0.05:
-                cards.append({"key": "value_flat", "kind": "warn", "target": "allocation", "month": last,
-                              "previous_month": before, "spend_change": spend_change,
-                              "resolved_change": resolved_change})
-    if current and previous:
-        now_rate, before_rate = _month_rework(sessions, current), _month_rework(sessions, previous)
-        if now_rate and before_rate and not now_rate["few_samples"] and not before_rate["few_samples"]:
-            change = now_rate["rate"] - before_rate["rate"]
-            if abs(change) >= 0.03:
-                cards.append({"key": "pushback_trend", "kind": "good" if change < 0 else "warn",
-                              "target": "rework", "month": current, "previous_month": previous,
-                              "partial": partial, "rate": now_rate["rate"], "previous_rate": before_rate["rate"]})
-    if opportunities and opportunities[0]["spend"] >= 1:
-        top = opportunities[0]
-        cards.append({"key": "top_opportunity", "kind": "warn", "target": "sizing",
-                      **{k: v for k, v in top.items() if k != "kind"}, "opportunity": top["kind"]})
-    early = next((p for p in position if p["bucket"] == "1–2"), None)
-    late = next((p for p in position if p["bucket"] in ("11–20", "21+") and p["rate"] is not None
-                 and not p["few_samples"]), None)
-    if early and late and early["rate"] and not early["few_samples"] and late["rate"] >= 1.5 * early["rate"]:
-        cards.append({"key": "long_sessions_drift", "kind": "warn", "target": "rework",
-                      "bucket": late["bucket"], "rate": late["rate"], "early_rate": early["rate"]})
-    if current and previous:
-        now_shares, now_total = _month_spend_shares(sessions, current, area_names)
-        before_shares, before_total = _month_spend_shares(sessions, previous, area_names)
-        if now_total and before_total:
-            deltas = {a: now_shares.get(a, 0) - before_shares.get(a, 0) for a in set(now_shares) | set(before_shares)}
-            area, delta = max(deltas.items(), key=lambda item: abs(item[1]), default=("", 0))
-            if area and abs(delta) >= 0.10:
-                cards.append({"key": "area_shift", "kind": "neutral", "target": "allocation", "area": area,
-                              "month": current, "previous_month": previous, "partial": partial,
-                              "share": now_shares.get(area, 0), "previous_share": before_shares.get(area, 0)})
-    judged = [e for e in economics if e["work_type"] not in ("unclear", "other")
-              and e.get("cost_per_resolved") is not None and e["resolved_sessions"] >= 3]
-    if len(judged) >= 2:
-        costliest = max(judged, key=lambda e: e["cost_per_resolved"])
-        median = statistics.median(e["cost_per_resolved"] for e in judged)
-        if median and costliest["cost_per_resolved"] >= 2 * median:
-            cards.append({"key": "costliest_work", "kind": "neutral", "target": "economics",
-                          "work_type": costliest["work_type"], "cost_per_resolved": costliest["cost_per_resolved"],
-                          "multiple": costliest["cost_per_resolved"] / median})
-    order = {"warn": 0, "good": 1, "neutral": 2}
-    cards.sort(key=lambda card: order[card["kind"]])
-    return cards[:MAX_HEADLINES]
-
-
-def _choices(model_fit):
-    """Per work type: the least-pushback model vs the model used most, when both have enough evidence."""
-    rows = []
-    for work_type in model_fit["work_types"]:
-        cells = [c for c in model_fit["cells"] if c["work_type"] == work_type and c["sessions"]]
-        eligible = [c for c in cells if c["rework"] and not c["rework"]["few_samples"]]
-        if len(eligible) < 2:
-            continue
-        best = min(eligible, key=lambda c: (c["rework"]["rate"], c["cost_per_session"] or 0))
-        used = max(cells, key=lambda c: c["sessions"])
-        if best is used or not used["rework"] or used["rework"]["few_samples"]:
-            continue  # The usual model needs the same labeled evidence before it is compared.
-        if best["rework"]["rate"] + 0.03 > used["rework"]["rate"]:
-            continue
-        rows.append({"work_type": work_type, "best": best, "used": used,
-                     "gap": used["rework"]["rate"] - best["rework"]["rate"]})
-    return sorted(rows, key=lambda row: -row["gap"])
 
 
 def _opportunities(cells, effort, tier_prices):

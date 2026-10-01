@@ -885,8 +885,7 @@ class DomainTests(unittest.TestCase):
         cells = {(c["complexity"], c["tier"]): c for c in out["right_sizing"]["cells"]}
         self.assertEqual(cells[("routine", "premium")]["flag"], "possible_overspend")
         self.assertEqual(out["opportunities"][0]["kind"], "premium_routine")
-        card = next(c for c in out["headlines"] if c["key"] == "top_opportunity")
-        self.assertEqual((card["kind"], card["opportunity"]), ("warn", "premium_routine"))
+        self.assertNotIn("headlines", out)
         self.assertEqual(cells[("complex", "light")]["sessions"], 1)
 
     def test_filters_and_period(self):
@@ -927,9 +926,7 @@ class OutcomeInsightTests(unittest.TestCase):
         self.assertEqual((debug["judged_sessions"], debug["resolved_sessions"], debug["resolved_rate"]), (2, 2, 1.0))
         self.assertEqual(debug["cost_per_resolved"], 3.0)
         self.assertNotIn("rework_by_position", out)
-        positions = {p["bucket"]: p for p in domain._position([{"sequence": seq} for seq in sequences.values()])}
-        self.assertEqual(positions["1–2"]["samples"], 4)
-        self.assertEqual(positions["3–5"]["samples"], 1)
+        self.assertNotIn("choices", out)
         self.assertNotIn("outcomes", out)
         self.assertEqual(out["kpis"]["current"]["ended_spend"], 0.0)
 
@@ -944,25 +941,6 @@ class OutcomeInsightTests(unittest.TestCase):
         fit = self.build([row("z0", model="gpt-5.6"), row("z1", model="mid")], few, {})["model_fit"]
         self.assertFalse(any(c["best"] for c in fit["cells"]))
 
-    def test_headlines_are_evidence_gated(self):
-        rows = []
-        labels = {}
-        for i in range(24):
-            month_day = "2026-08-10" if i < 12 else "2026-09-10"
-            area = "Personal" if (i < 12 and i % 3) or (i >= 12 and i % 3 == 0) else "Product engineering"
-            rows.append(row(f"s{i}", day=month_day, cost=3.0, turns_=5))
-            labels[f"s{i}"] = {"area": area, "work_type": "debug", "corrections": 1 if i >= 12 else 3,
-                               "correction_labels": 10, "complexity": "routine"}
-        sequences = {f"s{i}": [(1, False), (2, False), (3, False), (4, True)] for i in range(24)}
-        cards = self.build(rows, labels, sequences)["headlines"]
-        keys = [c["key"] for c in cards]
-        self.assertIn("pushback_trend", keys)
-        self.assertNotIn("ended_on_pushback", keys)
-        self.assertLessEqual(len(cards), domain.MAX_HEADLINES)
-        order = {"warn": 0, "good": 1, "neutral": 2}
-        self.assertEqual([c["kind"] for c in cards], sorted((c["kind"] for c in cards), key=order.get))
-        trend = next(c for c in cards if c["key"] == "pushback_trend")
-        self.assertEqual(trend["kind"], "good")
 
 
 class OperatingRhythmTests(unittest.TestCase):
@@ -1000,31 +978,6 @@ class OperatingRhythmTests(unittest.TestCase):
         flagged = [c for c in effort["cells"] if c["flag"]]
         self.assertEqual([(c["complexity"], c["effort"], c["spend"]) for c in flagged], [("routine", "xhigh", 8.0)])
         self.assertEqual(out["opportunities"][0]["kind"], "effort_routine")
-
-    def test_value_flat_uses_complete_months_only(self):
-        rows, labels, sequences = [], {}, {}
-        for i in range(24):
-            day = "2026-07-10" if i < 22 else "2026-08-10"
-            rows.append(row(f"j{i}", day=day, cost=1.0 if i < 22 else 30.0, turns_=3))
-            labels[f"j{i}"] = {"correction_labels": 2}
-            sequences[f"j{i}"] = [(1, False), (2, False)]
-        cards = self.build(rows, labels, sequences)["headlines"]
-        flat = next(c for c in cards if c["key"] == "value_flat")
-        self.assertEqual((flat["month"], flat["previous_month"]), ("2026-08", "2026-07"))
-        self.assertLess(flat["resolved_change"], 0)
-
-    def test_model_choices_need_a_clear_gap(self):
-        rows = [row(f"u{i}", model="gpt-5.6") for i in range(3)] + [row(f"b{i}", model="mid") for i in range(3)]
-        labels = {f"u{i}": {"work_type": "debug", "corrections": 3, "correction_labels": 10} for i in range(3)}
-        labels.update({f"b{i}": {"work_type": "debug", "corrections": 1, "correction_labels": 10} for i in range(3)})
-        rows.append(row("u9", model="gpt-5.6"))
-        labels["u9"] = {"work_type": "debug", "corrections": 3, "correction_labels": 10}
-        choices = self.build(rows, labels, {})["choices"]
-        self.assertEqual([(c["work_type"], c["best"]["model"], c["used"]["model"]) for c in choices],
-                         [("debug", "mid", "gpt-5.6")])
-
-class DrillDownTests(unittest.TestCase):
-    AREAS = DomainTests.AREAS
 
     def find(self, rows, labels, filters, sequences=None, **kwargs):
         prices = {"gpt-5.6": 10.0, "cheap": 1.0, "mid": 4.0}
@@ -1164,15 +1117,29 @@ class SurfaceContractTests(unittest.TestCase):
         self.assertIn("if(h==='work'){", self.page)
 
     def test_work_page_shows_estimates_unclear_and_pending(self):
-        for marker in ("id=view-work", "Spend in, outcomes out", "Pushback over time", ">Cost per resolved session</h2>",
-                       "Model choices", "Model scorecard", "Better fit by kind of work", ">Right-sizing</h2>",
+        for marker in ("id=view-work", "<h2>Where the spend went</h2>", "<h3>How sessions ended</h3>",
+                       "Pushback over time", ">Cost per resolved session</h2>",
+                       "Model choices", "id=w-scorecard", ">Right-sizing</h2>",
                        "id=w-tier-mix", "id=w-effort-mix", "id=w-savings", "Possible saving",
                        "<option value=1d>1 day</option><option value=7d>1 week</option><option value=30d>1 month</option>",
-                       "id=w-kpis", "id=w-headlines",
-                       "View as table",
+                       "id=w-kpis",
                        "text goes only to Ollama on this machine", "'var(--w-pending)'", "'var(--w-unclear)'"):
             self.assertTrue(marker in self.page, marker)
-        self.assertNotIn("Value by kind of work", self.page)
+        for removed in ("Value by kind of work", "Spend in, outcomes out", "id=w-headlines", "Better fit by kind of work",
+                        "data-measure=", "id=w-ledger"):
+            self.assertNotIn(removed, self.page)
+
+    def test_every_work_element_the_script_uses_exists(self):
+        import re as _re
+        markup = set(_re.findall(r"\bid=(w-[a-z0-9-]+)", self.page))
+        used = set(_re.findall(r"\$\('(w-[a-z0-9-]+)'\)", self.page))
+        self.assertTrue(used)
+        self.assertEqual(sorted(used - markup), [])
+
+    def test_work_uses_the_dashboard_font(self):
+        self.assertIn("#view-work .mono,#view-work .num{font-family:inherit;font-variant-numeric:tabular-nums}", self.page)
+        work_css = [line for line in self.page.split("\n") if line.startswith(".work")]
+        self.assertFalse([line for line in work_css if "ui-monospace" in line])
 
     def test_work_palette_uses_validated_product_hues(self):
         for marker in ("--w1:#079bc2;--w2:#c17a01;--w3:#c36b95;--w4:#af851e;--w5:#9979cd;--w6:#d66555;--w7:#5f8adf;--w8:#05a386",
@@ -1367,16 +1334,6 @@ class ReviewRegressionTests(unittest.TestCase):
             today="2026-09-30", corrections_for=lambda ident, n: (sequences or {}).get(ident.split("\0")[0], []),
             **kwargs)
 
-    def test_choices_skip_a_busiest_model_without_labeled_follow_ups(self):
-        rows = [row(f"u{i}", model="gpt-5.6") for i in range(3)] + [row(f"b{i}", model="mid") for i in range(3)]
-        labels = {f"u{i}": {"work_type": "debug", "corrections": 3, "correction_labels": 10} for i in range(3)}
-        labels.update({f"b{i}": {"work_type": "debug", "corrections": 1, "correction_labels": 10} for i in range(3)})
-        rows += [row(f"c{i}", model="cheap") for i in range(4)]
-        labels.update({f"c{i}": {"work_type": "debug"} for i in range(4)})
-        self.assertEqual(self.build(rows, labels)["choices"], [])
-        labels.update({f"c{i}": {"work_type": "debug", "corrections": 1, "correction_labels": 2} for i in range(4)})
-        self.assertEqual(self.build(rows, labels)["choices"], [])
-
     def test_labeled_session_without_classifiable_follow_ups_is_single_shot(self):
         self.assertEqual(domain.session_outcome(3, [], labeled=True, follow_ups=0), "single_shot")
         self.assertEqual(domain.session_outcome(3, [], labeled=True, pending=True), "pending")
@@ -1481,7 +1438,7 @@ class ReviewRegressionTests(unittest.TestCase):
         with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "page.html"),
                   encoding="utf-8") as handle:
             page = handle.read()
-        kpis = page[page.index("function renderWorkKpis("):page.index("function renderWorkLedger(")]
+        kpis = page[page.index("function renderWorkKpis("):page.index("function renderWorkSpend(")]
         self.assertNotIn("months before", kpis)
         self.assertIn("kpis?.previous_months", kpis)
         self.assertIn("judged_sessions?kpis.previous:null", kpis)
@@ -1627,7 +1584,6 @@ class OpenerPositionAndWindowTests(unittest.TestCase):
         self.assertEqual(out["coverage"]["sessions"], 0)
         self.assertIsNone(out["kpis"]["current"]["resolved_rate"])
         self.assertEqual(out["kpis"]["previous"]["sessions"], 1)
-        self.assertEqual(out["headlines"], [])
         # Without a today, the window ends at the latest data month; All history keeps data months only.
         self.assertEqual(self.build([row("jun", day="2026-06-10")], {}, "", months=3)["months"],
                          ["2026-04", "2026-05", "2026-06"])
@@ -1657,7 +1613,7 @@ class OpenerPositionAndWindowTests(unittest.TestCase):
         self.assertEqual(work.count('<td class="num mono workFitCell"><button type=button class=workDrillBtn data-drill='), 2)
         self.assertIn('<div class=workSizingCell role=cell', work)
         self.assertIn('<button type=button class="workDrillBtn workSizingBtn" data-drill=', work)
-        self.assertIn("event.target.matches('rect[data-drill]')", work)
+        self.assertNotIn("rect[data-drill]", page)  # The column chart is gone; every drill target is a button.
         self.assertIn(".workDrillBtn:focus-visible{", page)
 
 
@@ -1706,11 +1662,6 @@ class ShortRangeTests(unittest.TestCase):
     def test_month_range_crosses_a_month_boundary(self):
         out = self.build([], {}, "30d", today="2026-03-01")
         self.assertEqual((out["months"][0], out["months"][-1], len(out["months"])), ("2026-01-31", "2026-03-01", 30))
-
-    def test_day_ranges_skip_month_over_month_headlines(self):
-        rows = [row(f"s{i}", day="2026-09-30", cost=50.0) for i in range(3)]
-        out = self.build(rows, {}, "7d")
-        self.assertFalse({c["key"] for c in out["headlines"]} & {"value_flat", "pushback_trend", "area_shift"})
 
     def test_drill_down_by_day_matches_the_daily_bucket(self):
         rows = [row("a", day="2026-09-30"), row("b", day="2026-09-29"), row("c", day="2026-09-01")]
