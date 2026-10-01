@@ -68,8 +68,9 @@ class Clock:
 def make_service(tmp, settings=None, **kwargs):
     FakeClient.script, FakeClient.prompts, FakeClient.unloads, FakeClient.digest_error = [], [], 0, None
     FakeClient.responder = None
+    # Service tests drive a fake clock; pin the old pace so pacing never waits on it unless a test asks.
     values = W.normalize_settings({"enabled": True, "backfill_days": 0, "pause_on_battery": True,
-                                   **(settings or {})})
+                                   "rate_per_minute": 20, **(settings or {})})
     clock = kwargs.pop("clock", Clock())
 
     def sleep(seconds):
@@ -186,6 +187,13 @@ class SettingsValidationTests(unittest.TestCase):
         settings = W.normalize_settings({"enabled": "yes", "rate_per_minute": 999,
                                          "ollama_url": "http://evil.example", "areas": [{"name": "x"}]})
         self.assertEqual(settings, W.default_settings())
+
+    def test_default_pace_is_gentle_and_stored_paces_are_kept(self):
+        self.assertEqual(W.default_settings()["rate_per_minute"], 5)
+        self.assertIn(5, W.RATE_CHOICES)
+        for stored in (5, 20, 60):
+            self.assertEqual(W.normalize_settings({"rate_per_minute": stored})["rate_per_minute"], stored)
+        self.assertEqual(W.normalize_settings({"rate_per_minute": 7})["rate_per_minute"], 5)
 
     def test_areas_bounds_and_reserved_names(self):
         with self.assertRaises(ValueError):

@@ -54,7 +54,8 @@ LATENCY_BASELINE_ALPHA = 0.02
 
 DEFAULT_MODEL = "token-meter-jet"
 DEFAULT_URL = "http://127.0.0.1:11434"
-RATE_CHOICES = (10, 20, 40, 60)
+RATE_CHOICES = (5, 10, 20, 40, 60)
+DEFAULT_RATE_PER_MINUTE = 5  # Gentle enough for a 4B model on a low-end laptop.
 BACKFILL_CHOICES = (30, 90, 365, 0)
 MIN_AREAS, MAX_AREAS = 2, 8
 MAX_AREA_NAME, MAX_AREA_DESCRIPTION = 40, 160
@@ -260,7 +261,7 @@ def default_settings():
         "enabled": False,
         "paused_until": None,
         "pause_on_battery": True,
-        "rate_per_minute": 20,
+        "rate_per_minute": DEFAULT_RATE_PER_MINUTE,
         "backfill_days": 90,
         "model": DEFAULT_MODEL,
         "ollama_url": DEFAULT_URL,

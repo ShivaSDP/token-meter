@@ -1388,7 +1388,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
     <div class=workSettingsGrid>
      <label class=settingsField><span>Model</span><input id=work-model spellcheck=false autocomplete=off maxlength=100></label>
      <label class=settingsField><span>Ollama URL</span><input id=work-url spellcheck=false autocomplete=off maxlength=120></label>
-     <label class=settingsField><span>Pace</span><select class=filterSelect id=work-rate><option value=10>10 labels / min</option><option value=20>20 labels / min</option><option value=40>40 labels / min</option><option value=60>60 labels / min</option></select></label>
+     <label class=settingsField><span>Pace</span><select class=filterSelect id=work-rate><option value=5>5 labels / min (default)</option><option value=10>10 labels / min</option><option value=20>20 labels / min</option><option value=40>40 labels / min</option><option value=60>60 labels / min</option></select></label>
      <label class=settingsField><span>History to label</span><select class=filterSelect id=work-backfill><option value=30>Last 30 days</option><option value=90>Last 90 days</option><option value=365>Last 365 days</option><option value=0>All history</option></select></label>
     </div>
     <div class=workSetupHint>Set up the model once: <code>./scripts/setup-work-classifier</code> downloads Jet (about 8 GB, Apache-2.0) and imports it into Ollama as a 4-bit model.</div>
@@ -5967,7 +5967,7 @@ function renderWorkSettings(payload,{force=false}={}){
  if(!force&&settingsInteractionActive())return;
  $('work-enabled').checked=Boolean(settings.enabled);$('work-battery').checked=settings.pause_on_battery!==false;
  $('work-model').value=settings.model||'';$('work-url').value=settings.ollama_url||'';
- $('work-rate').value=String(settings.rate_per_minute||20);$('work-backfill').value=String(settings.backfill_days??90);
+ $('work-rate').value=String(settings.rate_per_minute||5);$('work-backfill').value=String(settings.backfill_days??90);
  workAreasDraft=(settings.areas||[]).map(area=>({...area}));renderWorkAreas();
 }
 function renderWorkAreas(){

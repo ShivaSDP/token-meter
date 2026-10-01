@@ -110,7 +110,7 @@ Answer readout, chosen from the evaluation below:
 - One daemon worker, sequential requests, `num_ctx` 4,096, `keep_alive` 2 min so
   the model unloads when idle. Nothing in `/state`, `/session`, or `/menubar`
   waits on inference.
-- Rate limit: token bucket, default 20 requests per minute, 250 ms minimum gap.
+- Rate limit: token bucket, default 5 requests per minute (choices 5, 10, 20, 40, 60) so low-end laptops stay responsive, 250 ms minimum gap.
   Current-session items bypass the backlog queue but share the limit.
 - Manual pause from Settings, the Work page header, or the menu bar:
   1 hour, until tomorrow (local 06:00), or until resumed. The worker checks
