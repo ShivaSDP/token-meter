@@ -1098,7 +1098,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 	    <button class=tbtn id=w-open-settings type=button>Settings</button>
 	   </div>
 	  </section>
-	  <section class=workKpis id=w-kpis aria-label="Period summary"></section>
+	  <section class=workKpis id=w-kpis aria-label="Period summary for sessions started in this period"></section>
 	  <section class=workHeadlines id=w-headlines aria-label="What stands out" hidden></section>
 	  <section class="card workLedger" id=w-module-allocation>
 	   <div class=workCardHead><div><h2 class=fieldtip tabindex=0 aria-description="Each period: above the line, what went in by area; below the line, how the sessions started then turned out. Labels are local-model estimates." data-tip="Each period: above the line, what went in by area; below the line, how the sessions started then turned out. Labels are local-model estimates.">Spend in, outcomes out</h2><div class=subline id=w-ledger-note>Select a bar segment to open those sessions.</div></div>
@@ -5763,10 +5763,10 @@ function renderWorkKpis(insights){
  const tile=(label,value,detail,delta,tip)=>`<div class="card workKpi"><span class="workKpiLabel fieldtip" tabindex=0 data-tip="${esc(tip)}" aria-description="${esc(tip)}">${esc(label)}</span><strong class=mono>${value}</strong><span class=workKpiDetail>${detail}</span>${delta}</div>`;
  const compare=(current,previous,options)=>workDelta(current,previous,options)+(current!=null&&previous!=null&&span?`<small class=workMuted>${esc(span)}</small>`:'');
  host.innerHTML=[
-  tile('Resolved sessions',now.resolved_rate==null?'--':workPercent(now.resolved_rate),`${now.judged_sessions.toLocaleString()} sessions with labeled follow-ups${now.few_samples?' · few':''}`,compare(now.resolved_rate,before?.resolved_rate,{kind:'rate',better:'up'}),'Accepted without pushback or recovered after it, as a share of sessions whose follow-ups are labeled.'),
-  tile('Pushback rate',now.pushback?workPercent(now.pushback.rate):'--',`${(now.pushback?.samples||0).toLocaleString()} labeled follow-up turns`,compare(now.pushback?.rate,before?.pushback?.rate,{kind:'rate',better:'down'}),'Share of follow-up turns where you told the agent its previous work was wrong, broken, or not what you asked.'),
-  tile('Cost per resolved session',now.cost_per_resolved==null?'--':money(now.cost_per_resolved),'accepted or recovered',compare(now.cost_per_resolved,before?.cost_per_resolved,{kind:'ratio',better:'down'}),'Spend on resolved sessions divided by how many there were.'),
-  tile('Spend on unresolved sessions',now.judged_sessions?money(now.ended_spend):'--',now.ended_share==null?'ended on a pushback':`${workPercent(now.ended_share)} of spend · ended on a pushback`,compare(now.judged_sessions?now.ended_share:null,before?.ended_share,{kind:'rate',better:'down'}),'Spend on sessions whose last labeled follow-up was a pushback.'),
+  tile('Resolved sessions',now.resolved_rate==null?'--':workPercent(now.resolved_rate),`${now.judged_sessions.toLocaleString()} sessions with labeled follow-ups${now.few_samples?' · few':''}`,compare(now.resolved_rate,before?.resolved_rate,{kind:'rate',better:'up'}),'Accepted without pushback or recovered after it, as a share of sessions started in this period whose follow-ups are labeled.'),
+  tile('Pushback rate',now.pushback?workPercent(now.pushback.rate):'--',`${(now.pushback?.samples||0).toLocaleString()} labeled follow-up turns`,compare(now.pushback?.rate,before?.pushback?.rate,{kind:'rate',better:'down'}),'Share of follow-up turns, in sessions started in this period, where you told the agent its previous work was wrong, broken, or not what you asked.'),
+  tile('Cost per resolved session',now.cost_per_resolved==null?'--':money(now.cost_per_resolved),'accepted or recovered',compare(now.cost_per_resolved,before?.cost_per_resolved,{kind:'ratio',better:'down'}),'Spend on resolved sessions started in this period, divided by how many there were.'),
+  tile('Spend on unresolved sessions',now.judged_sessions?money(now.ended_spend):'--',now.ended_share==null?'ended on a pushback':`${workPercent(now.ended_share)} of spend · ended on a pushback`,compare(now.judged_sessions?now.ended_share:null,before?.ended_share,{kind:'rate',better:'down'}),'Spend on sessions started in this period whose last labeled follow-up was a pushback.'),
  ].join('');
 }
 function renderWorkLedger(insights,areas){
@@ -5885,10 +5885,10 @@ function renderWorkScorecard(insights){
  if(!rows.length){table.innerHTML='<tbody><tr><td><div class=workEmpty>Waiting for sessions in this period.</div></td></tr></tbody>';$('w-scorecard-note').textContent='';return;}
  const identities=rows.map(row=>`${row.model}::${row.runtime}`);
  const maxPush=Math.max(.05,...rows.map(row=>row.rework?.rate||0)),ranked=rows.filter(row=>row.cost_per_resolved!=null&&row.judged_sessions>=5);
- const lowest=ranked.length>=2?ranked.reduce((best,row)=>row.cost_per_resolved<best.cost_per_resolved?row:best):null;
+ const lowestCost=ranked.length>=2?Math.min(...ranked.map(row=>row.cost_per_resolved)):null;
  $('w-scorecard-note').textContent=`top ${rows.length} by spend`;
  table.innerHTML=`<thead><tr><th>Model</th><th>Sessions</th><th>Spend</th><th>Pushback</th><th>Resolved</th><th>Per resolved</th></tr></thead><tbody>${rows.map((row,index)=>{
-  const few=!row.rework||row.rework.few_samples,best=row===lowest,thin=row.judged_sessions<5;
+  const few=!row.rework||row.rework.few_samples,best=lowestCost!=null&&ranked.includes(row)&&row.cost_per_resolved===lowestCost,thin=row.judged_sessions<5;
   return `<tr><td><button type=button class=workDrillBtn data-drill="${esc(JSON.stringify({model:row.model,model_runtime:row.runtime}))}" data-drill-label="${esc(`${row.model} · ${row.runtime}`)}"><i class=workScoreDot style="--swatch:${modelColor(identities[index],identities)}"></i><span class=workScoreName><b>${esc(row.model)}</b><small>${esc(row.runtime)}${row.tier?` · ${esc(WORK_TIER_LABELS[row.tier]||row.tier)}`:''}</small></span></button></td><td><span class=mono>${row.sessions.toLocaleString()}</span></td><td><span class=mono>${money(row.spend)}</span></td><td><span>${row.rework?workMeter(row.rework.rate,maxPush,{few}):'<span class=workMuted>--</span>'}</span></td><td><span class=mono>${row.resolved_rate==null?'<span class=workMuted>--</span>':thin?`<span class=workMuted title="${esc(`${row.judged_sessions} judged session${row.judged_sessions===1?'':'s'}`)}">${workPercent(row.resolved_rate)} · few</span>`:workPercent(row.resolved_rate)}</span></td><td><span class=mono${best?' style="color:var(--good)"':''}>${row.cost_per_resolved==null?'<span class=workMuted>--</span>':money(row.cost_per_resolved)}${best?'<em class=workLowest>lowest</em>':''}</span></td></tr>`;
  }).join('')}</tbody>`;
 }
@@ -5927,8 +5927,8 @@ function renderWorkOpportunities(insights){
  const rows=insights?.opportunities||[],table=$('w-opportunities'),savings=$('w-savings');
  const flagged=insights?.right_sizing?.flagged||{},estimate=rows.reduce((sum,item)=>sum+(item.estimate!=null?Math.max(0,item.spend-item.estimate):0),0);
  const premium=rows.filter(item=>item.kind==='premium_routine'),unpriced=premium.length&&premium.every(item=>item.estimate==null);
- const savingNote=estimate?'estimate · routine premium work on standard models':unpriced?'needs model prices for premium and standard tiers':'no routine work on premium models';
- savings.innerHTML=`<div><span>Spend that looks mismatched</span><strong>${money(flagged.spend||0)}</strong><small>${flagged.share==null?'no labeled spend yet':`${workPercent(flagged.share)} of labeled spend · ${(flagged.sessions||0).toLocaleString()} session${flagged.sessions===1?'':'s'}`}</small></div><div><span>Possible saving</span><strong style="color:${estimate?'var(--good)':'var(--fg)'}">${estimate?money(estimate):'--'}</strong><small>${savingNote}</small></div><div><span>Issues to review</span><strong>${rows.length}</strong><small>${rows.length?'select a row to open its sessions':'nothing stands out'}</small></div>`;
+ const savingNote=!insights?.right_sizing?.tiers_known?'model price tiers are unavailable':estimate?'estimate · routine premium work on standard models':unpriced?'needs model prices for premium and standard tiers':'no routine work on premium models';
+ savings.innerHTML=`<div><span>Spend that looks mismatched</span><strong>${money(flagged.spend||0)}</strong><small>${flagged.share==null?'no labeled spend yet':`${workPercent(flagged.share)} of complexity-labeled spend · ${(flagged.sessions||0).toLocaleString()} session${flagged.sessions===1?'':'s'}`}</small></div><div><span>Possible saving</span><strong style="color:${estimate?'var(--good)':'var(--fg)'}">${estimate?money(estimate):'--'}</strong><small>${savingNote}</small></div><div><span>Issues to review</span><strong>${rows.length}</strong><small>${rows.length?'select a row to open its sessions':'nothing stands out'}</small></div>`;
  if(!rows.length){table.innerHTML='';return;}
  table.innerHTML=`<thead><tr><th>Looks mismatched</th><th>Sessions</th><th>Spend</th><th>Pushback</th><th>Possible saving</th></tr></thead><tbody>${rows.map(item=>{
   const label=typeof WORK_ISSUE_LABELS[item.kind]==='function'?WORK_ISSUE_LABELS[item.kind](item):WORK_ISSUE_LABELS[item.kind]||item.kind;

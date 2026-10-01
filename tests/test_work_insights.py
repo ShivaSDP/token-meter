@@ -1186,7 +1186,8 @@ class SurfaceContractTests(unittest.TestCase):
     def test_sizing_and_scorecard_numbers_match_their_labels(self):
         for marker in ("const flagged=insights?.right_sizing?.flagged||{}",
                        "slice(rework.grain==='day'?-31:-26)",
-                       "lowest=ranked.length>=2?",
+                       "lowestCost=ranked.length>=2?",
+                       "!insights?.right_sizing?.tiers_known?'model price tiers are unavailable'",
                        "sessions started in this period",
                        "no routine work on premium models"):
             self.assertIn(marker, self.page)
@@ -1756,3 +1757,24 @@ class FlaggedSpendTests(unittest.TestCase):
         flagged = out["right_sizing"]["flagged"]
         self.assertEqual((flagged["sessions"], flagged["spend"], flagged["labeled_spend"]), (1, 10.0, 12.0))
         self.assertAlmostEqual(flagged["share"], 10 / 12)
+
+    def build(self, rows, labels, prices):
+        return domain.build_work_insights(rows, labels, lambda ident: ident.split("\0")[0], DomainTests.AREAS,
+                                          lambda m, p: prices.get(m), today="2026-09-30")
+
+    def test_light_models_on_high_impact_work_count_with_unknown_tier_and_effort_left_out(self):
+        rows = [row("hi", model="cheap", cost=4.0), row("nontier", model="mystery", cost=7.0),
+                row("std", model="mid", cost=2.0), row("prem", model="gpt-5.6", cost=3.0)]
+        rows[1]["reasoning_effort"] = "xhigh"
+        labels = {"hi": {"area": "Personal", "complexity": "high_impact", "corrections": 9, "correction_labels": 20},
+                  "nontier": {"area": "Personal", "complexity": "everyday"},
+                  "std": {"area": "Personal", "complexity": "complex", "corrections": 0, "correction_labels": 20},
+                  "prem": {"area": "Personal", "complexity": "complex", "corrections": 0, "correction_labels": 20}}
+        out = self.build(rows, labels, {"cheap": 1.0, "mid": 4.0, "gpt-5.6": 10.0})
+        self.assertIn("light_complex", {item["kind"] for item in out["opportunities"]})
+        flagged = out["right_sizing"]["flagged"]
+        self.assertEqual((flagged["sessions"], flagged["spend"], flagged["labeled_spend"]), (1, 4.0, 16.0))
+
+    def test_no_complexity_labels_reports_no_share(self):
+        flagged = self.build([row("a")], {"a": {"area": "Personal"}}, {"gpt-5.6": 10.0})["right_sizing"]["flagged"]
+        self.assertEqual((flagged["sessions"], flagged["spend"], flagged["share"]), (0, 0, None))
