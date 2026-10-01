@@ -364,3 +364,11 @@ matching alone.
 
 These figures come from one user's sessions and one labeler; treat them as a
 smoke-level baseline, not a benchmark.
+
+## Iteration 6: short ranges, model and sizing stats, product palette
+
+- History adds 1 day, 1 week, and 1 month. Traces carry only day-level timestamps, so these use daily buckets (today; last 7 days; last 30 days) and compare with the same span just before. The payload reports `grain` (`month` or `day`); month-over-month headline cards run only at month grain, and the pushback trend plots daily points for short ranges.
+- "Value by kind of work" is now "Cost per resolved session", named for what it measures.
+- Model choices is a model scorecard (sessions, spend, pushback meter, resolved share, cost per resolved session, scoped by runtime) beside paired usual-versus-alternative pushback bars for each kind of work.
+- Right-sizing shows spend by complexity as 100% bars split by model tier and by reasoning effort, stripes the mismatched segments, and totals mismatched spend and the estimated saving above a compact issue table. The detailed grids stay behind "View as tables".
+- Area colours are the product's own hues stepped into the dark-chart lightness band and ordered with the dataviz validator (all checks pass; worst adjacent colour-blind ΔE 13.2). Outcomes use the status colours with labels; tiers and effort use single-hue cyan and violet ramps; the trend uses the product cyan.

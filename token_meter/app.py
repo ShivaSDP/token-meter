@@ -119,6 +119,7 @@ from token_meter.domain.work import is_child_row as _work_is_child_row
 from token_meter.domain.work import work_identity as _work_identity
 from token_meter.domain.work import find_sessions as _domain_find_sessions
 from token_meter.domain.work import DRILL_FILTERS as _domain_drill_filters
+from token_meter.domain.work import parse_period as _domain_parse_period
 from token_meter.models.catalog import (
     ANTHROPIC_PRICE as CLAUDE_PRICE,
     BUILTIN_MODEL_PRICE_HISTORY as _CANONICAL_BUILTIN_MODEL_PRICE_HISTORY,
@@ -7655,6 +7656,18 @@ WORK_DRILL_ENUMS = {
 }
 
 
+def _work_bucket_valid(value, grain):
+    if grain == "day":
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            return False
+        try:
+            datetime.date.fromisoformat(value)
+        except ValueError:
+            return False
+        return True
+    return bool(re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", value))
+
+
 def work_sessions_state(query):
     """Bounded list of sessions behind one Work module cell (allowlisted fields only)."""
     def one(name):
@@ -7663,11 +7676,9 @@ def work_sessions_state(query):
 
     if any(one(name) is None for name in ("months", "ids", "runtime", "project")):
         return {"ok": False, "error": "Use each filter once."}, 400
-    try:
-        months = int(one("months") or "6")
-    except ValueError:
-        months = -1
-    if months not in (3, 6, 12, 0):
+    months = one("months") or "6"
+    period = _domain_parse_period(months)
+    if period is None:
         return {"ok": False, "error": "Choose a supported period."}, 400
     settings = work_insights_settings()
     filters = {}
@@ -7678,8 +7689,8 @@ def work_sessions_state(query):
         if value:
             filters[name] = value
     for name in ("month", "start_month"):
-        if name in filters and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", filters[name]):
-            return {"ok": False, "error": "Choose a valid month."}, 400
+        if name in filters and not _work_bucket_valid(filters[name], period[0]):
+            return {"ok": False, "error": "Choose a valid month or day."}, 400
     if "area" in filters and filters["area"] not in (
             [a["name"] for a in settings["areas"]] + ["Unclear", "Pending"]):
         return {"ok": False, "error": "Area was not found."}, 404
@@ -7707,11 +7718,8 @@ def work_sessions_state(query):
 
 def work_insights_state(months="6", runtime="", project=""):
     """Build the bounded Work payload from cached summaries and content-free labels."""
-    try:
-        months = int(months)
-    except (TypeError, ValueError):
-        return {"ok": False, "error": "Choose a supported period."}, 400
-    if months not in (3, 6, 12, 0):
+    months = str(months if months is not None else "")[:8]
+    if _domain_parse_period(months) is None:
         return {"ok": False, "error": "Choose a supported period."}, 400
     settings = work_insights_settings()
     payload = {"ok": True, "settings": work_insights_public_settings(settings),

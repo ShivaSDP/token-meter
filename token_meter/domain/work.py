@@ -83,6 +83,41 @@ def _month(day):
     return day[:7] if len(day) >= 7 else ""
 
 
+DAY_RANGES = (1, 7, 30)
+MONTH_RANGES = (3, 6, 12, 0)
+
+
+def parse_period(value):
+    """``(grain, count)`` for a History choice: ``1d``/``7d``/``30d`` are days, 3/6/12/0 months; else None."""
+    text = str(value if value is not None else "").strip()
+    if text.endswith("d") and text[:-1].isdigit() and int(text[:-1]) in DAY_RANGES:
+        return "day", int(text[:-1])
+    if text.isdigit() and int(text) in MONTH_RANGES:
+        return "month", int(text)
+    return None
+
+
+def _period(months):
+    """Like ``parse_period`` but accepts any whole number of months (the app validates choices)."""
+    if isinstance(months, int) and not isinstance(months, bool) and months >= 0:
+        return "month", months
+    return parse_period(months) or ("month", 6)
+
+
+def _bucket(day, grain):
+    """The period bucket a ``YYYY-MM-DD`` day falls in: its month, or the day itself."""
+    day = str(day or "")
+    if grain == "day":
+        return day[:10] if len(day) >= 10 else ""
+    return _month(day)
+
+
+def _shift(key, delta, grain):
+    if grain == "day":
+        return (datetime.date.fromisoformat(key) + datetime.timedelta(days=delta)).isoformat()
+    return _month_shift(key, delta)
+
+
 def _rate(corrections, samples):
     if samples <= 0:
         return None
@@ -136,21 +171,21 @@ def _month_shift(month, delta):
 
 def build_work_insights(rows, labels, key_for, areas, output_price, months=6,
                         runtime="", project="", today="", corrections_for=None, pending_keys=None):
-    """Aggregate labeled sessions. ``months`` 0 means all history."""
+    """Aggregate labeled sessions. ``months`` is a History choice (see ``parse_period``); 0 is all history."""
+    grain, count = _period(months)
     area_names = [a["name"] for a in areas]
     tiers, tier_prices = price_tiers(rows, output_price, with_prices=True)
     sessions, runtime_options, project_options = _prepare_sessions(
-        rows, labels, key_for, area_names, tiers, runtime, project, pending_keys)
-    all_months = _window_months(sessions, months, today)
-    month_set = set(all_months)
-    # The comparison period is the same number of calendar months just before the current window.
-    previous = {_month_shift(all_months[0], -step) for step in range(1, months + 1)} if months and all_months else set()
+        rows, labels, key_for, area_names, tiers, runtime, project, pending_keys, grain)
+    buckets = _window(sessions, grain, count, today)
+    # The comparison period is the same number of calendar buckets just before the current window.
+    previous = {_shift(buckets[0], -step, grain) for step in range(1, count + 1)} if count and buckets else set()
     segments = area_names + [UNCLEAR, PENDING]
-    return _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tier_prices,
-                      runtime_options, project_options, today, corrections_for, previous)
+    return _aggregate(sessions, buckets, set(buckets), segments, area_names, tiers, tier_prices,
+                      runtime_options, project_options, today, corrections_for, previous, grain)
 
 
-def _prepare_sessions(rows, labels, key_for, area_names, tiers, runtime, project, pending_keys):
+def _prepare_sessions(rows, labels, key_for, area_names, tiers, runtime, project, pending_keys, grain="month"):
     sessions = []
     runtime_options, project_options = set(), collections.Counter()
     for row in rows:
@@ -174,7 +209,7 @@ def _prepare_sessions(rows, labels, key_for, area_names, tiers, runtime, project
             "row": row, "entry": entry, "area": area,
             "work_type": entry.get("work_type") or "",
             "complexity": entry.get("complexity") or "",
-            "days": days, "start_month": _month(start_day or (days[0] if days else "")),
+            "days": days, "start": _bucket(start_day or (days[0] if days else ""), grain),
             "turns": len(turn_days(row)),
             "corrections": int(entry.get("corrections") or 0),
             "correction_labels": int(entry.get("correction_labels") or 0),
@@ -187,23 +222,24 @@ def _prepare_sessions(rows, labels, key_for, area_names, tiers, runtime, project
     return sessions, runtime_options, project_options
 
 
-def _session_months(s):
-    return {m for m in [s["start_month"], *map(_month, s["days"]),
-                        *map(_month, (s["row"].get("_day_cost") or {}))] if m}
+def _session_buckets(s, grain):
+    return {b for b in [s["start"], *(_bucket(d, grain) for d in s["days"]),
+                        *(_bucket(d, grain) for d in (s["row"].get("_day_cost") or {}))] if b}
 
 
-def _window_months(sessions, months, today=""):
-    """The ``months`` calendar months ending this month (or the latest data month without a today).
+def _window(sessions, grain, count, today=""):
+    """The ``count`` calendar months or days ending today (or the latest data bucket without a today).
 
-    Months without data stay in the window as empty columns. ``months`` 0 keeps every data month.
+    Buckets without data stay in the window as empty columns. A ``count`` of 0 keeps every data month.
     """
-    data_months = sorted(set().union(*(_session_months(s) for s in sessions))) if sessions else []
-    if not months:
-        return data_months[-MAX_MONTHS:]
-    end = _month(today or "") or (data_months[-1] if data_months else "")
+    data = sorted(set().union(*(_session_buckets(s, grain) for s in sessions))) if sessions else []
+    if not count:
+        return data[-MAX_MONTHS:]
+    end = _bucket(today or "", grain) or (data[-1] if data else "")
     if not end:
         return []
-    return [_month_shift(end, step - min(months, MAX_MONTHS) + 1) for step in range(min(months, MAX_MONTHS))]
+    count = min(count, MAX_MONTHS if grain == "month" else max(DAY_RANGES))
+    return [_shift(end, step - count + 1, grain) for step in range(count)]
 
 
 def _attach_sequences(sessions, corrections_for):
@@ -215,23 +251,24 @@ def _attach_sequences(sessions, corrections_for):
 
 
 def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tier_prices,
-               runtime_options, project_options, today, corrections_for, previous_months=frozenset()):
+               runtime_options, project_options, today, corrections_for, previous_months=frozenset(),
+               grain="month"):
     allocation = []
     for month in all_months:
-        bucket = {"month": month, "partial": bool(today and today[:7] == month),
+        bucket = {"month": month, "partial": bool(today and _bucket(today, grain) == month),
                   "turns": dict.fromkeys(segments, 0), "sessions": dict.fromkeys(segments, 0),
                   "spend": dict.fromkeys(segments, 0.0)}
         allocation.append(bucket)
     by_month = {b["month"]: b for b in allocation}
     for s in sessions:
         for day in s["days"]:
-            bucket = by_month.get(_month(day))
+            bucket = by_month.get(_bucket(day, grain))
             if bucket:
                 bucket["turns"][s["area"]] += 1
-        if s["start_month"] in by_month:
-            by_month[s["start_month"]]["sessions"][s["area"]] += 1
+        if s["start"] in by_month:
+            by_month[s["start"]]["sessions"][s["area"]] += 1
         for day, cost in (s["row"].get("_day_cost") or {}).items():
-            bucket = by_month.get(_month(str(day)))
+            bucket = by_month.get(_bucket(str(day), grain))
             if bucket:
                 bucket["spend"][s["area"]] += float(cost or 0)
     for bucket in allocation:
@@ -240,17 +277,17 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
             bucket[measure] = {k: (round(v, 6) if measure == "spend" else v) for k, v in values.items() if v}
             bucket[measure + "_total"] = round(sum(values.values()), 6) if measure == "spend" else sum(values.values())
 
-    in_window = [s for s in sessions if s["start_month"] in month_set]
+    in_window = [s for s in sessions if s["start"] in month_set]
     _attach_sequences(in_window, corrections_for)
     for s in in_window:
-        bucket = by_month.get(s["start_month"])
+        bucket = by_month.get(s["start"])
         if bucket is not None:
             outcome = _outcome(s)
             bucket.setdefault("outcomes", {}).setdefault(outcome, 0)
             bucket["outcomes"][outcome] += 1
             bucket.setdefault("outcome_spend", {}).setdefault(outcome, 0.0)
             bucket["outcome_spend"][outcome] = round(bucket["outcome_spend"][outcome] + _cost(s), 6)
-    earlier = [s for s in sessions if s["start_month"] in previous_months]
+    earlier = [s for s in sessions if s["start"] in previous_months]
     _attach_sequences(earlier, corrections_for)
     economics = []
     by_type = collections.defaultdict(list)
@@ -280,7 +317,7 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
     models = collections.defaultdict(lambda: [0, 0, 0.0])
     for s in in_window:
         if s["correction_labels"]:
-            week = _week_start(s["days"][0]) if s["days"] else ""
+            week = _trend_point(s["days"][0], grain) if s["days"] else ""
             if week:
                 weekly[week][0] += s["corrections"]
                 weekly[week][1] += s["correction_labels"]
@@ -293,10 +330,11 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
     for s in in_window:
         key = (s["model"], s["row"].get("runtime") or "")
         if key in by_model and s["correction_labels"] and s["days"]:
-            week = _week_start(s["days"][0])
+            week = _trend_point(s["days"][0], grain)
             by_model[key][week][0] += s["corrections"]
             by_model[key][week][1] += s["correction_labels"]
     rework = {
+        "grain": "day" if grain == "day" else "week",
         "weekly": [{"week": w, **_rate(c, n)} for w, (c, n) in sorted(weekly.items()) if n],
         "weekly_by_model": [{"model": m, "runtime": r,
                              "weeks": [{"week": w, **_rate(c, n)} for w, (c, n) in sorted(by_model[(m, r)].items()) if n]}
@@ -332,14 +370,16 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
             "previous_months": sorted(previous_months)}
     position = _position(in_window)
     model_fit = _model_fit(in_window)
+    scorecard = _model_scorecard(in_window, tiers)
     opportunities = _opportunities(cells, effort, tier_prices)
     headlines = _headlines(sessions, all_months, area_names, economics, tier_prices, position, opportunities,
-                           today, corrections_for)
+                           today, corrections_for, grain)
 
     labeled_sessions = sum(1 for s in in_window if s["area"] != PENDING)
     labeled_turns = sum(s["correction_labels"] for s in in_window)
     later_turns = sum(max(0, s["turns"] - 1) for s in in_window)
     return {
+        "grain": grain,
         "months": all_months,
         "areas": segments,
         "allocation": allocation,
@@ -349,6 +389,7 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
         "kpis": kpis,
         "model_fit": model_fit,
         "choices": _choices(model_fit),
+        "model_scorecard": scorecard,
         "opportunities": opportunities,
         "headlines": headlines,
         "coverage": {
@@ -360,6 +401,10 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
             "projects": [name for name, _ in project_options.most_common(50)],
         },
     }
+
+
+def _trend_point(day, grain):
+    return day[:10] if grain == "day" and len(day) >= 10 else _week_start(day)
 
 
 def _week_start(day):
@@ -439,6 +484,34 @@ def _model_fit(in_window):
             "cells": cells}
 
 
+MAX_SCORECARD_MODELS = 8
+
+
+def _model_scorecard(in_window, tiers):
+    """Per model (scoped by runtime): volume, spend, pushback, resolved share, and cost per resolved session."""
+    groups = collections.defaultdict(list)
+    for s in in_window:
+        if s["model"]:
+            groups[(s["model"], s["row"].get("runtime") or "")].append(s)
+    rows = []
+    for (model, runtime), group in groups.items():
+        outcomes = [_outcome(s) for s in group]
+        judged = sum(o in ("accepted", "recovered", "ended_on_pushback") for o in outcomes)
+        resolved = [s for s, o in zip(group, outcomes) if o in ("accepted", "recovered")]
+        spend = sum(_cost(s) for s in group)
+        rows.append({
+            "model": model, "runtime": runtime, "tier": tiers.get((runtime, model)),
+            "sessions": len(group), "spend": round(spend, 6),
+            "cost_per_session": spend / len(group),
+            "judged_sessions": judged,
+            "resolved_rate": len(resolved) / judged if judged else None,
+            "cost_per_resolved": sum(_cost(s) for s in resolved) / len(resolved) if resolved else None,
+            "rework": _rate(sum(s["corrections"] for s in group), sum(s["correction_labels"] for s in group)),
+        })
+    rows.sort(key=lambda item: (-item["spend"], -item["sessions"], item["model"]))
+    return rows[:MAX_SCORECARD_MODELS]
+
+
 def _month_spend_shares(sessions, month, area_names):
     """Area shares of all spend in the month, matching the allocation chart (Unclear and Pending included)."""
     spend = collections.Counter()
@@ -452,7 +525,7 @@ def _month_spend_shares(sessions, month, area_names):
 
 
 def _month_rework(sessions, month):
-    group = [s for s in sessions if s["start_month"] == month]
+    group = [s for s in sessions if s["start"] == month]
     return _rate(sum(s["corrections"] for s in group), sum(s["correction_labels"] for s in group))
 
 
@@ -480,13 +553,15 @@ def _resolved(group, corrections_for):
 
 
 def _headlines(sessions, months, area_names, economics, tier_prices, position, opportunities, today="",
-               corrections_for=None):
+               corrections_for=None, grain="month"):
     """Up to three statements about change or opportunity; each links to the module that supports it.
 
     KPIs already state the period's levels, so cards only report movement, the largest opportunity,
     and patterns that are otherwise easy to miss.
     """
     cards = []
+    if grain != "month":
+        months = []  # Day-over-day swings are noise; the KPI strip already compares the two periods.
     current = months[-1] if months else ""
     previous = months[-2] if len(months) > 1 else ""
     partial = bool(today and today[:7] == current)
@@ -498,8 +573,8 @@ def _headlines(sessions, months, area_names, economics, tier_prices, position, o
             return sum(float(c or 0) for s in sessions for d, c in (s["row"].get("_day_cost") or {}).items()
                        if str(d)[:7] == month)
 
-        resolved_last = len(_resolved([s for s in sessions if s["start_month"] == last], corrections_for))
-        resolved_before = len(_resolved([s for s in sessions if s["start_month"] == before], corrections_for))
+        resolved_last = len(_resolved([s for s in sessions if s["start"] == last], corrections_for))
+        resolved_before = len(_resolved([s for s in sessions if s["start"] == before], corrections_for))
         spend_last, spend_before = month_spend(last), month_spend(before)
         if spend_before > 0 and resolved_before >= MIN_RATE_SAMPLES:
             spend_change, resolved_change = spend_last / spend_before - 1, resolved_last / resolved_before - 1
@@ -605,18 +680,19 @@ def find_sessions(rows, labels, key_for, areas, output_price, filters, months=6,
     """
     area_names = [a["name"] for a in areas]
     tiers = price_tiers(rows, output_price)
+    grain, count = _period(months)
     sessions, _runtimes, _projects = _prepare_sessions(
-        rows, labels, key_for, area_names, tiers, runtime, project, pending_keys)
-    all_months = _window_months(sessions, months, today)
+        rows, labels, key_for, area_names, tiers, runtime, project, pending_keys, grain)
+    all_months = _window(sessions, grain, count, today)
     month = filters.get("month") or ""
     start_month = filters.get("start_month") or ""
     if start_month:
-        candidates = [s for s in sessions if start_month in all_months and s["start_month"] == start_month]
+        candidates = [s for s in sessions if start_month in all_months and s["start"] == start_month]
     elif month:
-        candidates = [s for s in sessions if month in all_months and month in _session_months(s)]
+        candidates = [s for s in sessions if month in all_months and month in _session_buckets(s, grain)]
     else:
         window = set(all_months)
-        candidates = [s for s in sessions if s["start_month"] in window]
+        candidates = [s for s in sessions if s["start"] in window]
     groups = dict(COMPLEXITY_GROUPS)
     matched = []
     for s in candidates:

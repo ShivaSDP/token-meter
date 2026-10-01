@@ -1121,6 +1121,11 @@ class AppContractTests(unittest.TestCase):
             payload, status = meter.work_insights_state("6")
             self.assertEqual(status, 200)
             self.assertEqual(meter.work_insights_state("7")[1], 400)
+            for choice in ("1d", "7d", "30d"):
+                short, short_status = meter.work_insights_state(choice)
+                self.assertEqual((short_status, short["insights"]["grain"]), (200, "day"), choice)
+            for bad in ("14d", "2d", "6m", "1d; drop"):
+                self.assertEqual(meter.work_insights_state(bad)[1], 400, bad)
             self.assertEqual(meter.work_insights_state("6", project="nope")[1], 404)
         encoded = json.dumps(payload)
         self.assertNotIn("_day_cost", encoded)
@@ -1159,12 +1164,24 @@ class SurfaceContractTests(unittest.TestCase):
         self.assertIn("if(h==='work'){", self.page)
 
     def test_work_page_shows_estimates_unclear_and_pending(self):
-        for marker in ("id=view-work", "Spend in, outcomes out", "Pushback over time", "Value by kind of work",
-                       "Model choices", "Right-sizing opportunities",
+        for marker in ("id=view-work", "Spend in, outcomes out", "Pushback over time", ">Cost per resolved session</h2>",
+                       "Model choices", "Model scorecard", "Better fit by kind of work", ">Right-sizing</h2>",
+                       "id=w-tier-mix", "id=w-effort-mix", "id=w-savings", "Possible saving",
+                       "<option value=1d>1 day</option><option value=7d>1 week</option><option value=30d>1 month</option>",
                        "id=w-kpis", "id=w-headlines",
                        "View as table",
                        "text goes only to Ollama on this machine", "'var(--w-pending)'", "'var(--w-unclear)'"):
             self.assertTrue(marker in self.page, marker)
+        self.assertNotIn("Value by kind of work", self.page)
+
+    def test_work_palette_uses_validated_product_hues(self):
+        for marker in ("--w1:#079bc2;--w2:#c17a01;--w3:#c36b95;--w4:#af851e;--w5:#9979cd;--w6:#d66555;--w7:#5f8adf;--w8:#05a386",
+                       "--w-tier-light:#026e8b;--w-tier-standard:#0594ba;--w-tier-premium:#02bceb",
+                       "--w-accepted:var(--good);--w-recovered:var(--warn);--w-ended:var(--bad)",
+                       ".workLine{fill:none;stroke:var(--spectrum-cyan)",
+                       ".workGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:10px;align-items:stretch}"):
+            self.assertIn(marker, self.page)
+        self.assertNotIn("--w1:#3987e5", self.page)
 
     def test_settings_card_explains_what_text_is_read(self):
         self.assertIn("id=work-insights-settings", self.page)
@@ -1444,6 +1461,11 @@ class ReviewRegressionTests(unittest.TestCase):
                         {"start_month": ["2026-00"]}):
                 self.assertEqual(meter.work_sessions_state(bad)[1], 400, bad)
             self.assertEqual(meter.work_sessions_state({"month": ["2026-12"]})[1], 200)
+            self.assertEqual(meter.work_sessions_state({"months": ["7d"], "start_month": ["2026-09-29"]})[1], 200)
+            for bad in ({"months": ["7d"], "month": ["2026-09"]}, {"months": ["7d"], "start_month": ["2026-02-30"]},
+                        {"months": ["1d"], "month": ["2026-9-1"]}, {"months": ["6"], "month": ["2026-09-29"]},
+                        {"months": ["14d"]}):
+                self.assertEqual(meter.work_sessions_state(bad)[1], 400, bad)
 
     def test_page_kpi_comparison_uses_the_reported_previous_months(self):
         with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "page.html"),
@@ -1631,3 +1653,81 @@ class OpenerPositionAndWindowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ShortRangeTests(unittest.TestCase):
+    """1 day / 1 week / 1 month History choices use daily buckets and compare with the span before."""
+
+    AREAS = DomainTests.AREAS
+
+    def build(self, rows, labels, months, today="2026-09-30"):
+        return domain.build_work_insights(rows, labels, lambda ident: ident.split("\0")[0], self.AREAS,
+                                          lambda m, p: 10.0, months=months, today=today)
+
+    def test_parse_period_accepts_only_supported_choices(self):
+        self.assertEqual(domain.parse_period("1d"), ("day", 1))
+        self.assertEqual(domain.parse_period("7d"), ("day", 7))
+        self.assertEqual(domain.parse_period("30d"), ("day", 30))
+        self.assertEqual(domain.parse_period("6"), ("month", 6))
+        self.assertEqual(domain.parse_period("0"), ("month", 0))
+        for bad in ("2d", "14d", "5", "-1", "d", "", "7 d", None):
+            self.assertIsNone(domain.parse_period(bad))
+
+    def test_week_uses_seven_daily_buckets_and_the_week_before(self):
+        rows = [row("today", day="2026-09-30", cost=3.0), row("monday", day="2026-09-28"),
+                row("lastweek", day="2026-09-21", cost=5.0), row("old", day="2026-08-01")]
+        out = self.build(rows, {}, "7d")
+        self.assertEqual(out["grain"], "day")
+        self.assertEqual(out["months"], [f"2026-09-{d}" for d in range(24, 31)])
+        self.assertEqual(out["kpis"]["previous_months"], [f"2026-09-{d}" for d in range(17, 24)])
+        by_day = {b["month"]: b for b in out["allocation"]}
+        self.assertEqual(by_day["2026-09-30"]["spend_total"], 3.0)
+        self.assertTrue(by_day["2026-09-30"]["partial"])
+        self.assertEqual(by_day["2026-09-25"]["spend_total"], 0)
+        self.assertEqual(out["kpis"]["current"]["sessions"], 2)
+        self.assertEqual(out["kpis"]["previous"]["sessions"], 1)
+        self.assertEqual(out["rework"]["grain"], "day")
+
+    def test_one_day_is_today_against_yesterday(self):
+        out = self.build([row("a", day="2026-09-30"), row("b", day="2026-09-29")], {}, "1d")
+        self.assertEqual(out["months"], ["2026-09-30"])
+        self.assertEqual(out["kpis"]["previous_months"], ["2026-09-29"])
+
+    def test_month_range_crosses_a_month_boundary(self):
+        out = self.build([], {}, "30d", today="2026-03-01")
+        self.assertEqual((out["months"][0], out["months"][-1], len(out["months"])), ("2026-01-31", "2026-03-01", 30))
+
+    def test_day_ranges_skip_month_over_month_headlines(self):
+        rows = [row(f"s{i}", day="2026-09-30", cost=50.0) for i in range(3)]
+        out = self.build(rows, {}, "7d")
+        self.assertFalse({c["key"] for c in out["headlines"]} & {"value_flat", "pushback_trend", "area_shift"})
+
+    def test_drill_down_by_day_matches_the_daily_bucket(self):
+        rows = [row("a", day="2026-09-30"), row("b", day="2026-09-29"), row("c", day="2026-09-01")]
+        found = domain.find_sessions(rows, {}, lambda ident: ident.split("\0")[0], self.AREAS, lambda m, p: 10.0,
+                                     {"start_month": "2026-09-29"}, months="7d", today="2026-09-30")
+        self.assertEqual([s["id"] for s in found["sessions"]], ["b"])
+        window = domain.find_sessions(rows, {}, lambda ident: ident.split("\0")[0], self.AREAS, lambda m, p: 10.0,
+                                      {}, months="1d", today="2026-09-30")
+        self.assertEqual([s["id"] for s in window["sessions"]], ["a"])
+
+
+class ModelScorecardTests(unittest.TestCase):
+    def test_scorecard_scopes_models_by_runtime_and_reports_resolution(self):
+        rows = [row("a", model="gpt-5.6", cost=4.0, turns_=3), row("b", model="gpt-5.6", cost=2.0, turns_=3),
+                row("c", model="gpt-5.6", runtime="Cursor", cost=1.0, turns_=1)]
+        labels = {"a": {"area": "Personal", "work_type": "debug", "correction_labels": 2, "corrections": 0},
+                  "b": {"area": "Personal", "work_type": "debug", "correction_labels": 2, "corrections": 2}}
+        sequences = {"a": [(1, False), (2, False)], "b": [(1, True), (2, True)]}
+        out = domain.build_work_insights(rows, labels, lambda ident: ident.split("\0")[0], DomainTests.AREAS,
+                                         lambda m, p: 10.0, today="2026-09-30",
+                                         corrections_for=lambda ident, count: sequences.get(ident.split("\0")[0], []))
+        card = {(r["model"], r["runtime"]): r for r in out["model_scorecard"]}
+        codex = card[("gpt-5.6", "Codex")]
+        self.assertEqual((codex["sessions"], codex["spend"], codex["judged_sessions"]), (2, 6.0, 2))
+        self.assertEqual((codex["resolved_rate"], codex["cost_per_resolved"]), (0.5, 4.0))
+        self.assertEqual(codex["rework"]["rate"], 0.5)
+        cursor = card[("gpt-5.6", "Cursor")]
+        self.assertIsNone(cursor["resolved_rate"])
+        self.assertIsNone(cursor["cost_per_resolved"])
+        self.assertEqual([r["model"] for r in out["model_scorecard"]][:1], ["gpt-5.6"])
