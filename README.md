@@ -180,22 +180,18 @@ evidence stays labelled beside the numbers.
 
 ### Work
 
-**Work** shows what the spend went into. When you turn on **Settings → Work
-insights**, a local decision model ([Jet](https://huggingface.co/michaljach/jet),
-Apache-2.0) running in your own Ollama labels each session's area, work type,
-and complexity, and flags follow-up turns where you pushed back on the previous
-work. The page then shows:
+**Work** shows what the spend went into. It is available on macOS only. When
+you turn on **Settings → Work insights**, a local decision model
+([Jet](https://huggingface.co/michaljach/jet), Apache-2.0) running in your own
+Ollama labels each session's area, work type, and complexity, and flags
+follow-up turns where you pushed back on the previous work. The page shows:
 
-- **What stands out**: a few evidence-backed cards, such as sessions that ended
-  on a pushback or routine work done on premium models.
-- **Monthly activity allocation** by area, and **workstreams** by project and
-  area.
-- **Session outcomes**: accepted without pushback, recovered, or ended on
-  pushback, with cost per outcome and an estimate of spend after the first
-  pushback.
-- **Cost by work type**, **rework** by week, model, and turn position, and
-  **model fit by work type**.
-- A **right-sizing** grid of request complexity against model price tier.
+- **Where the spend went** by area, and **how sessions ended**: accepted,
+  recovered after pushback, or ended on pushback.
+- **Pushback over time** and **cost per resolved session** by kind of work.
+- **Model choices**: a scorecard of your top models by spend.
+- **Right-sizing**: spend split by model tier and reasoning effort, with an
+  estimated saving where a cheaper tier would likely have done.
 
 Set up the model once, with Ollama running:
 
@@ -203,9 +199,10 @@ Set up the model once, with Ollama running:
 ./scripts/setup-work-classifier
 ```
 
-Labeling is off by default, runs in the background at a limited pace, pauses on
-battery, and can be paused from the page, Settings, or the menu bar. Labels are
-estimates; low-confidence answers show as Unclear.
+Labeling is off by default, runs in the background at a gentle pace (5 labels a
+minute unless you raise it), pauses on battery, and can be paused from the page,
+Settings, or the menu bar. Labels are estimates; low-confidence answers show as
+Unclear.
 
 ### Git
 

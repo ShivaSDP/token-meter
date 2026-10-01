@@ -37,6 +37,10 @@ if ! printf '%s' "$MODEL_NAME" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$';
   echo "Invalid Ollama model name: $MODEL_NAME" >&2
   exit 2
 fi
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "Work insights are available on macOS only." >&2
+  exit 1
+fi
 command -v curl >/dev/null || { echo "curl is required." >&2; exit 1; }
 command -v python3 >/dev/null || { echo "python3 is required." >&2; exit 1; }
 if ! command -v ollama >/dev/null; then

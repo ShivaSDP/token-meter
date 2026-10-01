@@ -2051,6 +2051,14 @@ _work_settings_cache = {"key": None, "value": None}
 _work_settings_lock = threading.Lock()
 
 
+WORK_INSIGHTS_UNSUPPORTED_ERROR = "Work insights are available on macOS only."
+
+
+def work_insights_supported():
+    """Work insights rely on a local Ollama model and are supported on macOS only for now."""
+    return _PLATFORM_SERVICES.platform_id == "macos"
+
+
 def work_insights_settings(path=None):
     """Load normalized work-insight settings; cached by settings-file identity."""
     path = path or TOKEN_METER_SETTINGS
@@ -2065,6 +2073,8 @@ def work_insights_settings(path=None):
     settings = load_json(path, {})
     raw = settings.get("work_insights") if isinstance(settings, dict) else None
     value = _work.normalize_settings(raw)
+    if not work_insights_supported():
+        value["enabled"] = False  # A setting copied from a Mac never starts the classifier elsewhere.
     with _work_settings_lock:
         _work_settings_cache["key"], _work_settings_cache["value"] = key, value
     return copy.deepcopy(value)
@@ -2093,6 +2103,8 @@ def set_work_insights_settings(values, path=None):
     unknown = set(values) - allowed
     if unknown:
         return {"ok": False, "error": "Unsupported work insight setting."}
+    if values.get("enabled") is True and not work_insights_supported():
+        return {"ok": False, "error": WORK_INSIGHTS_UNSUPPORTED_ERROR}
     current = work_insights_settings(path)
     updated = copy.deepcopy(current)
     try:
@@ -6247,6 +6259,7 @@ def dashboard_state_payload(state):
     payload["runtime_catalog"] = _runtime_catalog(runtime_registry().descriptors)
     source_id = (state.get("source") or {}).get("id") if isinstance(state.get("source"), dict) else None
     payload["work_tags"] = work_session_tags(state.get("source")) if source_id else None
+    payload["work_insights_supported"] = work_insights_supported()
     cross = state.get("xsession")
     if isinstance(cross, dict):
         public_cross = dict(cross)
@@ -7581,6 +7594,7 @@ def requeue_work_insights():
 def work_insights_public_settings(settings=None):
     settings = settings or work_insights_settings()
     return {
+        "supported": work_insights_supported(),
         "enabled": settings["enabled"],
         "paused_until": settings["paused_until"],
         "pause_on_battery": settings["pause_on_battery"],
@@ -7670,6 +7684,8 @@ def _work_bucket_valid(value, grain):
 
 def work_sessions_state(query):
     """Bounded list of sessions behind one Work module cell (allowlisted fields only)."""
+    if not work_insights_supported():
+        return {"ok": False, "error": WORK_INSIGHTS_UNSUPPORTED_ERROR}, 404
     def one(name):
         values = query.get(name) or [""]
         return str(values[0] or "")[:240] if len(values) == 1 else None
@@ -7718,6 +7734,8 @@ def work_sessions_state(query):
 
 def work_insights_state(months="6", runtime="", project=""):
     """Build the bounded Work payload from cached summaries and content-free labels."""
+    if not work_insights_supported():
+        return {"ok": False, "error": WORK_INSIGHTS_UNSUPPORTED_ERROR}, 404
     months = str(months if months is not None else "")[:8]
     if _domain_parse_period(months) is None:
         return {"ok": False, "error": "Choose a supported period."}, 400

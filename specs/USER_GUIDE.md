@@ -218,29 +218,33 @@ disable recommendations.
 
 ### Work
 
-Work is off until you turn on **Settings → Work insights** and run
-`./scripts/setup-work-classifier` with Ollama running. A local Jet decision
-model then labels each session's opening request with an area (editable, up to
-eight), a work type, and a complexity level, and asks of each follow-up turn
-whether you pushed back on the previous work. For that question it also reads
-the last 600 characters of the assistant reply before your turn. Tool output
-and files are never read, and cloud-proxied Ollama models are refused.
+Work is available on macOS only. It is off until you turn on **Settings → Work
+insights** and run `./scripts/setup-work-classifier` with Ollama running. A
+local Jet decision model then labels each session's opening request with an
+area (editable, up to eight), a work type, and a complexity level, and asks of
+each follow-up turn whether you pushed back on the previous work. For that
+question it also reads the last 600 characters of the assistant reply before
+your turn. Tool output and files are never read, and cloud-proxied Ollama
+models are refused.
 
-- **Monthly activity allocation** shows each month's user turns, sessions, or
-  spend by area. Pending means not labeled yet; Unclear means the model was
-  not confident (below 50%).
-- **Workstreams** ranks project × area pairs for a month.
-- **Cost by work type** and **Rework** show spend, cost per session, and the
-  share of follow-up turns that pushed back. Rates under 20 labeled turns are
-  marked "few".
-- **Model right-sizing** compares request complexity with the price tier of
-  the session's main model. "Possible overspend" and "possible false economy"
-  are estimates to review, not verdicts.
+- **Where the spend went** lists spend by area for sessions started in the
+  period. Not labeled yet and Unclear (the model was not confident) appear last.
+- **How sessions ended** splits judged sessions into accepted, recovered after
+  pushback, and ended on pushback.
+- **Pushback over time** and **Cost per resolved session** show the share of
+  follow-up turns that pushed back and what a resolved session cost. Rates
+  under 20 labeled turns are marked "few".
+- **Model choices** lists your top models by spend with pushback, resolved
+  share, and cost per resolved session.
+- **Right-sizing** splits spend by model tier and reasoning effort. Striped
+  segments are premium models or high effort on routine work, or light models
+  on complex work. Savings are estimates to review, not verdicts.
 
-The worker labels at most the configured pace, pauses on battery by default,
-waits when the machine is busy, and backs off when Ollama is unreachable.
-Changing areas relabels only areas, newest first. Pause it from the page,
-Settings, or the menu bar.
+History offers 1 day, 1 week, 1 month, 3, 6, or 12 months, or all history.
+The worker labels at most the configured pace (5 a minute by default), pauses
+on battery, waits when the machine is busy, and backs off when Ollama is
+unreachable. Changing areas relabels only areas, newest first. Pause it from
+the page, Settings, or the menu bar.
 
 ### Git
 

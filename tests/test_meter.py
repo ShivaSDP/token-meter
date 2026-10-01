@@ -9755,7 +9755,7 @@ console.log(JSON.stringify({
         self.assertEqual(positions, sorted(positions))
         for marker in (
             "id=command-palette", "id=command-search",
-            "const NAV_COMMANDS=[", "directKey:'Digit1'", "directKey:'Digit9'",
+            "const NAV_COMMANDS=[", "directKey:'Digit1'", "directKey:'Digit0'",
             "key==='k'", "event.key==='Escape'", "event.key==='ArrowDown'",
             "event.key==='Enter'",
             "class=tabs aria-label=\"Primary navigation\"",
@@ -9784,8 +9784,8 @@ console.log(JSON.stringify({
     def test_top_level_shortcuts_follow_visible_rail_order(self):
         expected = [
             ("session", "1"), ("daily", "2"), ("models", "3"),
-            ("subagents", "4"), ("efficiency", "5"), ("git", "6"),
-            ("learn", "7"), ("capabilities", "8"), ("settings", "9"),
+            ("subagents", "4"), ("efficiency", "5"), ("work", "6"), ("git", "7"),
+            ("learn", "8"), ("capabilities", "9"), ("settings", "0"),
         ]
         for tab_id, digit in expected:
             match = re.search(rf'<button[^>]+id=tab-{tab_id}[^>]*>.*?</button>', self.page)
@@ -9797,8 +9797,8 @@ console.log(JSON.stringify({
         commands = self.page.split("const NAV_COMMANDS=[", 1)[1].split("];", 1)[0]
         for command_id, digit in (
             ("sessions", "1"), ("spend", "2"), ("models", "3"),
-            ("subagents", "4"), ("efficiency", "5"), ("git", "6"),
-            ("learn", "7"), ("capabilities", "8"), ("settings", "9"),
+            ("subagents", "4"), ("efficiency", "5"), ("work", "6"), ("git", "7"),
+            ("learn", "8"), ("capabilities", "9"), ("settings", "0"),
         ):
             self.assertRegex(
                 commands,
