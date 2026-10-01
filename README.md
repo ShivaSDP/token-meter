@@ -196,25 +196,27 @@ you turn on **Settings → Work insights**, a local decision model
 Ollama labels each session's area, work type, and complexity, and flags
 follow-up turns where you pushed back on the previous work. The page shows:
 
-- **Highlights** for the period: your biggest session, best-value model, the
-  kinds of work with the most and least pushback, busiest day, and longest
-  streak.
+- **Right-sizing**: suggestions for spending less on models without losing
+  results, such as a cheaper model that resolves the same kind of work as often,
+  a standard model for routine work, lower reasoning effort, or starting fresh
+  sessions sooner. Each shows an estimated saving.
 - **Where the spend went** by area, with a trend line per area, and **how
   sessions ended**: accepted, recovered after pushback, or ended on pushback.
-- **Session tags** such as Marathon, Big spender, Subagent team, Overkill,
+- **Session tags** such as Marathon, Long thread, Big spender, Subagent team, Overkill,
   Rescued, and One-shot, each with its spend and resolved share.
 - **When you work**: session starts by weekday and hour, and pushback by time
   of day.
 - **Pushback over time** and **cost per resolved session** by kind of work.
 - **Model choices**: a scorecard of your top models by spend.
-- **Right-sizing**: spend split by model tier and reasoning effort, with an
-  estimated saving where a cheaper tier would likely have done.
 
-Set up the model once, with Ollama running:
-
-```bash
-./scripts/setup-work-classifier
-```
+Turning Work insights on sets everything up in the background. If this Mac has
+no Ollama 0.34 or newer running, Token Meter downloads a pinned, signed Ollama
+0.34.4 into its own Application Support folder and runs it on 127.0.0.1 only.
+It then downloads the Jet model (about 8.4 GB, every file checked against a
+pinned hash), imports it as a 4-bit model, and deletes the download. Setup needs
+about 20 GB free while it runs and about 3 GB after. Progress shows on the Work
+page; turning Work insights off stops the managed Ollama, and uninstalling
+Token Meter removes it.
 
 Labeling is off by default, runs in the background at a gentle pace (5 labels a
 minute unless you raise it), pauses on battery, and can be paused from the page,

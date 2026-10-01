@@ -124,6 +124,7 @@ from token_meter.domain.tools import (
 )
 from token_meter.services.git_delivery import GitDeliveryLedger, GitDeliveryService
 from token_meter.services import work_insights as _work
+from token_meter.services import work_setup as _work_setup
 from token_meter.domain.work import build_work_insights as _domain_build_work_insights
 from token_meter.domain.work import is_child_row as _work_is_child_row
 from token_meter.domain.work import work_identity as _work_identity
@@ -8004,6 +8005,40 @@ def work_insights_service():
         return _work_service_instance
 
 
+_work_setup_instance = None
+_work_setup_lock = threading.Lock()
+
+
+def work_setup():
+    """The process-local job that installs the pinned Ollama runtime and Jet model on demand."""
+    global _work_setup_instance
+    with _work_setup_lock:
+        if _work_setup_instance is None:
+            def use_url(url):
+                set_work_insights_settings({"ollama_url": url})
+                notify_work_insights()
+
+            _work_setup_instance = _work_setup.WorkSetup(
+                **_work_setup.default_paths(), get_settings=work_insights_settings,
+                set_ollama_url=use_url, on_ready=notify_work_insights)
+        return _work_setup_instance
+
+
+def start_work_setup():
+    if work_insights_supported() and work_insights_settings()["enabled"]:
+        return work_setup().start()
+    return False
+
+
+def stop_managed_ollama():
+    if not work_insights_supported():
+        return
+    try:
+        work_setup().stop_agent()
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def work_insights_watcher():
     """Run the classifier worker once enabled and sources are known; it paces and pauses itself."""
     last_delete_attempt = 0.0
@@ -8016,6 +8051,7 @@ def work_insights_watcher():
             except OSError:
                 pass
         time.sleep(2.0)
+    start_work_setup()
     work_insights_service().run_forever()
 
 
@@ -8095,9 +8131,12 @@ def work_insights_status():
                 "retry_at": None, "paused_until": work_insights_settings()["paused_until"],
                 "model": work_insights_settings()["model"], "model_versions": 0, "labels": 0}
     status = work_insights_service().status()
-    return {key: status[key] for key in (
+    result = {key: status[key] for key in (
         "state", "reason", "pending", "queued", "eta_s", "retry_at", "paused_until",
         "model", "model_versions", "labels")}
+    if work_insights_supported():
+        result["setup"] = work_setup().status()
+    return result
 
 
 def work_session_tags(source):
@@ -10875,7 +10914,7 @@ class H(BaseHTTPRequestHandler):
                             "/settings/budgets", "/settings/session-budget", "/settings/updates",
                             "/git-delivery/clear", "/updates/check", "/updates/install",
                             "/settings/work-insights", "/work-insights/pause",
-                            "/work-insights/clear"):
+                            "/work-insights/clear", "/work-insights/setup"):
             self.send_error(404)
             return
         origin = self.headers.get("Origin") or ""
@@ -11020,6 +11059,10 @@ class H(BaseHTTPRequestHandler):
                     requeue_work_insights()
                 else:
                     notify_work_insights()
+                if result["work_insights"]["enabled"]:
+                    start_work_setup()
+                elif payload.get("enabled") is False:
+                    stop_managed_ollama()
                 result["work_insights"] = work_insights_public_settings()
                 result["status"] = work_insights_status()
             self._send(json.dumps(result), "application/json",
@@ -11032,6 +11075,17 @@ class H(BaseHTTPRequestHandler):
                 notify_work_insights()
                 result["work_insights"] = work_insights_public_settings()
                 result["status"] = work_insights_status()
+            self._send(json.dumps(result), "application/json",
+                       status=200 if result.get("ok") else 400)
+            return
+        if req_path == "/work-insights/setup":
+            if not work_insights_supported():
+                result = {"ok": False, "error": WORK_INSIGHTS_UNSUPPORTED_ERROR}
+            elif not work_insights_settings()["enabled"]:
+                result = {"ok": False, "error": "Turn on work insights first."}
+            else:
+                start_work_setup()
+                result = {"ok": True, "status": work_insights_status()}
             self._send(json.dumps(result), "application/json",
                        status=200 if result.get("ok") else 400)
             return

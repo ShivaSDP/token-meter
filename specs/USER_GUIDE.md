@@ -245,23 +245,29 @@ disable recommendations.
 ### Work
 
 Work is available on macOS only. It is off until you turn on **Settings → Work
-insights** and run `./scripts/setup-work-classifier` with Ollama running. A
-local Jet decision model then labels each session's opening request with an
+insights**, which also sets up Ollama and the model in the background (see the
+README). A local Jet decision model then labels each session's opening request with an
 area (editable, up to eight), a work type, and a complexity level, and asks of
 each follow-up turn whether you pushed back on the previous work. For that
 question it also reads the last 600 characters of the assistant reply before
 your turn. Tool output and files are never read, and cloud-proxied Ollama
 models are refused.
 
-- **Highlights** pick out facts from the period: the biggest session, the
-  model with the lowest cost per resolved session (at least five judged
-  sessions), the kinds of work with the most and least pushback (at least ten),
-  the busiest day by spend, the longest run of active days, and peak hours.
+- **Right-sizing** comes first. Its suggestions, each with sessions, spend,
+  and an estimated saving: a model that resolves a kind of work within five
+  points as often for at most 70% of the cost per resolved session (at least
+  five judged sessions each); a standard model for routine work on premium
+  models; lower reasoning effort on routine work; a stronger model for complex
+  work that got pushback on light models; and fresh sessions sooner when
+  sessions with 30+ requests cost at least 1.5× more per request than sessions
+  with 10 or fewer. Savings can overlap. Below them, spend is split by model
+  tier and reasoning effort; striped segments are the mismatches.
 - **Where the spend went** lists spend by area for sessions started in the
   period, with a small trend line across the period. Not labeled yet and
   Unclear (the model was not confident) appear last.
 - **Session tags** are worked out from data Token Meter already has, not from
-  the model: Marathon (top 10% by active time, and at least an hour), Big
+  the model: Marathon (top 10% by active time, and at least an hour), Long thread (30 or
+  more requests), Big
   spender (top 10% by cost), Subagent team (three or more subagent runs),
   Overkill (routine work on a premium model or high effort), Underpowered
   (complex work on a light model that got pushback), Rescued, Ended on
@@ -276,9 +282,6 @@ models are refused.
   under 20 labeled turns are marked "few".
 - **Model choices** lists your top models by spend with pushback, resolved
   share, and cost per resolved session.
-- **Right-sizing** splits spend by model tier and reasoning effort. Striped
-  segments are premium models or high effort on routine work, or light models
-  on complex work. Savings are estimates to review, not verdicts.
 
 History offers 1 day, 1 week, 1 month, 3, 6, or 12 months, or all history.
 The worker labels at most the configured pace (5 a minute by default), pauses

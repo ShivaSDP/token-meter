@@ -1088,7 +1088,7 @@ class AppContractTests(unittest.TestCase):
                                "setup-work-classifier"), encoding="utf-8") as handle:
             script = handle.read()
         self.assertIn('if [ "$(uname -s)" != "Darwin" ]; then', script)
-        self.assertLess(script.index('uname -s'), script.index("command -v curl"))
+        self.assertLess(script.index('uname -s'), script.index("command -v python3"))
 
     def test_right_sizing_explains_each_flag(self):
         with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "page.html"),
@@ -1098,7 +1098,7 @@ class AppContractTests(unittest.TestCase):
         for marker in ("possible_overspend:'premium model on routine work'",
                        "possible_false_economy:'light model on complex work'",
                        "possible_overthinking:'high effort on routine work'",
-                       "<span>Spend to review</span>", "<th>What to review</th>"):
+                       "<span>Spend to review</span>", "<th>Suggestion</th>"):
             self.assertIn(marker, page)
 
     def test_settings_round_trip_validation_and_pause(self):
@@ -1178,10 +1178,12 @@ class SurfaceContractTests(unittest.TestCase):
                        "Model choices", "id=w-scorecard", ">Right-sizing</h2>",
                        "id=w-tier-mix", "id=w-effort-mix", "id=w-savings", "Possible saving",
                        "<option value=1d>1 day</option><option value=7d>1 week</option><option value=30d>1 month</option>",
-                       "id=w-kpis",
+                       "id=w-module-tags", "id=w-module-rhythm", "id=w-opportunities",
                        "text goes only to Ollama on this machine", "'var(--w-pending)'", "'var(--w-unclear)'"):
             self.assertTrue(marker in self.page, marker)
+        self.assertLess(self.page.index("id=w-module-sizing"), self.page.index("id=w-module-allocation"))
         for removed in ("Value by kind of work", "Spend in, outcomes out", "id=w-headlines", "Better fit by kind of work",
+                        "id=w-kpis", "id=w-highlights",
                         "data-measure=", "id=w-ledger"):
             self.assertNotIn(removed, self.page)
 
@@ -1212,7 +1214,7 @@ class SurfaceContractTests(unittest.TestCase):
                        "lowestCost=ranked.length>=2?",
                        "!insights?.right_sizing?.tiers_known?'model price tiers are unavailable'",
                        "sessions started in this period",
-                       "no routine work on premium models"):
+                       "nothing stands out yet"):
             self.assertIn(marker, self.page)
         self.assertNotIn("rows.reduce((sum,item)=>sum+(item.spend||0),0)", self.page)
 
@@ -1221,7 +1223,8 @@ class SurfaceContractTests(unittest.TestCase):
         self.assertIn("reads the prompts you typed, plus the last few lines of the assistant reply", self.page)
         self.assertIn("cloud models are refused", self.page)
         self.assertIn("Token Meter stores labels, never text", self.page)
-        self.assertIn("./scripts/setup-work-classifier", self.page)
+        self.assertIn("Turning this on sets everything up in the background", self.page)
+        self.assertIn("'/work-insights/setup'", self.page)
 
     def test_work_state_is_declared_before_the_initial_route_runs(self):
         declaration = self.page.index("let WORK=null,workRequest=0")
@@ -1245,16 +1248,30 @@ class SurfaceContractTests(unittest.TestCase):
         self.assertTrue(os.access(path, os.X_OK))
         with open(path, encoding="utf-8") as handle:
             script = handle.read()
-        self.assertIn('ollama create "$MODEL_NAME" -q int4', script)
-        self.assertIn("file_digest", script)
-        self.assertIn('COMMIT="fbc3d2daa679e0d4bd9f99c9912b6496d5a41f0a"', script)
+        self.assertIn("exec python3 -m token_meter.services.work_setup", script)
         self.assertNotIn("sudo", script)
+        with open(os.path.join(self.root, "token_meter", "services", "work_setup.py"), encoding="utf-8") as handle:
+            module = handle.read()
+        self.assertIn('"create", model, "-q", "int4"', module)
+        self.assertIn('JET_COMMIT = "fbc3d2daa679e0d4bd9f99c9912b6496d5a41f0a"', module)
+        self.assertNotIn("sudo", module)
 
 
 class AppIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        for name in ("start_work_setup", "stop_managed_ollama"):
+            patcher = mock.patch.object(meter, name, return_value=False)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(meter, "_work_setup_instance", None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch.dict(os.environ, {"TOKEN_METER_OLLAMA_DIR": os.path.join(self.tmp.name, "ollama"),
+                                               "TOKEN_METER_LAUNCH_AGENTS_DIR": os.path.join(self.tmp.name, "agents")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.settings = os.path.join(self.tmp.name, "settings.json")
         self.db = os.path.join(self.tmp.name, "work.sqlite3")
 
@@ -1490,15 +1507,6 @@ class ReviewRegressionTests(unittest.TestCase):
                         {"months": ["1d"], "month": ["2026-9-1"]}, {"months": ["6"], "month": ["2026-09-29"]},
                         {"months": ["14d"]}):
                 self.assertEqual(meter.work_sessions_state(bad)[1], 400, bad)
-
-    def test_page_kpi_comparison_uses_the_reported_previous_months(self):
-        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "page.html"),
-                  encoding="utf-8") as handle:
-            page = handle.read()
-        kpis = page[page.index("function renderWorkKpis("):page.index("function renderWorkSpend(")]
-        self.assertNotIn("months before", kpis)
-        self.assertIn("kpis?.previous_months", kpis)
-        self.assertIn("judged_sessions?kpis.previous:null", kpis)
 
     def test_page_work_filter_ignores_stale_responses(self):
         with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "page.html"),
@@ -1854,18 +1862,32 @@ class TagHighlightRhythmTests(unittest.TestCase):
         self.assertEqual(bands["evening"]["pushback"]["rate"], 0.5)
         self.assertIsNone(bands["night"]["pushback"])
 
-    def test_highlights_are_typed_and_content_free(self):
-        rows = self.population()
-        rows[3]["session"], rows[3]["session_name"] = "trace-3.jsonl", "fix login"
-        rows[3]["cost"], rows[3]["_day_cost"] = 50.0, {"2026-09-04": 50.0}
-        out = self.build(rows, {})
-        kinds = {h["kind"]: h for h in out["highlights"]}
-        self.assertEqual(kinds["priciest_session"]["session"], "trace-3.jsonl")
-        self.assertEqual(kinds["busiest_day"]["day"], "2026-09-04")
-        self.assertEqual((kinds["streak"]["days"], kinds["streak"]["start"]), (10, "2026-09-01"))
-        self.assertEqual(kinds["peak_time"]["band"], "morning")
-        for item in out["highlights"]:
-            self.assertFalse(any("/" in str(v) for v in item.values()))
+    def test_recommendations_suggest_a_cheaper_model_that_resolves_as_often(self):
+        rows, labels, sequences = [], {}, {}
+        for i in range(12):
+            model, cost = ("gpt-5.6", 10.0) if i < 6 else ("cheap", 2.0)
+            r = row(f"m{i}", model=model, cost=cost)
+            rows.append(r)
+            labels[f"m{i}"] = {"work_type": "debug", "correction_labels": 2, "corrections": 0}
+            sequences[f"m{i}"] = [(1, False), (2, False)]
+        rows.append(row("m12", model="gpt-5.6", cost=10.0))
+        labels["m12"] = {"work_type": "debug", "correction_labels": 2, "corrections": 0}
+        sequences["m12"] = [(1, False), (2, False)]
+        recs = self.build(rows, labels, sequences)["recommendations"]
+        switch = next(r for r in recs if r["kind"] == "switch_model")
+        self.assertEqual((switch["model"], switch["to_model"], switch["work_type"]), ("gpt-5.6", "cheap", "debug"))
+        self.assertEqual(switch["saving"], 8.0 * 7)
+
+    def test_recommendations_flag_long_threads_that_cost_more_per_request(self):
+        rows = [row(f"s{i}", cost=1.0, turns_=5) for i in range(5)]
+        rows += [row(f"l{i}", cost=30.0, turns_=30) for i in range(5)]
+        recs = self.build(rows, {})["recommendations"]
+        long = next(r for r in recs if r["kind"] == "long_threads")
+        self.assertEqual((long["sessions"], long["spend"]), (5, 150.0))
+        self.assertAlmostEqual(long["ratio"], 5.0)
+        self.assertAlmostEqual(long["saving"], 150.0 - 150 * 0.2)
+        tags = {t["tag"]: t for t in self.build(rows, {})["tags"]["items"]}
+        self.assertEqual(tags["long_thread"]["sessions"], 5)
 
     def test_tag_filter_is_validated_by_the_endpoint(self):
         self.assertIn("tag", domain.DRILL_FILTERS)

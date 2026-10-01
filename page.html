@@ -290,7 +290,7 @@ body.sessionRoute #view-session.sessionAll{--view-spectrum-a:rgba(0,188,235,.6);
 .workStatus{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:10px;padding:11px 14px}.workStatusMain{display:flex;align-items:center;gap:12px;min-width:0}.workStatusText{display:grid;gap:2px;min-width:0}.workStatusText strong{font-size:13px}.workStatusText span{color:var(--dim);font-size:11px}.workStatusActions{display:flex;align-items:center;gap:8px;flex:0 0 auto}.workStatusActions .filterSelect{min-width:170px}
 .workStatusPill{flex:0 0 auto;padding:4px 9px;border:1px solid var(--line2);border-radius:999px;color:var(--dim);font-size:10px;font-weight:800;letter-spacing:.05em;text-transform:uppercase}.workStatusPill::before{content:"";display:inline-block;width:7px;height:7px;margin-right:6px;border-radius:50%;background:currentColor;vertical-align:1px}.workStatusPill[data-state=running]{color:var(--good);border-color:rgba(102,217,144,.45)}.workStatusPill[data-state=idle]{color:var(--orange3);border-color:rgba(0,188,235,.4)}.workStatusPill:is([data-state=paused],[data-state=throttled],[data-state=backoff]){color:var(--warn);border-color:rgba(255,180,87,.45)}.workStatusPill:is([data-state=setup_needed],[data-state=storage_error]){color:var(--bad);border-color:rgba(255,111,111,.45)}
 .workCardHead{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px}.workCardHead h2{margin:0;font-size:14px}.workCardHead .filterControl{min-width:160px}.workCardHead .filterControl>span{font-size:10px;color:var(--faint);font-weight:780;text-transform:uppercase}
-.workEconomics,.workRework,.workSizing{position:relative;padding:15px 16px}.workSizing{margin-top:10px}
+.workEconomics,.workRework,.workSizing{position:relative;padding:15px 16px}.workMixSplit{margin-top:16px}.workSuggestion{display:grid;gap:2px;text-align:left}.workSuggestion b{font-weight:650}.workSuggestion small{color:var(--faint);font-size:11px;line-height:1.4;white-space:normal}.workSpend{margin-top:10px}.workSizing{margin-top:10px}
 .workSwatch{display:inline-block;flex:0 0 auto;width:10px;height:10px;border-radius:3px;background:var(--swatch)}
 .workTableToggle{margin-top:12px;color:var(--dim);font-size:11px}.workTableToggle summary{cursor:pointer}.workTableWrap{overflow:auto;max-height:460px}.workTableWrap .tbl th{position:sticky;top:0;z-index:1;background:#111820;white-space:nowrap}.workTableWrap .tbl td{vertical-align:middle}.workMuted{color:var(--faint)}.workEmpty{padding:18px 4px;color:var(--faint);font-size:12px;text-align:center}
 .workGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:10px;align-items:stretch}.workGrid>.card{display:flex;flex-direction:column;margin:0}
@@ -302,11 +302,11 @@ body.sessionRoute #view-session.sessionAll{--view-spectrum-a:rgba(0,188,235,.6);
 :root{--w-accepted:var(--good);--w-recovered:var(--warn);--w-ended:var(--bad);--w-single:#56606d}
 .workFit .workTableWrap{max-height:none}.workFitBest{display:inline-block;margin-left:5px;padding:1px 6px;border:1px solid rgba(102,217,144,.5);border-radius:999px;color:var(--good);font-size:9.5px;font-weight:800;text-transform:uppercase;letter-spacing:.04em}.workFitCell small{display:block;color:var(--faint);font-size:10px}
 [data-drill]{cursor:pointer}tr[data-drill]:hover td,td:has(>.workDrillBtn):hover,.workSizingCell:has(>.workDrillBtn):hover{background:rgba(255,255,255,.035)}.workDrillBtn{display:block;width:100%;height:100%;margin:0;padding:0;border:0;border-radius:4px;background:none;color:inherit;font:inherit;text-align:inherit;cursor:pointer}.workDrillBtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.workSizingCell:has(>.workDrillBtn){padding:0}.workSizingBtn{min-height:78px;padding:9px 10px;border-radius:8px}.workSizingBtn:focus-visible{outline-offset:-2px}
-.workKpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:10px}.workKpi{display:grid;align-content:start;gap:4px;padding:13px 15px}.workKpiLabel{color:var(--dim);font-size:10.5px;font-weight:800;letter-spacing:.05em;text-transform:uppercase}.workKpi strong{font-size:24px;font-weight:820;letter-spacing:-.02em;line-height:1.1}.workKpiDetail{color:var(--faint);font-size:11px}.workDelta{display:inline-block;margin-top:2px;font:700 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;color:var(--dim)}.workDelta[data-tone=good]{color:var(--good)}.workDelta[data-tone=bad]{color:var(--bad)}.workKpi small{margin-left:6px;font-size:10px}
+
 .workAxisText{fill:var(--faint);font:10px -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif}
 .workTrendWrap{flex:1;display:flex;align-items:center;margin:2px 0 4px}.workTrend{display:block;width:100%;height:auto;overflow:visible}.workGridLine{stroke:rgba(255,255,255,.07)}.workLine{fill:none;stroke:var(--spectrum-cyan);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}.workArea{fill:url(#w-trend-fill)}.workPoint{fill:var(--spectrum-cyan);stroke:#111820;stroke-width:2}.workPoint.few{fill:#111820;stroke:var(--spectrum-cyan)}.workTrendAvg{stroke:var(--spectrum-violet);stroke-width:1;stroke-dasharray:4 4;opacity:.8}.workTrendAvgText{fill:var(--spectrum-violet);font:600 10px -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif}
 .workBarsList{display:grid;gap:2px}.workBarRow{display:grid;grid-template-columns:170px minmax(0,1fr) 80px;grid-template-areas:"label bar value" ". note note";align-items:center;column-gap:10px;row-gap:3px;padding:8px 6px;border:0;border-radius:6px;background:none;color:var(--fg);font:inherit;text-align:left;cursor:pointer}.workBarRow:hover,.workBarRow:focus-visible{background:rgba(255,255,255,.04);outline:none}.workBarLabel{grid-area:label;font-size:12.5px}.workBarRow .workBarTrack{grid-area:bar;height:10px;border-radius:4px;background:rgba(255,255,255,.04);overflow:hidden}.workBarRow .workBarTrack i{display:block;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--spectrum-blue),var(--spectrum-cyan))}.workBarRow b{grid-area:value;text-align:right;font-size:12px}.workBarRow small{grid-area:note;color:var(--faint);font-size:10.5px}.workBarRow[data-few=true]{opacity:.55}
-@media(max-width:1180px){.workKpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:1180px){}
 .workSplit{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:24px;align-items:start}.workSplit>div{min-width:0}.workSubhead{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:0 0 8px}.workSubhead h3{margin:0;color:var(--dim);font-size:10.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase}.workSubhead span{color:var(--faint);font-size:11px}
 .workScore{width:100%;border-collapse:collapse;font-size:12px}.workScore th{padding:0 8px 6px;color:var(--faint);font-size:10px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;text-align:right;white-space:nowrap}.workScore th:first-child{text-align:left;padding-left:0}.workScore td{padding:0;border-top:1px solid var(--line);text-align:right;white-space:nowrap}.workScore td:first-child{text-align:left}.workScore tr:hover td{background:rgba(255,255,255,.03)}.workScore .workDrillBtn{display:flex;align-items:center;gap:8px;padding:8px 8px 8px 0}.workScore td>span{display:block;padding:8px}.workLowest{margin-left:6px;padding:1px 6px;border:1px solid rgba(102,217,144,.45);border-radius:999px;color:var(--good);font:800 9px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-style:normal;letter-spacing:.04em;text-transform:uppercase;vertical-align:1px}.workScoreDot{flex:0 0 auto;width:8px;height:8px;border-radius:50%;background:var(--swatch)}.workScoreName{display:grid;min-width:0;text-align:left}.workScoreName b{overflow:hidden;text-overflow:ellipsis;font-weight:720}.workScoreName small{color:var(--faint);font-size:10px}.workMeter{display:inline-grid;grid-template-columns:64px 34px;align-items:center;gap:6px}.workMeter i{display:block;height:6px;border-radius:3px;background:rgba(255,255,255,.06);overflow:hidden}.workMeter i b{display:block;height:100%;border-radius:3px;background:var(--meter,var(--spectrum-cyan))}.workMeter[data-few=true]{opacity:.5}
 .workMix{display:grid;gap:10px}.workMixRow{display:grid;grid-template-columns:96px minmax(0,1fr) 78px;align-items:center;gap:10px}.workMixLabel{color:var(--dim);font-size:12px;font-weight:720}.workMixTotal{text-align:right;font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;color:var(--fg)}.workStack{display:flex;gap:2px;height:22px;border-radius:5px;overflow:hidden;background:rgba(255,255,255,.03)}.workStack button{position:relative;min-width:3px;height:100%;padding:0;border:0;background:var(--seg);cursor:pointer}.workStack button:hover,.workStack button:focus-visible{filter:brightness(1.25);outline:none}.workStack button[data-flag=true]{background:repeating-linear-gradient(135deg,var(--seg) 0 6px,rgba(255,180,87,.55) 6px 9px);box-shadow:inset 0 0 0 1.5px var(--warn)}.workStack button span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#05121a;font:700 10px -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;pointer-events:none}.workMixLegend{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:2px;color:var(--faint);font-size:11px}.workMixLegend span{display:inline-flex;align-items:center;gap:6px}.workMixLegend i{display:inline-block;width:10px;height:10px;border-radius:3px;background:var(--swatch)}.workMixLegend i.flag{background:repeating-linear-gradient(135deg,#0594ba 0 4px,rgba(255,180,87,.7) 4px 6px);box-shadow:inset 0 0 0 1px var(--warn)}.workMixLegend i.flag.effort{background:repeating-linear-gradient(135deg,#8d6dc0 0 4px,rgba(255,180,87,.7) 4px 6px)}
@@ -315,7 +315,6 @@ body.sessionRoute #view-session.sessionAll{--view-spectrum-a:rgba(0,188,235,.6);
 @media(max-width:1180px){.workSplit{grid-template-columns:1fr}.workSavings{grid-template-columns:repeat(3,minmax(0,1fr))}}
 #view-work .mono,#view-work .num{font-family:inherit;font-variant-numeric:tabular-nums}#view-work em.mono{font-style:normal}
 .workSpend{padding:15px 16px}.workSpend .workBarRow{grid-template-columns:160px minmax(0,1fr) 80px 64px;grid-template-areas:"label bar value spark" ". note note spark"}.workSpark{grid-area:spark;width:64px;height:24px;justify-self:end;overflow:visible}.workSpark path{fill:none;stroke:var(--spectrum-cyan);stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.workSpark circle{fill:var(--spectrum-cyan)}.workBarRow[data-muted=true] .workSpark path{stroke:var(--w-unclear)}.workBarRow[data-muted=true] .workSpark circle{fill:var(--w-unclear)}
-.workHighlights{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:10px}.workHighlights:empty{display:none}.workHighlight{display:grid;align-content:start;gap:5px;min-width:0;padding:14px 16px 14px 19px;overflow:hidden;color:var(--fg);font:inherit;text-align:left}.workHighlight::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:3px;border-radius:0 3px 3px 0;background:var(--hl,var(--spectrum-cyan))}button.workHighlight{cursor:pointer}button.workHighlight:hover,button.workHighlight:focus-visible{border-color:var(--line2);outline:none;background:linear-gradient(180deg,rgba(26,36,47,.98),rgba(15,21,28,.98))}.workHighlightEyebrow{color:var(--dim);font-size:10.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase}.workHighlight strong{overflow:hidden;font-size:19px;font-weight:700;line-height:1.25;text-overflow:ellipsis;white-space:nowrap}.workHighlight small{color:var(--faint);font-size:11.5px;line-height:1.45}
 .workTagsCard,.workRhythm{padding:15px 16px;margin-top:10px}.workTagGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.workTagTile{display:grid;align-content:start;gap:4px;min-width:0;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.02);color:var(--fg);font:inherit;text-align:left;cursor:pointer}.workTagTile:hover,.workTagTile:focus-visible{border-color:var(--tone);background:rgba(255,255,255,.045);outline:none}.workTagName{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:700}.workTagName i{flex:0 0 auto;width:8px;height:8px;border-radius:50%;background:var(--tone)}.workTagTile strong{font-size:18px;font-weight:700}.workTagStats{color:var(--dim);font-size:11.5px}.workTagTile small{color:var(--faint);font-size:11px;line-height:1.4}
 .workRhythm .workSplit{grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:32px}.workHeat{display:grid;grid-template-columns:30px repeat(24,minmax(0,1fr));gap:3px;align-items:center}.workHeat>span{color:var(--dim);font-size:10.5px}.workHeat>span.h{grid-column:span 6;color:var(--faint);font-size:10px}.workHeat>i{display:block;height:16px;border-radius:3px;background:rgba(255,255,255,.035)}.workHeat>i[data-v]{background:color-mix(in oklab,var(--spectrum-cyan) calc(var(--v) * 100%),rgba(255,255,255,.035))}.workBandList{display:grid;gap:2px}.workBand{display:grid;grid-template-columns:118px minmax(0,1fr) 52px;grid-template-areas:"label bar value" ". note note";align-items:center;column-gap:10px;row-gap:3px;padding:7px 6px}.workBand>span:first-child{grid-area:label;font-size:12.5px}.workBand>span small{display:block;color:var(--faint);font-size:10.5px}.workBand .workBarTrack{grid-area:bar;height:10px;border-radius:4px;background:rgba(255,255,255,.04);overflow:hidden}.workBand .workBarTrack i{display:block;height:100%;border-radius:4px;background:var(--spectrum-cyan)}.workBand b{grid-area:value;text-align:right;font-size:12px}.workBand>small{grid-area:note;color:var(--faint);font-size:10.5px}.workBand[data-few=true] .workBarTrack i{opacity:.45}
 @media(max-width:1180px){.workRhythm .workSplit{grid-template-columns:1fr}}.workSpend .workSplit{grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:32px}.workBarRow[data-muted=true] .workBarTrack i{background:var(--w-unclear)}.workBarRow[data-muted=true] .workBarLabel{color:var(--dim)}
@@ -1202,11 +1201,23 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 	   <div class=workStatusActions>
 	    <label class=workPause hidden id=w-pause-wrap><span class=workSrOnly>Pause work insights</span><select class=filterSelect id=w-pause aria-label="Pause work insights"><option value="">Pause…</option><option value=1h>Pause for 1 hour</option><option value=tomorrow>Pause until tomorrow</option><option value=indefinite>Pause until resumed</option></select></label>
 	    <button class=tbtn id=w-resume type=button hidden>Resume</button>
+    <button class=tbtn id=w-setup-retry type=button hidden>Retry setup</button>
 	    <button class=tbtn id=w-open-settings type=button>Settings</button>
 	   </div>
 	  </section>
-	  <section class=workKpis id=w-kpis aria-label="Period summary for sessions started in this period"></section>
-	  <section class=workHighlights id=w-highlights aria-label="Highlights for this period"></section>
+  <section class="card workSizing" id=w-module-sizing>
+   <div class=workCardHead><div><h2 class=fieldtip tabindex=0 aria-description="Spend by request complexity, split by model tier and reasoning effort. Savings are estimates." data-tip="Spend by request complexity, split by model tier and reasoning effort. Savings are estimates.">Right-sizing</h2><div class=subline>Ways to spend less on models without losing results. Savings are estimates.</div></div></div>
+   <div class=workSavings id=w-savings></div>
+   <div class=workTableWrap><table class=workIssues id=w-opportunities></table></div>
+   <div class="workSplit workMixSplit">
+    <div><div class=workSubhead><h3>Model tier</h3><span>share of spend</span></div><div class=workMix id=w-tier-mix></div></div>
+    <div><div class=workSubhead><h3>Reasoning effort</h3><span>share of spend</span></div><div class=workMix id=w-effort-mix></div></div>
+   </div>
+   <details class=workTableToggle><summary>View as tables</summary>
+    <div class=workSizingGrid id=w-sizing role=table aria-label="Right-sizing grid"></div>
+    <div class=workTableWrap><table class=tbl id=w-effort-table></table></div>
+   </details>
+  </section>
 	  <section class="card workSpend" id=w-module-allocation>
 	   <div class=workCardHead><div><h2>Where the spend went</h2><div class=subline id=w-spend-note></div></div></div>
 	   <div class=workSplit>
@@ -1240,19 +1251,6 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
    <div class=workCardHead><div><h2 class=fieldtip tabindex=0 aria-description="Faded pushback meters have fewer than 20 labeled follow-up turns." data-tip="Faded pushback meters have fewer than 20 labeled follow-up turns.">Model choices</h2><div class=subline>Top models by spend</div></div></div>
    <div class=workTableWrap><table class=workScore id=w-scorecard></table></div>
    <details class=workTableToggle><summary>By kind of work</summary><div class=workTableWrap><table class=tbl id=w-fit-table></table></div></details>
-  </section>
-  <section class="card workSizing" id=w-module-sizing>
-   <div class=workCardHead><div><h2 class=fieldtip tabindex=0 aria-description="Spend by request complexity, split by model tier and reasoning effort. Savings are estimates." data-tip="Spend by request complexity, split by model tier and reasoning effort. Savings are estimates.">Right-sizing</h2><div class=subline>Striped: more model or effort than routine work needs, or a light model on complex work</div></div></div>
-   <div class=workSplit>
-    <div><div class=workSubhead><h3>Model tier</h3><span>share of spend</span></div><div class=workMix id=w-tier-mix></div></div>
-    <div><div class=workSubhead><h3>Reasoning effort</h3><span>share of spend</span></div><div class=workMix id=w-effort-mix></div></div>
-   </div>
-   <div class=workSavings id=w-savings></div>
-   <div class=workTableWrap><table class=workIssues id=w-opportunities></table></div>
-   <details class=workTableToggle><summary>View as tables</summary>
-    <div class=workSizingGrid id=w-sizing role=table aria-label="Right-sizing grid"></div>
-    <div class=workTableWrap><table class=tbl id=w-effort-table></table></div>
-   </details>
   </section>
   <div class=efficiencyEvidence>Sessions started in this period · local model labels are estimates · text goes only to Ollama on this machine · select any bar or row to open its sessions.</div>
 	 </div>
@@ -1497,7 +1495,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
    <section class="card pad workSettings" id=work-insights-settings hidden>
     <div class=softwareUpdateHead><div><h2 class=fieldtip tabindex=0 aria-description="A local model labels each session's area, work type, complexity, and pushback so the Work page can show what spend went into." data-tip="A local model labels each session's area, work type, complexity, and pushback so the Work page can show what spend went into.">Work insights</h2><div class=subline>A local model reads the prompts you typed, plus the last few lines of the assistant reply before each one (to spot pushback). It never reads tool output or files. Text goes only to the Ollama address below on this machine, cloud models are refused, and Token Meter stores labels, never text.</div></div><span class=agentAccessBadge id=work-settings-badge>Off</span></div>
     <div class=softwareUpdateToggles>
-     <label class=softwareUpdateToggle><input id=work-enabled type=checkbox><span><b>Label sessions with a local model</b><small>Off by default. Requires Ollama and the classifier model.</small></span></label>
+     <label class=softwareUpdateToggle><input id=work-enabled type=checkbox><span><b>Label sessions with a local model</b><small>Off by default. Turning it on sets up everything it needs.</small></span></label>
      <label class=softwareUpdateToggle><input id=work-battery type=checkbox checked><span><b>Pause while on battery</b><small>Resumes automatically on power.</small></span></label>
     </div>
     <div class=workSettingsGrid>
@@ -1506,7 +1504,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
      <label class=settingsField><span>Pace</span><select class=filterSelect id=work-rate><option value=5>5 labels / min (default)</option><option value=10>10 labels / min</option><option value=20>20 labels / min</option><option value=40>40 labels / min</option><option value=60>60 labels / min</option></select></label>
      <label class=settingsField><span>History to label</span><select class=filterSelect id=work-backfill><option value=30>Last 30 days</option><option value=90>Last 90 days</option><option value=365>Last 365 days</option><option value=0>All history</option></select></label>
     </div>
-    <div class=workSetupHint>Set up the model once: <code>./scripts/setup-work-classifier</code> downloads Jet (about 8 GB, Apache-2.0) and imports it into Ollama as a 4-bit model.</div>
+    <div class=workSetupHint>Turning this on sets everything up in the background: Token Meter installs a pinned Ollama if this Mac doesn’t have one, downloads the Jet model (about 8.4 GB, Apache-2.0), imports it as a 4-bit model, and deletes the download. It needs about 20 GB free while it sets up and about 3 GB after.</div>
     <div class=workAreasHead><h3>Areas</h3><span class=subline id=work-areas-count></span></div>
     <div class=workAreas id=work-areas></div>
     <div class=settingsActions><button class=tbtn id=work-area-add type=button>Add area</button><button class=tbtn id=work-save type=button>Save</button><button class="tbtn clearFilters" id=work-areas-reset type=button>Restore default areas</button><label class=workPause><span class=workSrOnly>Pause work insights</span><select class=filterSelect id=work-pause aria-label="Pause work insights"><option value="">Pause…</option><option value=1h>Pause for 1 hour</option><option value=tomorrow>Pause until tomorrow</option><option value=indefinite>Pause until resumed</option><option value=resume>Resume</option></select></label><button class="tbtn clearFilters" id=work-clear type=button>Delete all labels</button><span class=settingsStatus id=work-settings-status>Saved locally.</span></div>
@@ -5909,6 +5907,31 @@ function workDuration(seconds){
  const minutes=Math.max(1,Math.round(seconds/60));
  return minutes<90?`about ${minutes} min left`:`about ${Math.round(minutes/60)} h left`;
 }
+const WORK_SETUP_ACTIVE=['checking','installing_ollama','starting_ollama','downloading_model','importing'];
+let workSetupTimer=0;
+function workGigabytes(bytes){return `${(Math.max(0,bytes||0)/1e9).toFixed(1)} GB`;}
+function workSetupCopy(setup){
+ if(!setup)return null;
+ const progress=setup.total_bytes?`${workGigabytes(setup.done_bytes)} of ${workGigabytes(setup.total_bytes)}`:'';
+ return {
+  checking:['Setup','Checking Ollama','Looking for Ollama and the classifier model on this Mac.'],
+  installing_ollama:['Setup',`Installing Ollama ${setup.ollama_version||''}`.trim(),`${progress} · a pinned, signed build that runs only on this Mac.`],
+  starting_ollama:['Setup','Starting Ollama','Ollama runs in the background on this Mac only.'],
+  downloading_model:['Setup','Downloading the classifier model',`${progress} · the download resumes if it is interrupted.`],
+  importing:['Setup','Preparing the model','Converting it to a 4-bit model. This can take a few minutes.'],
+  failed:['Setup',{network:'The download didn’t finish',verify:'A download didn’t match its checksum',disk_space:'Not enough disk space',ollama_start:'Ollama didn’t start',import:'Importing the model failed'}[setup.reason]||'Setup stopped',
+   {network:'Check the internet connection, then select Retry setup.',verify:'The file was deleted. Select Retry setup to download it again.',disk_space:`Free up about ${workGigabytes(setup.needed_bytes)}, then select Retry setup.`,ollama_start:'Select Retry setup to try again.',import:'Select Retry setup to try again.'}[setup.reason]||'Select Retry setup to try again.'],
+ }[setup.state]||null;
+}
+async function refreshWorkStatus(){
+ if(!WORK||!$('view-work').classList.contains('on'))return;
+ try{
+  const response=await fetch('/work-insights/status',{cache:'no-store'}),payload=await response.json();
+  if(!payload.ok)return;
+  WORK.status=payload.status;WORK.settings=payload.settings;renderWorkStatus(WORK);
+  if(payload.status?.setup?.state==='ready')loadWork();
+ }catch(error){}
+}
 function renderWorkStatus(payload){
  const status=payload?.status||{},settings=payload?.settings||{},coverage=payload?.insights?.coverage||{};
  const state=status.reason==='delete_pending'?'storage_error':settings.enabled?status.state||'idle':'disabled';
@@ -5916,7 +5939,7 @@ function renderWorkStatus(payload){
  const progress=`Labeled ${share}% of sessions in this period${status.pending?` · ${status.pending.toLocaleString()} pending`:''}${status.eta_s&&state==='running'?` · ${workDuration(status.eta_s)}`:''}`;
  const copy={
   disabled:['Off','Work insights are off','Turn on local classification in Settings to label sessions.'],
-  setup_needed:['Setup',status.reason==='remote_model'?'Cloud model refused':'Classifier model not found',status.reason==='model_missing'?`Run scripts/setup-work-classifier, then keep Ollama running. Looking for “${settings.model||'token-meter-jet'}”.`:status.reason==='remote_model'?'That Ollama model runs on another host. Choose a local model in Settings.':'Start Ollama on this machine, then Token Meter retries automatically.'],
+  setup_needed:['Setup',status.reason==='remote_model'?'Cloud model refused':'Classifier model not found',status.reason==='model_missing'?`Looking for “${settings.model||'token-meter-jet'}”. Select Retry setup to install it.`:status.reason==='remote_model'?'That Ollama model runs on another host. Choose a local model in Settings.':'Start Ollama on this machine, then Token Meter retries automatically.'],
   running:['Running','Labeling sessions',progress],
   idle:['Ready','Up to date',progress],
   paused:['Paused','Paused',status.paused_until==='indefinite'?'Paused until you resume.':`Paused until ${workClock(status.paused_until)}.`],
@@ -5924,8 +5947,13 @@ function renderWorkStatus(payload){
   backoff:['Retrying',status.reason==='internal_error'?'Recovering from an internal error':'Can’t reach Ollama',status.retry_at?`Retrying at ${workClock(status.retry_at)}. Queued work is kept.`:'Retrying shortly. Queued work is kept.'],
   storage_error:['Error',status.reason==='delete_pending'?'Deleting labels didn’t finish':'Can’t save labels',status.reason==='delete_pending'?'Labeling is stopped until the delete succeeds. Token Meter retries every five minutes.':'Token Meter retries every five minutes.'],
  }[state]||['Ready','Up to date',progress];
- const pill=$('w-state');pill.dataset.state=state;pill.textContent=copy[0];
- $('w-status-title').textContent=copy[1];$('w-status-detail').textContent=copy[2];
+ const setup=settings.enabled?status.setup:null,setupCopy=workSetupCopy(setup);
+ const shown=setupCopy||copy;
+ const pill=$('w-state');pill.dataset.state=setupCopy?(setup.state==='failed'?'setup_needed':'running'):state;pill.textContent=shown[0];
+ $('w-status-title').textContent=shown[1];$('w-status-detail').textContent=shown[2];
+ $('w-setup-retry').hidden=!(setup&&(setup.state==='failed'||(state==='setup_needed'&&setup.state!=='ready'&&!WORK_SETUP_ACTIVE.includes(setup.state))));
+ clearTimeout(workSetupTimer);
+ if(setup&&WORK_SETUP_ACTIVE.includes(setup.state))workSetupTimer=setTimeout(refreshWorkStatus,4000);
  $('w-pause-wrap').hidden=!settings.enabled||state==='paused';
  $('w-resume').hidden=state!=='paused';
 }
@@ -5941,31 +5969,6 @@ function workMonthName(month,{year=false,partial=false}={}){
  if(Number.isNaN(date.getTime()))return month;
  const text=date.toLocaleDateString([],year?{month:'short',year:'numeric'}:{month:'short'});
  return partial?`${text} · so far`:text;
-}
-function workDelta(current,previous,{kind='rate',better='up'}={}){
- if(current==null)return '<span class="workDelta workMuted">--</span>';
- if(previous==null)return '<span class="workDelta workMuted">No earlier period</span>';
- const diff=kind==='rate'?(current-previous)*100:(previous?100*(current/previous-1):null);
- if(diff==null||!Number.isFinite(diff))return '<span class="workDelta workMuted">No earlier period</span>';
- const up=diff>0,good=Math.abs(diff)<0.5?null:(better==='up')===up;
- const text=kind==='rate'?`${up?'+':''}${diff.toFixed(1)} pts`:`${up?'+':''}${Math.round(diff)}%`;
- return `<span class=workDelta data-tone="${good==null?'':good?'good':'bad'}">${up?'▲':Math.abs(diff)<0.5?'■':'▼'} ${esc(text)}</span>`;
-}
-function renderWorkKpis(insights){
- const kpis=insights?.kpis,now=kpis?.current,host=$('w-kpis');
- if(!now){host.innerHTML='';return;}
- // Compare only with the calendar months the server reports, and only when they have judged sessions.
- const before=kpis.previous&&kpis.previous.judged_sessions?kpis.previous:null,prior=kpis?.previous_months||[];
- const year=prior.length&&prior[0].slice(0,4)!==String(new Date().getFullYear());
- const span=!before||!prior.length?'':insights.grain==='day'?(prior.length===1?' vs the day before':` vs the ${prior.length} days before`):` vs ${workMonthName(prior[0],{year})}${prior.length>1?`–${workMonthName(prior[prior.length-1],{year})}`:''}`;
- const tile=(label,value,detail,delta,tip)=>`<div class="card workKpi"><span class="workKpiLabel fieldtip" tabindex=0 data-tip="${esc(tip)}" aria-description="${esc(tip)}">${esc(label)}</span><strong class=mono>${value}</strong><span class=workKpiDetail>${detail}</span>${delta}</div>`;
- const compare=(current,previous,options)=>workDelta(current,previous,options)+(current!=null&&previous!=null&&span?`<small class=workMuted>${esc(span)}</small>`:'');
- host.innerHTML=[
-  tile('Resolved sessions',now.resolved_rate==null?'--':workPercent(now.resolved_rate),`of ${now.judged_sessions.toLocaleString()} judged${now.few_samples?' · few':''}`,compare(now.resolved_rate,before?.resolved_rate,{kind:'rate',better:'up'}),'Accepted without pushback or recovered after it, as a share of sessions started in this period whose follow-ups are labeled.'),
-  tile('Pushback rate',now.pushback?workPercent(now.pushback.rate):'--',`of ${(now.pushback?.samples||0).toLocaleString()} follow-ups`,compare(now.pushback?.rate,before?.pushback?.rate,{kind:'rate',better:'down'}),'Share of follow-up turns, in sessions started in this period, where you told the agent its previous work was wrong, broken, or not what you asked.'),
-  tile('Cost per resolved session',now.cost_per_resolved==null?'--':money(now.cost_per_resolved),'',compare(now.cost_per_resolved,before?.cost_per_resolved,{kind:'ratio',better:'down'}),'Spend on resolved sessions started in this period, divided by how many there were.'),
-  tile('Spend on unresolved sessions',now.judged_sessions?money(now.ended_spend):'--',now.ended_share==null?'':`${workPercent(now.ended_share)} of spend`,compare(now.judged_sessions?now.ended_share:null,before?.ended_share,{kind:'rate',better:'down'}),'Spend on sessions started in this period whose last labeled follow-up was a pushback.'),
- ].join('');
 }
 function renderWorkSpend(insights){
  const allocation=insights?.allocation||[],segments=insights?.areas||[],unit=insights?.grain==='day'?'day':'month';
@@ -6084,18 +6087,26 @@ function renderWorkMix(insights){
 function workFlagReason(cell){
  return {possible_overspend:'premium model on routine work',possible_false_economy:'light model on complex work',possible_overthinking:'high effort on routine work'}[cell?.flag]||'worth reviewing';
 }
-const WORK_ISSUE_LABELS={premium_routine:'Routine work on premium models',effort_routine:item=>`${item.effort} effort on routine work`,light_complex:'Complex work on light models'};
+function workSuggestion(item){
+ const work=WORK_TYPE_LABELS[item.work_type]||item.work_type||'';
+ switch(item.kind){
+  case 'premium_routine':return{title:'Use a standard model for routine work',detail:`${item.sessions.toLocaleString()} routine session${item.sessions===1?'':'s'} ran on premium models.`,drill:{complexity:item.complexity,tier:item.tier}};
+  case 'effort_routine':return{title:`Lower reasoning effort on routine work`,detail:`${item.sessions.toLocaleString()} routine session${item.sessions===1?'':'s'} used ${item.effort} effort.`,drill:{complexity:item.complexity,effort:item.effort}};
+  case 'light_complex':return{title:'Use a stronger model for complex work',detail:`Complex work on light models got pushback on ${workPercent(item.rework?.rate)} of follow-ups.`,drill:{complexity:item.complexity,tier:item.tier}};
+  case 'switch_model':return{title:`Try ${item.to_model} for ${item.work_type==='other'?'non-software requests':work.toLowerCase()}`,detail:`${workPercent(item.to_rate)} resolved at ${money(item.to_cost)} per resolved session, vs ${workPercent(item.from_rate)} at ${money(item.from_cost)} on ${item.model}.`,drill:{work_type:item.work_type,model:item.model,model_runtime:item.runtime}};
+  case 'long_threads':return{title:'Start a fresh session sooner',detail:`Sessions with ${item.threshold_turns}+ requests cost ${item.ratio.toFixed(1)}× more per request than short ones, because each request re-sends the growing context.`,drill:{tag:'long_thread'}};
+  default:return{title:item.kind,detail:'',drill:null};
+ }
+}
 function renderWorkOpportunities(insights){
- const rows=insights?.opportunities||[],table=$('w-opportunities'),savings=$('w-savings');
- const flagged=insights?.right_sizing?.flagged||{},estimate=rows.reduce((sum,item)=>sum+(item.estimate!=null?Math.max(0,item.spend-item.estimate):0),0);
- const premium=rows.filter(item=>item.kind==='premium_routine'),unpriced=premium.length&&premium.every(item=>item.estimate==null);
- const savingNote=!insights?.right_sizing?.tiers_known?'model price tiers are unavailable':estimate?'estimate, if routine work used standard models':unpriced?'needs model prices for premium and standard tiers':'no routine work on premium models';
- savings.innerHTML=`<div><span>Spend to review</span><strong>${money(flagged.spend||0)}</strong><small>${flagged.share==null?'no labeled spend yet':`${workPercent(flagged.share)} of complexity-labeled spend`}</small></div><div><span>Possible saving</span><strong style="color:${estimate?'var(--good)':'var(--fg)'}">${estimate?money(estimate):'--'}</strong><small>${savingNote}</small></div><div><span>Issues to review</span><strong>${rows.length}</strong><small>${rows.length?'listed below':'nothing stands out'}</small></div>`;
+ const rows=insights?.recommendations||[],table=$('w-opportunities'),savings=$('w-savings');
+ const flagged=insights?.right_sizing?.flagged||{},top=rows.reduce((best,item)=>(item.saving||0)>(best?.saving||0)?item:best,null);
+ savings.innerHTML=`<div><span>Spend to review</span><strong>${money(flagged.spend||0)}</strong><small>${flagged.share==null?'no complexity labels yet':`${workPercent(flagged.share)} of complexity-labeled spend`}</small></div><div><span>Biggest possible saving</span><strong style="color:${top?'var(--good)':'var(--fg)'}">${top?money(top.saving):'--'}</strong><small>${top?esc(workSuggestion(top).title):!insights?.right_sizing?.tiers_known?'model price tiers are unavailable':'nothing stands out yet'}</small></div><div><span>Suggestions</span><strong>${rows.length}</strong><small>${rows.length?'savings are estimates and can overlap':'check back as more sessions are labeled'}</small></div>`;
  if(!rows.length){table.innerHTML='';return;}
- table.innerHTML=`<thead><tr><th>What to review</th><th>Sessions</th><th>Spend</th><th>Pushback</th><th>Possible saving</th></tr></thead><tbody>${rows.map(item=>{
-  const label=typeof WORK_ISSUE_LABELS[item.kind]==='function'?WORK_ISSUE_LABELS[item.kind](item):WORK_ISSUE_LABELS[item.kind]||item.kind;
-  const filters=item.kind==='effort_routine'?{complexity:item.complexity,effort:item.effort}:{complexity:item.complexity,tier:item.tier};
-  return `<tr><td><button type=button class=workDrillBtn data-drill="${esc(JSON.stringify(filters))}" data-drill-label="${esc(label)}"><span class=workIssueKind aria-hidden=true>▲</span><span>${esc(label)}</span></button></td><td><span class=mono>${item.sessions.toLocaleString()}</span></td><td><span class=mono>${money(item.spend)}</span></td><td><span class=mono>${item.rework?workPercent(item.rework.rate):'<span class=workMuted>--</span>'}</span></td><td><span class=mono>${item.estimate!=null?money(Math.max(0,item.spend-item.estimate))+' est':'<span class=workMuted>--</span>'}</span></td></tr>`;
+ table.innerHTML=`<thead><tr><th>Suggestion</th><th>Sessions</th><th>Spend</th><th>Possible saving</th></tr></thead><tbody>${rows.map(item=>{
+  const tip=workSuggestion(item);
+  const label=tip.drill?`<button type=button class=workDrillBtn data-drill="${esc(JSON.stringify(tip.drill))}" data-drill-label="${esc(tip.title)}"><span class=workIssueKind aria-hidden=true>▲</span><span class=workSuggestion><b>${esc(tip.title)}</b><small>${esc(tip.detail)}</small></span></button>`:esc(tip.title);
+  return `<tr><td>${label}</td><td><span class=mono>${item.sessions.toLocaleString()}</span></td><td><span class=mono>${money(item.spend)}</span></td><td><span class=mono>${item.saving!=null&&item.saving>0?`<span style="color:var(--good)">${money(item.saving)}</span> est`:'<span class=workMuted>--</span>'}</span></td></tr>`;
  }).join('')}</tbody>`;
 }
 function renderWorkFilters(insights){
@@ -6129,30 +6140,8 @@ function workSpark(values){
  const trend=first?`${last>=first?'Up':'Down'} ${Math.abs(Math.round(100*(last/first-1)))}% in the second half of the period`:'New in the second half of the period';
  return `<svg class=workSpark viewBox="0 0 ${W} ${H}" role=img aria-label="${esc(trend)}"><title>${esc(trend)}</title><path d="${values.map((value,index)=>`${index?'L':'M'}${x(index)},${y(value)}`).join('')}"></path><circle cx="${x(values.length-1)}" cy="${y(values[values.length-1])}" r=2></circle></svg>`;
 }
-function workShortDay(day){const date=new Date(`${day}T12:00:00`);return Number.isNaN(date.getTime())?day:date.toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'});}
 function workHours(seconds){const minutes=Math.round((seconds||0)/60);return minutes>=90?`${(minutes/60).toFixed(minutes%60?1:0)} h`:`${minutes} min`;}
 const WORK_BANDS={night:['Night','midnight–6 am'],morning:['Morning','6 am–noon'],afternoon:['Afternoon','noon–6 pm'],evening:['Evening','6 pm–midnight']};
-function renderWorkHighlights(insights){
- const host=$('w-highlights'),grain=insights?.grain,items=insights?.highlights||[];
- const order=['priciest_session','best_value_model','roughest_work','smoothest_work','busiest_day','streak','peak_time'];
- const cards=order.map(kind=>items.find(item=>item.kind===kind)).filter(Boolean).slice(0,6).map(item=>{
-  const work=WORK_TYPE_LABELS[item.work_type]||'';
-  const spec={
-   priciest_session:()=>({eyebrow:'Biggest session',value:money(item.cost),detail:[item.title?`“${item.title}”`:'Untitled session',work,item.share!=null?`${workPercent(item.share)} of spend`:''].filter(Boolean).join(' · '),tone:'var(--w2)',open:item.session}),
-   best_value_model:()=>({eyebrow:'Best value model',value:item.model,detail:`${money(item.cost_per_resolved)} per resolved session · ${item.ratio>=1.95?`${item.ratio.toFixed(1)}× less than`:'vs'} ${item.compare_model}`,tone:'var(--good)',drill:{model:item.model,model_runtime:item.runtime},label:`${item.model} · ${item.runtime}`}),
-   roughest_work:()=>({eyebrow:'Most pushback',value:work,detail:`${workPercent(item.resolved_rate)} resolved, the lowest of any kind of work`,tone:'var(--warn)',drill:{work_type:item.work_type},label:work}),
-   smoothest_work:()=>({eyebrow:'Smoothest work',value:work,detail:`${workPercent(item.resolved_rate)} resolved across ${item.sessions.toLocaleString()} sessions`,tone:'var(--good)',drill:{work_type:item.work_type},label:work}),
-   busiest_day:()=>({eyebrow:'Busiest day',value:workShortDay(item.day),detail:`${money(item.spend)} spent${item.sessions?` · ${item.sessions} session${item.sessions===1?'':'s'} started`:''}`,tone:'var(--w5)',drill:grain==='day'?{start_month:item.day}:null,label:workShortDay(item.day)}),
-   streak:()=>({eyebrow:'Longest streak',value:`${item.days} day${item.days===1?'':'s'} in a row`,detail:`${workShortDay(item.start)} to ${workShortDay(item.end)} · active on ${item.active_days} days`,tone:'var(--w7)'}),
-   peak_time:()=>({eyebrow:'Peak hours',value:`${WORK_BANDS[item.band]?.[0]||item.band}s`,detail:`${workPercent(item.share)} of sessions start ${WORK_BANDS[item.band]?.[1]||''}`,tone:'var(--w3)'}),
-  }[item.kind]();
-  const body=`<span class=workHighlightEyebrow>${esc(spec.eyebrow)}</span><strong title="${esc(spec.value)}">${esc(spec.value)}</strong><small>${esc(spec.detail)}</small>`;
-  if(spec.open)return `<button type=button class="card workHighlight" style="--hl:${spec.tone}" data-open-work-session="${esc(spec.open)}">${body}</button>`;
-  if(spec.drill)return `<button type=button class="card workHighlight" style="--hl:${spec.tone}" data-drill="${esc(JSON.stringify(spec.drill))}" data-drill-label="${esc(spec.label)}">${body}</button>`;
-  return `<div class="card workHighlight" style="--hl:${spec.tone}">${body}</div>`;
- });
- host.innerHTML=cards.join('');
-}
 const WORK_TAG_INFO={
  marathon:['Marathon',t=>`More than ${workHours(t.marathon_s)} of active time`,'var(--w5)'],
  big_spend:['Big spender',t=>`Top 10% by cost, over ${money(t.big_spend)}`,'var(--w2)'],
@@ -6162,6 +6151,7 @@ const WORK_TAG_INFO={
  rescued:['Rescued',()=>'Back on track after a pushback','var(--w-recovered)'],
  stuck:['Ended on pushback',()=>'The last follow-up was a pushback','var(--bad)'],
  one_shot:['One-shot',()=>'Done in a single request','var(--good)'],
+ long_thread:['Long thread',()=>'30 or more requests in one session','var(--w1)'],
 };
 function renderWorkTagCards(insights){
  const tags=insights?.tags||{},items=tags.items||[],thresholds=tags.thresholds||{},host=$('w-tags');
@@ -6194,7 +6184,7 @@ function renderWorkRhythm(insights){
 function renderWork(payload){
  WORK=payload;renderWorkStatus(payload);
  const insights=payload?.insights,areas=(payload?.settings?.areas||[]).map(area=>area.name);
- renderWorkFilters(insights);renderWorkKpis(insights);renderWorkHighlights(insights);renderWorkSpend(insights);renderWorkTagCards(insights);renderWorkRhythm(insights);
+ renderWorkFilters(insights);renderWorkSpend(insights);renderWorkTagCards(insights);renderWorkRhythm(insights);
  renderWorkRework(insights);renderWorkEconomics(insights);
  renderWorkScorecard(insights);renderWorkFit(insights);renderWorkMix(insights);renderWorkOpportunities(insights);renderWorkSizing(insights);renderWorkEffort(insights);
 }
@@ -6238,6 +6228,10 @@ $('w-resume').addEventListener('click',async()=>{
  catch(error){$('w-status-detail').textContent=error.message;}
 });
 $('w-open-settings').addEventListener('click',()=>setHashRoute('settings-work-insights'));
+$('w-setup-retry').addEventListener('click',async()=>{
+ try{const result=await postWorkAction('/work-insights/setup',{start:true});if(WORK){WORK.status=result.status;renderWorkStatus(WORK);}}
+ catch(error){$('w-status-detail').textContent=error.message;}
+});
 function renderWorkSettings(payload,{force=false}={}){
  if(!payload)return;
  WORK_SETTINGS=payload;

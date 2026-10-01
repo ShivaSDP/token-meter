@@ -378,10 +378,6 @@ smoke-level baseline, not a benchmark.
 All additions come from cached summary rows and existing labels; nothing new is
 sent to the classifier.
 
-- `highlights`: typed facts (`priciest_session`, `best_value_model`,
-  `smoothest_work`, `roughest_work`, `busiest_day`, `streak`, `peak_time`) with
-  sample floors (5 judged sessions per model, 10 per kind of work, 10 sessions
-  for peak time). The page writes the sentences.
 - `tags`: deterministic per-session tags (`marathon`, `big_spend`, `team`,
   `overkill`, `underpowered`, `rescued`, `stuck`, `one_shot`) with counts,
   spend, share, and resolved rate. Relative thresholds are strictly above the
@@ -393,3 +389,20 @@ sent to the classifier.
   pushback by time-of-day band.
 - Area rows draw a sparkline from the existing allocation buckets when the
   period has at least three.
+
+## Iteration 8: right-sizing first, efficiency suggestions, hands-off setup
+
+- The KPI tiles and highlights were removed; Right-sizing is the first module.
+- `recommendations`: ranked suggestions with `saving` estimates (`premium_routine`,
+  `effort_routine`, `light_complex` from the right-sizing cells, plus
+  `switch_model` per work type and `long_threads`), each with at least three
+  sessions. A `long_thread` tag (30+ requests) backs the long-thread drill.
+- `token_meter/services/work_setup.py` runs when Work insights are turned on and
+  at server start: it reuses a reachable Ollama 0.34+ or installs pinned Ollama
+  0.34.4 (archive SHA-256 and Apple team ID `3MU9H2V9Y9` checked; safe tar
+  extraction) under `~/Library/Application Support/Token Meter/ollama`, runs it
+  as LaunchAgent `com.token-meter.ollama` on 127.0.0.1:11435 with logs sent to
+  /dev/null, downloads the pinned Jet files with resume and per-file hashes,
+  checks free space first, imports with `-q int4`, and deletes the download.
+  Status exposes only a state, a reason code, and byte counts.
+  `scripts/setup-work-classifier` runs the same module.

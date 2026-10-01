@@ -419,7 +419,7 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
         "opportunities": opportunities,
         "tags": _tag_summary(in_window, tag_context),
         "rhythm": rhythm,
-        "highlights": _highlights(sessions, in_window, month_set, grain, scorecard, economics, rhythm),
+        "recommendations": _recommendations(in_window, opportunities),
         "coverage": {
             "sessions": len(in_window), "labeled_sessions": labeled_sessions,
             "turns": later_turns, "labeled_turns": min(labeled_turns, later_turns),
@@ -578,7 +578,9 @@ def _opportunities(cells, effort, tier_prices):
     return sorted(rows, key=lambda row: -row["spend"])
 
 
-TAG_ORDER = ("marathon", "big_spend", "team", "overkill", "underpowered", "rescued", "stuck", "one_shot")
+TAG_ORDER = ("marathon", "long_thread", "big_spend", "team", "overkill", "underpowered", "rescued", "stuck",
+             "one_shot")
+LONG_THREAD_TURNS = 30
 MIN_TAG_POPULATION = 10
 MARATHON_FLOOR_S = 3_600
 TEAM_MIN_CHILDREN = 3
@@ -607,6 +609,8 @@ def session_tags(s, context, outcome):
     long_run = context["long_run"]
     if s["duration"] >= MARATHON_FLOOR_S and (long_run is None or s["duration"] > long_run):
         tags.append("marathon")
+    if s["turns"] >= LONG_THREAD_TURNS:
+        tags.append("long_thread")
     if context["big_spend"] is not None and _cost(s) > context["big_spend"] > 0:
         tags.append("big_spend")
     if s["children"] >= context["team_children"]:
@@ -675,77 +679,81 @@ def _rhythm(in_window):
     }
 
 
-MIN_HIGHLIGHT_JUDGED = 5
-MIN_HIGHLIGHT_KIND = 10
+MIN_SWITCH_JUDGED = 5
+SWITCH_COST_RATIO = 0.7
+SWITCH_RATE_SLACK = 0.05
+SHORT_THREAD_TURNS = 10
+MIN_THREAD_SESSIONS = 5
+LONG_THREAD_RATIO = 1.5
+MAX_RECOMMENDATIONS = 8
+MIN_RECOMMENDATION_SESSIONS = 3
 
 
-def _longest_streak(days):
-    best, run, previous = (0, "", ""), 0, None
-    start = ""
-    for day in sorted(days):
-        current = datetime.date.fromisoformat(day)
-        if previous is not None and current - previous == datetime.timedelta(days=1):
-            run += 1
-        else:
-            run, start = 1, day
-        if run > best[0]:
-            best = (run, start, day)
-        previous = current
-    return best
-
-
-def _highlights(sessions, in_window, month_set, grain, scorecard, economics, rhythm):
-    """Typed, content-free facts for the period; the page writes the sentences."""
+def _switch_recommendations(in_window):
+    """Per kind of work: a model that resolves about as often as the usual one for much less per resolved session."""
+    groups = collections.defaultdict(lambda: collections.defaultdict(list))
+    for s in in_window:
+        if s["work_type"] and s["work_type"] != "unclear" and s["model"]:
+            groups[s["work_type"]][(s["model"], s["row"].get("runtime") or "")].append(s)
     out = []
-    total = sum(_cost(s) for s in in_window)
-    priced = [s for s in in_window if _cost(s) > 0]
-    if priced:
-        top = max(priced, key=_cost)
-        out.append({"kind": "priciest_session", "session": _trace_key(top["row"]),
-                    "title": str(top["row"].get("session_name") or top["row"].get("title") or "")[:90],
-                    "cost": round(_cost(top), 6), "share": _cost(top) / total if total else None,
-                    "work_type": top["work_type"], "model": top["model"], "outcome": _outcome(top)})
-    ranked = sorted((m for m in scorecard if m["cost_per_resolved"] is not None
-                     and m["judged_sessions"] >= MIN_HIGHLIGHT_JUDGED), key=lambda m: m["cost_per_resolved"])
-    if len(ranked) >= 2 and ranked[0]["cost_per_resolved"] > 0:
-        best, worst = ranked[0], ranked[-1]
-        out.append({"kind": "best_value_model", "model": best["model"], "runtime": best["runtime"],
-                    "cost_per_resolved": best["cost_per_resolved"], "compare_model": worst["model"],
-                    "compare_runtime": worst["runtime"], "compare_cost": worst["cost_per_resolved"],
-                    "ratio": worst["cost_per_resolved"] / best["cost_per_resolved"]})
-    kinds = [e for e in economics if e["work_type"] != "unclear" and e["resolved_rate"] is not None
-             and e["judged_sessions"] >= MIN_HIGHLIGHT_KIND]
-    if len(kinds) >= 2:
-        smooth = max(kinds, key=lambda e: (e["resolved_rate"], -e["sessions"]))
-        rough = min(kinds, key=lambda e: (e["resolved_rate"], -e["sessions"]))
-        if smooth["resolved_rate"] > rough["resolved_rate"]:
-            out.append({"kind": "smoothest_work", "work_type": smooth["work_type"],
-                        "resolved_rate": smooth["resolved_rate"], "sessions": smooth["judged_sessions"]})
-            out.append({"kind": "roughest_work", "work_type": rough["work_type"],
-                        "resolved_rate": rough["resolved_rate"], "sessions": rough["judged_sessions"]})
-    day_spend, active = collections.Counter(), set()
-    for s in sessions:
-        for day, cost in (s["row"].get("_day_cost") or {}).items():
-            day = str(day)[:10]
-            if _bucket(day, grain) in month_set:
-                day_spend[day] += float(cost or 0)
-                active.add(day)
-        active.update(d[:10] for d in s["days"] if _bucket(d, grain) in month_set)
-    active = {d for d in active if len(d) == 10 and d[4] == "-"}
-    if day_spend:
-        day, spend = max(day_spend.items(), key=lambda item: (item[1], item[0]))
-        if spend > 0:
-            out.append({"kind": "busiest_day", "day": day, "spend": round(spend, 6),
-                        "sessions": sum(1 for s in in_window if (s["row"].get("start") or "")[:10] == day)})
-    if len(active) >= 2:
-        length, first, last = _longest_streak(active)
-        out.append({"kind": "streak", "days": length, "start": first, "end": last, "active_days": len(active)})
-    busy = [b for b in rhythm["bands"] if b["sessions"]]
-    if rhythm["sessions"] >= MIN_TAG_POPULATION and busy:
-        peak = max(busy, key=lambda b: b["sessions"])
-        out.append({"kind": "peak_time", "band": peak["band"], "sessions": peak["sessions"],
-                    "share": peak["sessions"] / rhythm["sessions"]})
+    for work_type in WORK_TYPE_ORDER:
+        stats = []
+        for (model, runtime), group in groups.get(work_type, {}).items():
+            outcomes = [_outcome(s) for s in group]
+            judged = sum(o in ("accepted", "recovered", "ended_on_pushback") for o in outcomes)
+            resolved = [s for s, o in zip(group, outcomes) if o in ("accepted", "recovered")]
+            if judged < MIN_SWITCH_JUDGED or not resolved:
+                continue
+            stats.append({"model": model, "runtime": runtime, "sessions": len(group),
+                          "spend": sum(_cost(s) for s in group), "rate": len(resolved) / judged,
+                          "resolved": len(resolved), "cost": sum(_cost(s) for s in resolved) / len(resolved)})
+        if len(stats) < 2:
+            continue
+        usual = max(stats, key=lambda x: (x["sessions"], x["spend"]))
+        better = [x for x in stats if x is not usual and x["rate"] >= usual["rate"] - SWITCH_RATE_SLACK
+                  and x["cost"] <= usual["cost"] * SWITCH_COST_RATIO]
+        if not better:
+            continue
+        alt = min(better, key=lambda x: x["cost"])
+        out.append({"kind": "switch_model", "work_type": work_type,
+                    "model": usual["model"], "runtime": usual["runtime"],
+                    "to_model": alt["model"], "to_runtime": alt["runtime"],
+                    "from_cost": usual["cost"], "to_cost": alt["cost"],
+                    "from_rate": usual["rate"], "to_rate": alt["rate"],
+                    "sessions": usual["sessions"], "spend": round(usual["spend"], 6),
+                    "saving": round((usual["cost"] - alt["cost"]) * usual["resolved"], 6)})
     return out
+
+
+def _long_thread_recommendation(in_window):
+    """Long sessions re-send a growing context; compare their cost per request with short sessions."""
+    priced = [s for s in in_window if _cost(s) > 0 and s["turns"] > 0]
+    long = [s for s in priced if s["turns"] >= LONG_THREAD_TURNS]
+    short = [s for s in priced if s["turns"] <= SHORT_THREAD_TURNS]
+    if len(long) < MIN_THREAD_SESSIONS or len(short) < MIN_THREAD_SESSIONS:
+        return None
+    long_turns, short_turns = sum(s["turns"] for s in long), sum(s["turns"] for s in short)
+    long_rate = sum(_cost(s) for s in long) / long_turns
+    short_rate = sum(_cost(s) for s in short) / short_turns
+    if short_rate <= 0 or long_rate < LONG_THREAD_RATIO * short_rate:
+        return None
+    spend = sum(_cost(s) for s in long)
+    return {"kind": "long_threads", "threshold_turns": LONG_THREAD_TURNS, "sessions": len(long),
+            "spend": round(spend, 6), "ratio": long_rate / short_rate,
+            "long_cost_per_turn": long_rate, "short_cost_per_turn": short_rate,
+            "saving": round(max(0.0, spend - long_turns * short_rate), 6)}
+
+
+def _recommendations(in_window, opportunities):
+    """Ranked ways to spend less on models; savings are estimates and can overlap between items."""
+    recs = [dict(item, saving=round(item["spend"] - item["estimate"], 6) if item["estimate"] is not None else None)
+            for item in opportunities if item["sessions"] >= MIN_RECOMMENDATION_SESSIONS]
+    recs.extend(_switch_recommendations(in_window))
+    long = _long_thread_recommendation(in_window)
+    if long:
+        recs.append(long)
+    recs.sort(key=lambda item: (-(item["saving"] or 0), -item["spend"]))
+    return recs[:MAX_RECOMMENDATIONS]
 
 
 MAX_DRILL_SESSIONS = 50

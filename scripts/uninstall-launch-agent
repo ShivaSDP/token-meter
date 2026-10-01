@@ -6,11 +6,18 @@ SERVER_LABEL="com.token-meter.server"
 MENUBAR_LABEL="com.token-meter.menubar"
 SERVER_PLIST="$HOME/Library/LaunchAgents/$SERVER_LABEL.plist"
 MENUBAR_PLIST="$HOME/Library/LaunchAgents/$MENUBAR_LABEL.plist"
+OLLAMA_LABEL="com.token-meter.ollama"
+OLLAMA_PLIST="$HOME/Library/LaunchAgents/$OLLAMA_LABEL.plist"
+OLLAMA_DIR="$HOME/Library/Application Support/Token Meter/ollama"
 
+launchctl bootout "gui/$UID/$OLLAMA_LABEL" >/dev/null 2>&1 || true
+rm -f "$OLLAMA_PLIST"
+rm -rf "$OLLAMA_DIR"
 launchctl bootout "gui/$UID/$MENUBAR_LABEL" >/dev/null 2>&1 || true
 launchctl bootout "gui/$UID/$SERVER_LABEL" >/dev/null 2>&1 || true
 rm -f "$MENUBAR_PLIST" "$SERVER_PLIST"
 
+echo "Removed the Ollama runtime and model Token Meter installed for Work insights, if any"
 echo "Uninstalled $MENUBAR_LABEL"
 echo "Removed: $MENUBAR_PLIST"
 echo "Uninstalled $SERVER_LABEL"
