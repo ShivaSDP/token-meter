@@ -10778,10 +10778,13 @@ const state={session:'rollout-child.jsonl',source:{id:'task-1'},xsession:{curren
  {id:'task-1',session:'rollout-root.jsonl',title:'Root title'},
  {id:'task-1',session:'rollout-child.jsonl',title:'Child title'}]}};
 const sibling={...state,session:'rollout-other.jsonl'};
-console.log(JSON.stringify([sessionDisplayName(state),sessionDisplayName(sibling)]));
+// Older traces fall outside the recent rows but are in the All sessions inventory the user opened them from.
+var allSessionInventory=[{id:'task-1',session:'rollout-old.jsonl',title:'Old title'}];
+const older={...state,session:'rollout-old.jsonl'};
+console.log(JSON.stringify([sessionDisplayName(state),sessionDisplayName(sibling),sessionDisplayName(older)]));
 """
         result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
-        self.assertEqual(json.loads(result.stdout), ["Child title", "Session"])
+        self.assertEqual(json.loads(result.stdout), ["Child title", "Session", "Old title"])
 
     def test_every_session_entry_point_addresses_one_trace_file(self):
         for marker in (
