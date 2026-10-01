@@ -3,6 +3,7 @@ import unittest
 
 from token_meter.domain.agents import (
     aggregate_agent_usage,
+    build_agent_graph,
     build_agent_groups,
     find_agent_group,
 )
@@ -50,6 +51,58 @@ def session(session_id, *records, project=None):
 
 
 class AgentGroupDomainTests(unittest.TestCase):
+    def test_unresolved_children_are_reported_instead_of_silently_dropped(self):
+        """A child whose parent was never discovered must be disclosed."""
+        rows = [session(
+            "root-session",
+            agent("root", session_id="root-session", kind="root", depth=0),
+            agent("child", parent_id="root", session_id="child-session",
+                  cost=0.6),
+            agent("orphan", parent_id="archived-parent",
+                  session_id="orphan-session", cost=0.4),
+        )]
+        groups, unresolved = build_agent_graph(rows, now=30)
+        usage = aggregate_agent_usage(groups, unresolved=unresolved, now=30)
+
+        # The orphan is unresolved and reported by identity.
+        self.assertEqual([record["id"] for record in unresolved], ["orphan"])
+        # It is not a grouped child agent, so the rollup must say so.
+        self.assertEqual(usage["totals"]["agents"], 1)
+        self.assertEqual(usage["totals"]["unresolved_agents"], 1)
+        self.assertAlmostEqual(usage["totals"]["unresolved_known_cost"], 0.4)
+        self.assertEqual(
+            [row["id"] for row in usage["inventory"]], ["child"],
+        )
+        # The existing single-source wrapper still returns groups only.
+        self.assertEqual(build_agent_groups(rows, now=30), groups)
+
+    def test_unresolved_cost_stays_unavailable_when_its_price_is(self):
+        rows = [session(
+            "root-session",
+            agent("root", session_id="root-session", kind="root", depth=0),
+            agent("child", parent_id="root", session_id="child-session"),
+            agent("orphan", parent_id="gone", session_id="orphan-session",
+                  cost=None, cost_available=False),
+        )]
+        groups, unresolved = build_agent_graph(rows, now=30)
+        usage = aggregate_agent_usage(groups, unresolved=unresolved, now=30)
+
+        self.assertEqual(usage["totals"]["unresolved_agents"], 1)
+        # A missing price must not become a measured zero.
+        self.assertEqual(usage["totals"]["unresolved_known_cost"], 0)
+
+    def test_no_unresolved_children_reports_zero(self):
+        rows = [session(
+            "root-session",
+            agent("root", session_id="root-session", kind="root", depth=0),
+            agent("child", parent_id="root", session_id="child-session"),
+        )]
+        groups = build_agent_groups(rows, now=30)
+        usage = aggregate_agent_usage(groups, now=30)
+
+        self.assertEqual(usage["totals"]["unresolved_agents"], 0)
+        self.assertEqual(usage["totals"]["unresolved_known_cost"], 0)
+
     def test_builds_tree_and_selects_group_from_a_child_session(self):
         rows = [
             session("root-session", agent(
@@ -466,6 +519,82 @@ class AgentGroupDomainTests(unittest.TestCase):
             {row["kind"] for row in recent_codex["kinds"]},
             {"spawned", "internal"},
         )
+
+    def test_partial_session_marks_only_its_own_scopes_partial(self):
+        now = 1_000_000
+        pi_session = session(
+            "pi-root",
+            agent("pi-root-agent", session_id="pi-root", kind="root",
+                  depth=0, runtime="pi", cost=1, tokens=100,
+                  last_activity_at=now - 5),
+            agent("pi-child", parent_id="pi-root-agent", runtime="pi",
+                  role="reviewer", cost=0.5, tokens=50,
+                  last_activity_at=now - 5),
+        )
+        pi_session["_agent_records_partial"] = True
+        groups = build_agent_groups([
+            pi_session,
+            session(
+                "claude-root",
+                agent("claude-root-agent", session_id="claude-root",
+                      kind="root", depth=0, runtime="claude", cost=2,
+                      tokens=200, last_activity_at=now - 5),
+                agent("claude-child", parent_id="claude-root-agent",
+                      runtime="claude", role="reviewer", cost=3,
+                      tokens=300, last_activity_at=now - 5),
+            ),
+        ], now=now)
+
+        by_root = {group["root_session_id"]: group for group in groups}
+        pi_group = by_root["pi-root"]
+        claude_group = by_root["claude-root"]
+        self.assertFalse(pi_group["totals"]["cost_available"])
+        self.assertIsNone(pi_group["totals"]["cost"])
+        self.assertEqual(pi_group["totals"]["known_cost"], 1.5)
+        self.assertEqual(pi_group["coverage"]["cost"], "partial")
+        self.assertEqual(pi_group["coverage"]["tokens"], "partial")
+        self.assertTrue(claude_group["totals"]["cost_available"])
+        self.assertEqual(claude_group["coverage"]["cost"], "estimated")
+        self.assertEqual(claude_group["coverage"]["tokens"], "complete")
+
+        usage = aggregate_agent_usage(groups, now=now)
+        # The display limit was not reached; a partial session must not
+        # claim it was.
+        self.assertFalse(usage["inventory_truncated"])
+        self.assertEqual(usage["inventory_count"], 2)
+        self.assertFalse(usage["totals"]["cost_available"])
+        self.assertIsNone(usage["totals"]["cost"])
+        self.assertEqual(usage["totals"]["known_cost"], 3.5)
+        self.assertEqual(usage["totals"]["cost_covered_agents"], 2)
+        self.assertEqual(usage["totals"]["token_covered_agents"], 2)
+
+        scopes = {
+            (row["window"], row["runtime"]): row
+            for row in usage["scopes"]
+        }
+        claude = scopes[("all", "claude")]
+        self.assertTrue(claude["totals"]["cost_available"])
+        self.assertEqual(claude["totals"]["cost"], 3.0)
+        self.assertTrue(claude["totals"]["tokens_available"])
+        self.assertEqual(claude["totals"]["cost_covered_agents"], 1)
+        pi = scopes[("all", "pi")]
+        self.assertFalse(pi["totals"]["cost_available"])
+        self.assertIsNone(pi["totals"]["cost"])
+        self.assertEqual(pi["totals"]["known_cost"], 0.5)
+        self.assertFalse(scopes[("all", "")]["totals"]["cost_available"])
+        self.assertEqual(scopes[("all", "")]["totals"]["known_cost"], 3.5)
+
+        roles = {row["runtime"]: row for row in usage["roles"]}
+        # Kept runs stay priced so per-run averages are exact; the missing
+        # upstream runs show only as row-level unavailability.
+        self.assertFalse(roles["pi"]["cost_available"])
+        self.assertEqual(roles["pi"]["agents"], 1)
+        self.assertEqual(roles["pi"]["cost_covered_agents"], 1)
+        self.assertEqual(roles["pi"]["token_covered_agents"], 1)
+        self.assertEqual(roles["pi"]["known_cost"], 0.5)
+        self.assertTrue(roles["claude"]["cost_available"])
+        self.assertEqual(roles["claude"]["cost_covered_agents"], 1)
+        self.assertEqual(roles["claude"]["token_covered_agents"], 1)
 
     def test_usage_statistics_support_project_runtime_and_time_scopes(self):
         now = 1_000_000

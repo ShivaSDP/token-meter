@@ -1230,7 +1230,7 @@ class SurfaceContractTests(unittest.TestCase):
         self.assertLess(declaration, route)
         self.assertLess(session_filter, route)
         self.assertIn("if(h.startsWith('work-sessions')||h.startsWith('sessions-all?work=')){", self.page)
-        self.assertIn("if(workSessionFilter&&!workSessionFilter.keys.has(sessionRowKey(s)))return false;", self.page)
+        self.assertIn("const workRows=workSessionFilter?all.filter(s=>workSessionFilter.keys.has(sessionRowKey(s))):all;", self.page)
         self.assertIn("if(key==='work'){workSessionFilter=null;workFilterRequest++;}", self.page)
         self.assertNotIn("w-drawer", self.page)
 

@@ -144,10 +144,13 @@ def _totals(records):
     known_tokens = sum(
         record["tokens"] for record in records if record["tokens"] is not None
     )
-    cost_available = bool(records) and all(
+    # A record whose owning session dropped child evidence (for example a
+    # runtime run cap) cannot make any total that includes it complete.
+    incomplete = any(record.get("_coverage_partial") for record in records)
+    cost_available = bool(records) and not incomplete and all(
         record["cost_available"] for record in records
     )
-    tokens_available = bool(records) and all(
+    tokens_available = bool(records) and not incomplete and all(
         record["tokens_available"] for record in records
     )
     return {
@@ -254,8 +257,12 @@ def _public_agent(record, totals, now, attention_ids):
     return projected
 
 
-def build_agent_groups(session_rows, *, now=None, max_agents=100):
-    """Build bounded, cycle-free groups from adapter-supplied agent records."""
+def build_agent_graph(session_rows, *, now=None, max_agents=100):
+    """Build groups plus the records whose parent could not be resolved.
+
+    A child whose parent session was never discovered is reported here instead
+    of being silently dropped, so callers can disclose the coverage gap.
+    """
     now = float(time.time() if now is None else now)
     max_agents = max(1, min(100, int(max_agents or 100)))
     candidates = defaultdict(list)
@@ -265,11 +272,14 @@ def build_agent_groups(session_rows, *, now=None, max_agents=100):
             continue
         owner_session_id = _opaque_id(session_row.get("id"))
         owner_project = _project_key(session_row.get("project"))
+        coverage_partial = session_row.get("_agent_records_partial") is True
         for raw in session_row.get("_agent_records") or []:
             record = _normalize_record(raw, owner_session_id, owner_project)
             if record is None:
                 invalid_owner_ids.add(owner_session_id)
                 continue
+            if coverage_partial:
+                record["_coverage_partial"] = True
             candidates[record["id"]].append(record)
 
     records = {}
@@ -328,6 +338,12 @@ def build_agent_groups(session_rows, *, now=None, max_agents=100):
         root_session_id = root.get("session_id") or root.get("_owner_session_id")
         if not root_session_id:
             continue
+        # A session that dropped child evidence has at least one upstream run
+        # this group cannot see; count it so coverage reads "partial".
+        missing_upstream_runs = 1 if any(
+            member.get("_coverage_partial") for member in members
+        ) else 0
+        coverage_total = len(members) + missing_upstream_runs
         members.sort(key=lambda item: (item["depth"], item["id"]))
         totals = _totals(members)
         attention = _attention(members, totals)
@@ -351,11 +367,11 @@ def build_agent_groups(session_rows, *, now=None, max_agents=100):
                 ),
                 "tokens": _coverage(
                     sum(1 for item in members if item["tokens_available"]),
-                    len(members), "complete",
+                    coverage_total, "complete",
                 ),
                 "cost": _coverage(
                     sum(1 for item in members if item["cost_available"]),
-                    len(members), "estimated",
+                    coverage_total, "estimated",
                 ),
             },
             "totals": totals,
@@ -372,7 +388,14 @@ def build_agent_groups(session_rows, *, now=None, max_agents=100):
             "_session_ids": session_ids,
         })
     groups.sort(key=lambda group: group["root_session_id"])
-    return groups
+    return groups, unresolved
+
+
+def build_agent_groups(session_rows, *, now=None, max_agents=100):
+    """Build bounded, cycle-free groups from adapter-supplied agent records."""
+    return build_agent_graph(
+        session_rows, now=now, max_agents=max_agents,
+    )[0]
 
 
 def find_agent_group(groups, session_id):
@@ -618,7 +641,7 @@ def _inventory_row(record, group, attention, now):
 
 
 def aggregate_agent_usage(
-    groups, *, now=None, max_inventory=MAX_AGENT_USAGE_INVENTORY,
+    groups, *, unresolved=(), now=None, max_inventory=MAX_AGENT_USAGE_INVENTORY,
     max_role_days=MAX_AGENT_ROLE_DAYS,
 ):
     """Aggregate child-agent usage without folding root-session work into it."""
@@ -633,6 +656,17 @@ def aggregate_agent_usage(
             entries.append((record, group))
 
     result = _usage_body(entries)
+    # Records whose parent could not be resolved are counted in totals but have
+    # no group, so the rollup must disclose them rather than look complete.
+    unresolved_records = [
+        record for record in (unresolved or ()) if isinstance(record, dict)
+    ]
+    result["totals"]["unresolved_agents"] = len(unresolved_records)
+    result["totals"]["unresolved_known_cost"] = round(sum(
+        float(record.get("cost") or 0)
+        for record in unresolved_records
+        if record.get("cost_available") is True
+    ), 6)
     max_inventory = max(
         1, min(MAX_AGENT_USAGE_INVENTORY, int(max_inventory or 1)),
     )

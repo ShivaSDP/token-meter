@@ -17,7 +17,9 @@ from unittest import mock
 
 import meter
 from token_meter.contracts import DiscoveryContext
+from token_meter.projections import agent_usage_projection
 from token_meter.runtimes.codex import CodexRuntimeAdapter
+from token_meter.runtimes import pi as pi_runtime
 
 
 class BuilderRecapDomainTests(unittest.TestCase):
@@ -2449,6 +2451,31 @@ class WaitTimeTests(unittest.TestCase):
 
 
 class ModelPerformanceTests(unittest.TestCase):
+    def setUp(self):
+        # Matched-pace comparisons are cached per model pair and persisted, so
+        # each test starts from a clean in-memory and on-disk cache and never
+        # writes into the developer's home directory.
+        self._pace_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._pace_temp.cleanup)
+        self._pace_cache_path = Path(self._pace_temp.name) / "matched-pace-cache.json"
+        patcher = mock.patch.object(
+            meter, "TOKEN_METER_MATCHED_PACE_CACHE", str(self._pace_cache_path),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(meter._matched_pace_pair_cache.clear)
+        self.addCleanup(
+            setattr, meter, "_matched_pace_pair_cache_loaded", False,
+        )
+        self.addCleanup(meter._matched_pace_build_state.update, building=False)
+        self.addCleanup(setattr, meter, "_matched_pace_persist", False)
+        meter._matched_pace_pair_cache.clear()
+        meter._matched_pace_pair_cache_loaded = False
+        meter._matched_pace_build_state["building"] = False
+        meter._matched_pace_persist = True
+        meter._matched_pace_cache.update(signature=None, data=None)
+        self.addCleanup(meter._matched_pace_cache.update, signature=None, data=None)
+
     def test_parse_iso_reuses_bounded_timestamp_conversions(self):
         meter.parse_iso.cache_clear()
         timestamp = "2026-08-14T04:30:00.123Z"
@@ -3245,6 +3272,483 @@ class ModelPerformanceTests(unittest.TestCase):
         self.assertGreater(comparison.call_count, unchanged_call_count)
         self.assertEqual(first["windows"]["today"][0]["pace_ratio"], 2)
         self.assertEqual(changed["windows"]["today"][0]["pace_ratio"], 3)
+
+    def test_matched_pace_rebuilds_only_pairs_touching_a_changed_model(self):
+        """A new turn for one model must not recompute every model pair."""
+        now = datetime.datetime(2026, 8, 11, 12, 0, 0).timestamp()
+
+        def samples(duration, offset):
+            return [{
+                "duration_s": duration, "ts": now + offset + index,
+                "day": "2026-08-11", "input_tokens": 10000,
+                "peak_input_tokens": 10000, "cache_read_tokens": 0,
+                "output_tokens": 1000, "tool_calls": 0, "model_calls": 1,
+            } for index in range(20)]
+
+        names = ("alpha", "beta", "gamma", "delta")
+        groups = {name: samples(10 + index, index * 100)
+                  for index, name in enumerate(names)}
+        original = meter.matched_pace_comparison
+        with mock.patch.object(
+            meter, "matched_pace_comparison", wraps=original,
+        ) as comparison:
+            meter.matched_pace_windows(groups, now_ts=now)
+            first_call_count = comparison.call_count
+            changed_groups = {**groups, "gamma": samples(99, 500)}
+            meter.matched_pace_windows(changed_groups, now_ts=now)
+            after_change = comparison.call_count
+
+        # Four models form six pairs across six windows. Only the three pairs
+        # that include the changed model may be recomputed.
+        self.assertEqual(first_call_count, 6 * 6)
+        self.assertEqual(after_change - first_call_count, 3 * 6)
+
+    def test_matched_pace_cached_pairs_match_a_cold_computation(self):
+        """Per-pair caching must not change any reported comparison."""
+        now = datetime.datetime(2026, 8, 11, 12, 0, 0).timestamp()
+
+        def samples(duration, offset):
+            return [{
+                "duration_s": duration, "ts": now + offset + index,
+                "day": "2026-08-11", "input_tokens": 10000,
+                "peak_input_tokens": 10000, "cache_read_tokens": 0,
+                "output_tokens": 1000, "tool_calls": 0, "model_calls": 1,
+            } for index in range(20)]
+
+        groups = {name: samples(10 + index, index * 100)
+                  for index, name in enumerate(("alpha", "beta", "gamma"))}
+        with_cached_pairs = meter.matched_pace_windows(groups, now_ts=now)
+        meter._matched_pace_pair_cache.clear()
+        meter._matched_pace_cache["signature"] = None
+        meter._matched_pace_cache["data"] = None
+        cold = meter.matched_pace_windows(groups, now_ts=now)
+
+        self.assertEqual(cold, with_cached_pairs)
+
+    def test_matched_pace_reuses_a_persisted_pair_cache_after_restart(self):
+        """A restart must reuse stored pairs instead of rebuilding every pair."""
+        now = datetime.datetime(2026, 8, 11, 12, 0, 0).timestamp()
+
+        def samples(duration, offset):
+            return [{
+                "duration_s": duration, "ts": now + offset + index,
+                "day": "2026-08-11", "input_tokens": 10000,
+                "peak_input_tokens": 10000, "cache_read_tokens": 0,
+                "output_tokens": 1000, "tool_calls": 0, "model_calls": 1,
+            } for index in range(20)]
+
+        groups = {name: samples(10 + index, index * 100)
+                  for index, name in enumerate(("alpha", "beta", "gamma"))}
+        original = meter.matched_pace_comparison
+        with mock.patch.object(
+            meter, "matched_pace_comparison", wraps=original,
+        ) as comparison:
+            first = meter.matched_pace_windows(groups, now_ts=now)
+            first_calls = comparison.call_count
+            # Simulate a process restart: drop in-memory state, keep the file.
+            meter._matched_pace_pair_cache.clear()
+            meter._matched_pace_pair_cache_loaded = False
+            meter._matched_pace_cache["signature"] = None
+            meter._matched_pace_cache["data"] = None
+            restarted = meter.matched_pace_windows(groups, now_ts=now)
+            restarted_calls = comparison.call_count - first_calls
+
+        self.assertGreater(first_calls, 0)
+        self.assertTrue(self._pace_cache_path.exists())
+        self.assertEqual(
+            restarted_calls, 0,
+            "a persisted pair cache must avoid recomputing unchanged pairs",
+        )
+        self.assertEqual(restarted, first)
+
+    def test_matched_pace_recovers_from_an_unusable_cache_file(self):
+        now = datetime.datetime(2026, 8, 11, 12, 0, 0).timestamp()
+
+        def samples(duration, offset):
+            return [{
+                "duration_s": duration, "ts": now + offset + index,
+                "day": "2026-08-11", "input_tokens": 10000,
+                "peak_input_tokens": 10000, "cache_read_tokens": 0,
+                "output_tokens": 1000, "tool_calls": 0, "model_calls": 1,
+            } for index in range(20)]
+
+        groups = {"alpha": samples(10, 0), "beta": samples(20, 100)}
+        for payload in (
+            "{ not json",
+            json.dumps({"schema": 999, "pairs": "unexpected"}),
+            json.dumps({
+                "schema": meter.MATCHED_PACE_CACHE_SCHEMA,
+                "pairs": [{"a_id": 5}, "junk"],
+            }),
+        ):
+            with self.subTest(payload=payload[:24]):
+                self._pace_cache_path.write_text(payload)
+                meter._matched_pace_pair_cache.clear()
+                meter._matched_pace_pair_cache_loaded = False
+                meter._matched_pace_cache["signature"] = None
+                meter._matched_pace_cache["data"] = None
+                result = meter.matched_pace_windows(groups, now_ts=now)
+                self.assertEqual(len(result["windows"]["today"]), 1)
+
+    def test_matched_pace_rebuild_releases_the_cache_lock(self):
+        """A slow rebuild must not block unrelated cross-session requests."""
+        now = datetime.datetime(2026, 8, 11, 12, 0, 0).timestamp()
+
+        def samples(duration, offset):
+            return [{
+                "duration_s": duration, "ts": now + offset + index,
+                "day": "2026-08-11", "input_tokens": 10000,
+                "peak_input_tokens": 10000, "cache_read_tokens": 0,
+                "output_tokens": 1000, "tool_calls": 0, "model_calls": 1,
+            } for index in range(20)]
+
+        groups = {"alpha": samples(10, 0), "beta": samples(20, 100)}
+        entered = threading.Event()
+        release = threading.Event()
+        real_build = meter._build_matched_pace_windows
+        acquired = False
+
+        def blocking_build(*args, **kwargs):
+            entered.set()
+            release.wait(timeout=10)
+            return real_build(*args, **kwargs)
+
+        with mock.patch.object(
+            meter, "_build_matched_pace_windows", side_effect=blocking_build,
+        ):
+            worker = threading.Thread(
+                target=meter.matched_pace_windows,
+                args=(groups,), kwargs={"now_ts": now}, daemon=True,
+            )
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(timeout=5))
+                acquired = meter._matched_pace_cache_lock.acquire(timeout=5)
+                if acquired:
+                    meter._matched_pace_cache_lock.release()
+            finally:
+                release.set()
+                worker.join(timeout=10)
+
+        self.assertTrue(
+            acquired,
+            "matched_pace_windows must not hold the cache lock while rebuilding",
+        )
+
+    @staticmethod
+    def _pace_groups(now, names=("alpha", "beta", "gamma"), day_offsets=(0,)):
+        """Build 20 timed turns per model on each day offset from ``now``."""
+        def samples(duration, offset):
+            rows = []
+            for day_offset in day_offsets:
+                ts = now - day_offset * 86400
+                day = datetime.date.fromtimestamp(ts).isoformat()
+                rows.extend({
+                    "duration_s": duration + day_offset, "ts": ts + offset + index,
+                    "day": day, "input_tokens": 10000,
+                    "peak_input_tokens": 10000, "cache_read_tokens": 0,
+                    "output_tokens": 1000, "tool_calls": 0, "model_calls": 1,
+                } for index in range(20))
+            return rows
+
+        return {name: samples(10 + index, index * 100)
+                for index, name in enumerate(names)}
+
+    @staticmethod
+    def _drop_pace_memory(loaded=False):
+        """Drop in-memory matched-pace state; ``loaded=False`` simulates restart."""
+        meter._matched_pace_pair_cache.clear()
+        meter._matched_pace_pair_cache_loaded = loaded
+        meter._matched_pace_cache["signature"] = None
+        meter._matched_pace_cache["data"] = None
+
+    def _cold_pace(self, groups, now):
+        self._drop_pace_memory(loaded=True)
+        return meter.matched_pace_windows(groups, now_ts=now)
+
+    def test_matched_pace_pair_cache_does_not_reuse_previous_day_windows(self):
+        now = datetime.datetime(2026, 8, 11, 12, 0, 0).timestamp()
+        tomorrow = now + 86400
+        groups = self._pace_groups(now, day_offsets=(0, 1))
+        meter.matched_pace_windows(groups, now_ts=now)
+        rolled = meter.matched_pace_windows(groups, now_ts=tomorrow)
+        cold = self._cold_pace(groups, tomorrow)
+
+        self.assertEqual(rolled, cold)
+        # The previous "today" samples are now "yesterday"; nothing is today.
+        self.assertFalse(any(row["available"] for row in rolled["windows"]["today"]))
+        self.assertTrue(all(row["available"] for row in rolled["windows"]["yesterday"]))
+
+    def test_matched_pace_persisted_pairs_do_not_survive_a_day_rollover(self):
+        now = datetime.datetime(2026, 8, 11, 12, 0, 0).timestamp()
+        tomorrow = now + 86400
+        groups = self._pace_groups(now, day_offsets=(0, 1))
+        meter.matched_pace_windows(groups, now_ts=now)
+        self.assertTrue(self._pace_cache_path.exists())
+        self._drop_pace_memory()
+        reloaded = meter.matched_pace_windows(groups, now_ts=tomorrow)
+        cold = self._cold_pace(groups, tomorrow)
+
+        self.assertEqual(reloaded, cold)
+
+    def test_matched_pace_rejects_incomplete_or_non_finite_persisted_entries(self):
+        now = datetime.datetime(2026, 8, 11, 12, 0, 0).timestamp()
+        groups = self._pace_groups(now)
+        expected = meter.matched_pace_windows(groups, now_ts=now)
+        stored = json.loads(self._pace_cache_path.read_text())
+
+        def corrupt_missing(entry):
+            entry["windows"].pop("today")
+            entry["windows"].pop("yesterday")
+
+        def corrupt_nan(entry):
+            entry["windows"]["today"]["coverage"] = float("nan")
+
+        def corrupt_infinite(entry):
+            entry["windows"]["all"]["pace_ratio"] = float("inf")
+
+        def corrupt_type(entry):
+            entry["windows"]["7"]["matched_pairs"] = "12"
+
+        for corrupt in (corrupt_missing, corrupt_nan, corrupt_infinite, corrupt_type):
+            with self.subTest(corruption=corrupt.__name__):
+                payload = json.loads(json.dumps(stored))
+                for entry in payload["pairs"]:
+                    corrupt(entry)
+                self._pace_cache_path.write_text(json.dumps(payload))
+                self._drop_pace_memory()
+                result = meter.matched_pace_windows(groups, now_ts=now)
+                self.assertEqual(result, expected)
+                self.assertEqual(meter._matched_pace_pair_cache_loaded, True)
+                self.assertEqual(len(meter._matched_pace_pair_cache), 3)
+
+    def test_matched_pace_ignores_an_undecodable_cache_file(self):
+        now = datetime.datetime(2026, 8, 11, 12, 0, 0).timestamp()
+        groups = self._pace_groups(now)
+        expected = self._cold_pace(groups, now)
+        self._pace_cache_path.write_bytes(b'{"schema": \xff\xfe\x80 }')
+        self._drop_pace_memory()
+
+        self.assertEqual(meter.matched_pace_windows(groups, now_ts=now), expected)
+
+    def test_project_scoped_matched_pace_leaves_the_global_pair_cache_intact(self):
+        now = datetime.datetime(2026, 8, 11, 12, 0, 0).timestamp()
+        global_groups = self._pace_groups(now, names=("alpha", "beta", "gamma", "delta"))
+        project_groups = {
+            name: rows[:15] for name, rows in global_groups.items()
+            if name in ("alpha", "beta")
+        }
+        first = meter.matched_pace_windows(global_groups, now_ts=now)
+        persisted = self._pace_cache_path.read_bytes()
+        project = meter.matched_pace_windows(
+            project_groups, now_ts=now, persistent=False,
+        )
+        self.assertEqual(self._pace_cache_path.read_bytes(), persisted)
+        self.assertEqual(project, self._cold_pace(project_groups, now))
+        # Restore the global in-memory state the cold check discarded.
+        self._drop_pace_memory()
+        meter.matched_pace_windows(global_groups, now_ts=now)
+        meter.matched_pace_windows(project_groups, now_ts=now, persistent=False)
+        meter._matched_pace_cache["signature"] = None
+
+        original = meter.matched_pace_comparison
+        with mock.patch.object(
+            meter, "matched_pace_comparison", wraps=original,
+        ) as comparison:
+            again = meter.matched_pace_windows(global_groups, now_ts=now)
+        self.assertEqual(comparison.call_count, 0)
+        self.assertEqual(again, first)
+        self.assertEqual(self._pace_cache_path.read_bytes(), persisted)
+
+    def test_project_model_stats_uses_the_non_persistent_pace_scope(self):
+        row = {
+            "id": "s", "project": "/repo/a", "provider": "codex",
+            "runtime": "Codex", "model_stats": [{
+                "model": "gpt-5.6", "cost": 1, "tokens": 100,
+                "input_tokens": 80, "output_tokens": 20, "executions": 1,
+            }],
+            "_model_daily": [], "_performance_samples": [], "_wait_samples": [],
+        }
+        saved_cache = dict(meter._xsess)
+        original = meter.matched_pace_windows
+        try:
+            meter._xsess.update({"internal_rows": (row,), "project_model_stats": {}})
+            with mock.patch.object(meter, "cross_session",
+                                   return_value={"generated_at": 1}), \
+                    mock.patch.object(meter, "matched_pace_windows",
+                                      wraps=original) as pace:
+                _, status = meter.project_model_stats("/repo/a")
+        finally:
+            meter._xsess.clear()
+            meter._xsess.update(saved_cache)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(pace.call_count, 1)
+        self.assertIs(pace.call_args.kwargs.get("persistent"), False)
+
+    def test_matched_pace_skips_the_write_when_no_pair_changed(self):
+        now = datetime.datetime(2026, 8, 11, 12, 0, 0).timestamp()
+        groups = self._pace_groups(now)
+        meter.matched_pace_windows(groups, now_ts=now)
+        self.assertTrue(self._pace_cache_path.exists())
+        # Force a rebuild that finds every pair already cached: a restart that
+        # reloads the file, then a changed whole-result signature.
+        self._drop_pace_memory()
+        with mock.patch.object(meter, "atomic_write_text") as write:
+            meter.matched_pace_windows(groups, now_ts=now)
+            meter._matched_pace_cache["signature"] = None
+            meter.matched_pace_windows(groups, now_ts=now)
+        write.assert_not_called()
+
+        changed = {**groups, "gamma": groups["gamma"][:-1]}
+        with mock.patch.object(meter, "atomic_write_text") as write:
+            meter.matched_pace_windows(changed, now_ts=now)
+        self.assertEqual(write.call_count, 1)
+
+    def test_matched_pace_pair_cache_is_bounded_on_load_and_in_memory(self):
+        now = datetime.datetime(2026, 8, 11, 12, 0, 0).timestamp()
+        groups = self._pace_groups(now, names=("alpha", "beta", "gamma", "delta"))
+        with mock.patch.object(meter, "MATCHED_PACE_CACHE_MAX_PAIRS", 2):
+            first = meter.matched_pace_windows(groups, now_ts=now)
+            self.assertEqual(len(meter._matched_pace_pair_cache), 2)
+            self.assertEqual(len(json.loads(
+                self._pace_cache_path.read_text())["pairs"]), 2)
+            self.assertEqual(first, self._cold_pace(groups, now))
+        meter._matched_pace_cache["signature"] = None
+        meter.matched_pace_windows(groups, now_ts=now)
+        stored = json.loads(self._pace_cache_path.read_text())
+        self.assertEqual(len(stored["pairs"]), 6)
+        with mock.patch.object(meter, "MATCHED_PACE_CACHE_MAX_PAIRS", 3):
+            self._drop_pace_memory()
+            with mock.patch.object(meter, "_build_matched_pace_windows",
+                                   return_value=({}, False)):
+                meter.matched_pace_windows(groups, now_ts=now)
+            self.assertEqual(len(meter._matched_pace_pair_cache), 3)
+
+    def test_matched_pace_skips_entries_with_huge_integers_without_raising(self):
+        now = datetime.datetime(2026, 8, 11, 12, 0, 0).timestamp()
+        groups = self._pace_groups(now)
+        expected = meter.matched_pace_windows(groups, now_ts=now)
+        stored = json.loads(self._pace_cache_path.read_text())
+        huge = "9" * 400
+        # json.loads decodes a bare 400-digit literal as a Python int, for
+        # which math.isfinite raises OverflowError.
+        for field in ("pace_ratio", "matched_pairs"):
+            with self.subTest(field=field):
+                payload = json.loads(json.dumps(stored))
+                payload["pairs"][0]["windows"]["all"][field] = "HUGE"
+                text = json.dumps(payload).replace('"HUGE"', huge)
+                self._pace_cache_path.write_text(text)
+                self._drop_pace_memory()
+                original = meter.matched_pace_comparison
+                with mock.patch.object(
+                    meter, "matched_pace_comparison", wraps=original,
+                ) as comparison:
+                    result = meter.matched_pace_windows(groups, now_ts=now)
+                self.assertEqual(result, expected)
+                self.assertEqual(result, self._cold_pace(groups, now))
+                # Only the corrupted pair is recomputed; the others are kept.
+                self.assertEqual(comparison.call_count, 6)
+
+    def test_matched_pace_persisted_entries_cannot_inject_output_fields(self):
+        now = datetime.datetime(2026, 8, 11, 12, 0, 0).timestamp()
+        groups = self._pace_groups(now)
+        expected = meter.matched_pace_windows(groups, now_ts=now)
+        stored = json.loads(self._pace_cache_path.read_text())
+
+        def inject_key(window):
+            window["note"] = "/Users/x/secret"
+
+        def inject_reason(window):
+            window["reason"] = "/Users/x/secret"
+
+        def long_reason(window):
+            window["reason"] = "only 1 comparable turns; needs 20" + "x" * 300
+
+        def negative_ratio(window):
+            window["pace_ratio"] = -1.5
+
+        def negative_count(window):
+            window["a_samples"] = -3
+
+        def absurd_ratio(window):
+            window["ci_high"] = 1e300
+
+        def missing_key(window):
+            window.pop("reason")
+
+        for corrupt in (inject_key, inject_reason, long_reason, negative_ratio,
+                        negative_count, absurd_ratio, missing_key):
+            with self.subTest(corruption=corrupt.__name__):
+                payload = json.loads(json.dumps(stored))
+                for entry in payload["pairs"]:
+                    corrupt(entry["windows"]["7"])
+                self._pace_cache_path.write_text(json.dumps(payload))
+                self._drop_pace_memory()
+                result = meter.matched_pace_windows(groups, now_ts=now)
+                self.assertEqual(result, expected)
+                self.assertNotIn("/Users/x/secret", json.dumps(result))
+                self.assertNotIn("note", json.dumps(result))
+
+    def test_matched_pace_over_cap_rebuilds_do_not_rewrite_the_cache(self):
+        now = datetime.datetime(2026, 8, 11, 12, 0, 0).timestamp()
+        groups = self._pace_groups(now, names=("alpha", "beta", "gamma", "delta"))
+        with mock.patch.object(meter, "MATCHED_PACE_CACHE_MAX_PAIRS", 2):
+            first = meter.matched_pace_windows(groups, now_ts=now)
+            kept = set(meter._matched_pace_pair_cache)
+            with mock.patch.object(meter, "atomic_write_text") as write:
+                for _ in range(3):
+                    meter._matched_pace_cache["signature"] = None
+                    again = meter.matched_pace_windows(groups, now_ts=now)
+                    self.assertEqual(again, first)
+            write.assert_not_called()
+            self.assertEqual(set(meter._matched_pace_pair_cache), kept)
+            self.assertEqual(first, self._cold_pace(groups, now))
+
+    def test_matched_pace_concurrent_callers_trigger_one_build(self):
+        now = datetime.datetime(2026, 8, 11, 12, 0, 0).timestamp()
+        groups = self._pace_groups(now)
+        callers = 4
+        waiting = set()
+        waiting_lock = threading.Lock()
+        all_waiting = threading.Event()
+
+        class CountingCondition(type(meter._matched_pace_build_condition)):
+            def wait(self, timeout=None):
+                with waiting_lock:
+                    waiting.add(threading.get_ident())
+                    if len(waiting) >= callers - 1:
+                        all_waiting.set()
+                return super().wait(timeout)
+
+        real_build = meter._build_matched_pace_windows
+        builds = []
+
+        def gated_build(*args, **kwargs):
+            builds.append(threading.get_ident())
+            all_waiting.wait(timeout=10)
+            return real_build(*args, **kwargs)
+
+        results = [None] * callers
+
+        def call(index):
+            results[index] = meter.matched_pace_windows(groups, now_ts=now)
+
+        with mock.patch.object(meter, "_matched_pace_build_condition",
+                               CountingCondition(threading.Lock())), \
+                mock.patch.object(meter, "_build_matched_pace_windows",
+                                  side_effect=gated_build):
+            threads = [threading.Thread(target=call, args=(index,), daemon=True)
+                       for index in range(callers)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=15)
+
+        self.assertTrue(all_waiting.is_set())
+        self.assertEqual(len(builds), 1)
+        self.assertTrue(all(result is not None for result in results))
+        self.assertTrue(all(result == results[0] for result in results))
 
     def test_matched_pace_reports_ratio_confidence_and_coverage(self):
         def sample(duration, ts):
@@ -4541,6 +5045,138 @@ class SessionSummaryStatsTests(unittest.TestCase):
         self.assertEqual(row["title"], "release-triage")
         self.assertEqual(row["session_name"], "release-triage")
 
+    def test_claude_summary_counts_loaded_and_used_skills_and_mcp_servers(self):
+        usage = self.claude_usage_row()
+        usage["message"]["content"] = [
+            {"type": "tool_use", "id": "t1", "name": "Skill", "input": {"skill": "brainstorming"}},
+            {"type": "tool_use", "id": "t2", "name": "mcp__context7__query-docs", "input": {}},
+            {"type": "tool_use", "id": "t3", "name": "mcp__webex__webex_rooms", "input": {}},
+        ]
+        objs = [
+            {"type": "attachment", "attachment": {
+                "type": "skill_listing", "isInitial": True, "skillCount": 3,
+                "names": ["brainstorming", "pdf", "docx"],
+                "content": "PRIVATE SKILL LISTING TEXT"}},
+            {"type": "attachment", "attachment": {
+                "type": "deferred_tools_delta", "addedLines": ["PRIVATE LINE"],
+                "addedNames": ["CronCreate", "mcp__context7__query-docs",
+                               "mcp__context7__resolve-library-id", "mcp__outlook__outlook_send"],
+                "removedNames": []}},
+            {"type": "attachment", "attachment": {
+                "type": "mcp_instructions_delta", "addedNames": ["context7"],
+                "addedBlocks": ["PRIVATE INSTRUCTIONS"], "removedNames": []}},
+            usage,
+        ]
+        row = meter.claude_summary(self.claude_source_without_title(), objs)
+        self.assertEqual(row["capabilities"], {
+            "skills": {"loaded": 3, "used": 1},
+            "mcp_servers": {"loaded": 3, "used": 2},
+        })
+        self.assertNotIn("PRIVATE", json.dumps(row["capabilities"]))
+        self.assertNotIn("PRIVATE", json.dumps(
+            {k: v for k, v in row.items() if not k.startswith("_")}, default=str,
+        ))
+
+    def test_claude_session_state_counts_capabilities_from_main_trace(self):
+        usage = self.claude_usage_row()
+        usage["message"]["content"] = [
+            {"type": "tool_use", "id": "t1", "name": "mcp__docs__search", "input": {}},
+        ]
+        records = [
+            {"type": "attachment", "attachment": {
+                "type": "skill_listing", "names": ["pdf", "docx"], "content": "PRIVATE"}},
+            {"type": "attachment", "attachment": {
+                "type": "deferred_tools_delta", "addedNames": ["mcp__jira__get"]}},
+            usage,
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "claude-capabilities.jsonl"
+            path.write_text("".join(json.dumps(record) + "\n" for record in records))
+            state = meter.recompute_claude({
+                **self.source("claude"), "path": str(path), "session": path.name,
+            })
+        self.assertEqual(state["capabilities"], {
+            "skills": {"loaded": 2, "used": 0, "basis": "session"},
+            "mcp_servers": {"loaded": 2, "used": 1, "basis": "session"},
+        })
+        self.assertNotIn("PRIVATE", json.dumps(meter.dashboard_state_payload(state), default=str))
+
+    def test_codex_skill_listing_and_namespaced_mcp_calls_are_counted(self):
+        from token_meter.runtimes.codex import codex_mcp_tool_name, _loaded_skill_names
+        objs = [
+            {"type": "world_state", "payload": {"state": {"host_skills": {
+                "body": "- pdf: PRIVATE (file: /h/.codex/skills/pdf/SKILL.md)\n"
+                        "- docx: PRIVATE (file: /h/.codex/skills/docx/SKILL.md)"}}}},
+            {"type": "response_item", "payload": {"type": "message", "role": "developer", "content": [
+                {"type": "input_text", "text": "<skills_instructions>- xlsx (file: /p/skills/xlsx/SKILL.md)</skills_instructions>"},
+            ]}},
+        ]
+        self.assertEqual(_loaded_skill_names(objs, meter.skill_names_from_value), {"pdf", "docx", "xlsx"})
+        self.assertIsNone(_loaded_skill_names([], meter.skill_names_from_value))
+        self.assertEqual(codex_mcp_tool_name("js", "mcp__cua_repl"), "mcp__cua_repl__js")
+        self.assertEqual(codex_mcp_tool_name("exec", None), "exec")
+        calls = meter.codex_tool_call_evidence([{"timestamp": "2026-07-02T00:00:00Z", "payload": {
+            "type": "function_call", "name": "js", "namespace": "mcp__cua_repl", "call_id": "c1", "arguments": "{}",
+        }}])
+        self.assertEqual((calls[0]["kind"], calls[0]["namespace"]), ("mcp", "cua_repl"))
+
+    def test_configured_capabilities_fill_unrecorded_loads_with_label(self):
+        with mock.patch.object(meter, "configured_capabilities", return_value=({"a", "b", "c"}, set())):
+            result = meter.with_configured_capabilities({
+                "skills": {"loaded": None, "used": 1},
+                "mcp_servers": {"loaded": None, "used": 2},
+            }, "cursor", "/repo")
+        self.assertEqual(result, {
+            "skills": {"loaded": 3, "used": 1, "basis": "configured"},
+            "mcp_servers": {"loaded": 2, "used": 2, "basis": "configured"},
+        })
+        with mock.patch.object(meter, "configured_capabilities", return_value=(None, None)):
+            result = meter.with_configured_capabilities({
+                "skills": {"loaded": 9, "used": 1}, "mcp_servers": {"loaded": None, "used": 0},
+            }, "kiro", "")
+        self.assertEqual(result["skills"], {"loaded": 9, "used": 1, "basis": "session"})
+        self.assertEqual(result["mcp_servers"], {"loaded": None, "used": 0, "basis": "unavailable"})
+
+    def test_cursor_configured_capabilities_read_skill_dirs_and_mcp_json(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as project:
+            for root, name in (("skills", "pdf"), ("skills-cursor", "canvas")):
+                path = Path(home) / ".cursor" / root / name
+                path.mkdir(parents=True)
+                (path / "SKILL.md").write_text("x")
+            (Path(home) / ".cursor" / "mcp.json").write_text(json.dumps({"mcpServers": {"docs": {}, "jira": {}}}))
+            (Path(project) / ".cursor").mkdir()
+            (Path(project) / ".cursor" / "mcp.json").write_text(json.dumps({"mcpServers": {"local": {}}}))
+            with mock.patch.dict(os.environ, {"HOME": home}):
+                skills, servers = meter._scan_configured_capabilities("cursor", project)
+        self.assertEqual(skills, {"pdf", "canvas"})
+        self.assertEqual(servers, {"docs", "jira", "local"})
+
+    def test_claude_summary_without_load_records_keeps_loaded_unknown(self):
+        row = meter.claude_summary(self.claude_source_without_title(), [self.claude_usage_row()])
+        self.assertEqual(row["capabilities"], {
+            "skills": {"loaded": None, "used": 0},
+            "mcp_servers": {"loaded": None, "used": 0},
+        })
+
+    def test_session_capabilities_uses_codex_catalog_mcp_namespaces(self):
+        from token_meter.domain.tools import session_capabilities
+        evidence = {
+            "skills": [],
+            "tools": [{"name": "mcp__docs__search", "namespace": "docs", "kind": "mcp"}],
+            "catalog": [
+                {"name": "mcp__docs__search", "namespace": "docs", "kind": "mcp"},
+                {"name": "mcp__jira__get", "namespace": "jira", "kind": "mcp"},
+                {"name": "exec_command", "namespace": "shell", "kind": "tool"},
+            ],
+        }
+        self.assertEqual(session_capabilities(evidence), {
+            "skills": {"loaded": None, "used": 0},
+            "mcp_servers": {"loaded": 2, "used": 1},
+        })
+        self.assertEqual(session_capabilities({"catalog": [
+            {"name": "exec_command", "namespace": "shell", "kind": "tool"},
+        ]})["mcp_servers"], {"loaded": None, "used": 0})
+
     def test_claude_summary_uses_ai_title_when_no_custom_title(self):
         objs = [
             self.claude_usage_row(),
@@ -5245,6 +5881,23 @@ class CurrentSessionSummaryTests(unittest.TestCase):
         self.assertTrue(result["availability"]["output_per_dollar"])
         self.assertNotIn("model_stats", result)
         self.assertNotIn("priced-model", json.dumps(result))
+
+    def test_projects_bounded_capability_counts_with_unknown_loads(self):
+        known = self.row("known", 49_990)
+        known["capabilities"] = {
+            "skills": {"loaded": 75, "used": 2, "names": ["private"]},
+            "mcp_servers": {"loaded": 20, "used": 1},
+        }
+        unknown = self.row("unknown", 49_980)
+        results = {row["id"]: row for row in meter.current_session_summaries([known, unknown], now=50_000)}
+        self.assertEqual(results["known"]["capabilities"], {
+            "skills": {"loaded": 75, "used": 2, "basis": "unavailable"},
+            "mcp_servers": {"loaded": 20, "used": 1, "basis": "unavailable"},
+        })
+        self.assertEqual(results["unknown"]["capabilities"], {
+            "skills": {"loaded": None, "used": 0, "basis": "unavailable"},
+            "mcp_servers": {"loaded": None, "used": 0, "basis": "unavailable"},
+        })
 
     def test_output_per_dollar_requires_output_and_nonzero_cost_evidence(self):
         rows = [
@@ -6504,6 +7157,77 @@ process.stdout.write(JSON.stringify({{calls,drilldown,restored:{{view:subagentVi
         self.assertEqual(payload["sessionScope"], "all")
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard JavaScript")
+    def test_session_compare_keys_forked_traces_and_routes_compare_scope(self):
+        self.assertIn("id=session-scope-compare", self.page)
+        self.assertIn("id=session-compare role=tabpanel", self.page)
+        self.assertIn("fetch(`/session/compare?ids=${encodeURIComponent(key)}`", self.page)
+        self.assertIn("{id:'compare-sessions',label:'Compare sessions'", self.page)
+        script = f"""
+const fs=require('fs');
+const page=fs.readFileSync({json.dumps(str(Path(meter.__file__).with_name('page.html')))},'utf8');
+function extract(name){{let start=page.indexOf(`function ${{name}}(`);if(start<0)throw Error(`missing ${{name}}`);let i=page.indexOf('{{',start),depth=0;for(;i<page.length;i++){{if(page[i]==='{{')depth++;else if(page[i]==='}}'&&--depth===0)return page.slice(start,i+1);}}throw Error(`unclosed ${{name}}`);}}
+const SESSION_SCOPES=['current','all','compare','subagents'];
+eval(extract('normalizeSessionScope'));eval(extract('sessionScopeRoute'));eval(extract('compareKeyFor'));
+eval(extract('mergeAllSessionInventory'));eval(extract('compareDelta'));
+const parent={{id:'root',path:'/x/rollout-1-root.jsonl',title:'Same'}};
+const fork={{id:'root',path:'/x/rollout-2-root_child.jsonl',title:'Same'}};
+const merged=mergeAllSessionInventory([parent,fork],[{{...fork,cost:2}}]);
+process.stdout.write(JSON.stringify({{
+ route:sessionScopeRoute('compare'),
+ keys:[compareKeyFor(parent),compareKeyFor(fork),compareKeyFor({{id:'only'}}),compareKeyFor({{id:'o',path:'opencode:ses_1'}}),compareKeyFor({{path:'/k/a/messages.jsonl'}}),compareKeyFor({{path:'/Users/é/日本/😀.jsonl'}}),compareKeyFor({{path:'/home/u/bad-\\udcff.jsonl'}})],
+ merged:merged.length,
+ liveWins:merged.find(row=>row.path===fork.path).cost,
+ cheaper:compareDelta({{lower:true}},0.5,1),
+ costlier:compareDelta({{lower:true}},3,1),
+ neutral:compareDelta({{}},2.5,2),
+ points:compareDelta({{lower:false,points:true}},0.9,0.6),
+ missing:compareDelta({{lower:true}},null,1),
+}}));
+"""
+        payload = json.loads(subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=True,
+        ).stdout)
+        self.assertEqual(payload["route"], "sessions-compare")
+        from token_meter.domain.compare import trace_key
+        self.assertEqual(payload["keys"], [
+            trace_key({"path": "/x/rollout-1-root.jsonl"}),
+            trace_key({"path": "/x/rollout-2-root_child.jsonl"}),
+            "only",
+            trace_key({"path": "opencode:ses_1"}),
+            trace_key({"path": "/k/a/messages.jsonl"}),
+            trace_key({"path": "/Users/é/日本/😀.jsonl"}),
+            trace_key({"path": "/home/u/bad-\udcff.jsonl"}),
+        ])
+        self.assertEqual(len(set(payload["keys"])), 7)
+        self.assertEqual(payload["merged"], 2)
+        self.assertEqual(payload["liveWins"], 2)
+        self.assertIn("better", payload["cheaper"])
+        self.assertIn("−50%", payload["cheaper"])
+        self.assertIn("worse", payload["costlier"])
+        self.assertIn("3.0×", payload["costlier"])
+        self.assertNotIn("better", payload["neutral"])
+        self.assertNotIn("worse", payload["neutral"])
+        self.assertIn("+30 pts", payload["points"])
+        self.assertIn("better", payload["points"])
+        self.assertEqual(payload["missing"], "")
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard JavaScript")
+    def test_compare_clears_stale_missing_notice_when_selection_empties(self):
+        script = f"""
+const fs=require('fs');
+const page=fs.readFileSync({json.dumps(str(Path(meter.__file__).with_name('page.html')))},'utf8');
+function extract(name){{let start=page.indexOf(`async function ${{name}}(`);if(start<0)throw Error(`missing ${{name}}`);let i=page.indexOf('){{',start)+1,depth=0;for(;i<page.length;i++){{if(page[i]==='{{')depth++;else if(page[i]==='}}'&&--depth===0)return page.slice(start,i+1);}}throw Error(`unclosed ${{name}}`);}}
+let compareIds=[],compareData={{sessions:[]}},compareError='',compareNotice='1 selected session could not be loaded right now.',compareMissing=['tgone'],compareLoadedKey='tgone',compareLoading=false,compareRequestSeq=0,rendered=0;
+function renderComparison(){{rendered++;}}
+eval(extract('loadComparison'));
+loadComparison().then(()=>process.stdout.write(JSON.stringify({{compareNotice,compareMissing,compareData,rendered}})));
+"""
+        payload = json.loads(subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=True,
+        ).stdout)
+        self.assertEqual(payload, {"compareNotice": "", "compareMissing": [], "compareData": None, "rendered": 1})
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard JavaScript")
     def test_subagents_have_a_primary_page_and_canonical_return_route(self):
         self.assertIn("id=tab-subagents", self.page)
         self.assertIn("id=view-subagents", self.page)
@@ -7017,7 +7741,7 @@ console.log(JSON.stringify({available,unavailable:{text:element.textContent,clas
         session_cards = self.page.split("function renderCurrentSessions(state=LATEST){", 1)[1].split(
             "const currentSessionGrid=$('current-session-grid');", 1
         )[0]
-        self.assertIn("costValueHtml(money(row.cost)+(estimate?' est':''),costAvailable,false)", session_cards)
+        self.assertIn("costValueHtml(money(row.cost)+(estimate?' est':''),costAvailable,false),costLabel=costPartial?'Cost, at least':'Cost'", session_cards)
         self.assertIn("const costTipAttrs=costAvailable?'':costUnavailableAttrs();", session_cards)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard JavaScript")
@@ -7354,7 +8078,139 @@ console.log(JSON.stringify({
         self.assertLess(self.page.index("id=tab-session"), self.page.index("id=tab-models"))
         self.assertNotIn("Timing evidence", self.page)
         self.assertIn("Observed output pace is a secondary diagnostic.", self.page)
-        self.assertIn("colspan=8", self.page)
+        self.assertIn("<tr><td colspan=8><div class=modelEmpty>No model activity in this window</div>", self.page)
+
+    def test_models_page_is_a_ranked_spend_leaderboard(self):
+        models = self.page.split("id=view-models", 1)[1].split("id=model-frustration", 1)[0]
+        order = [models.index(marker) for marker in (
+            "id=m-spend", "id=m-mix", "id=m-table", "id=m-diagnostics",
+        )]
+        self.assertEqual(order, sorted(order))
+        for marker in (
+            "Where your spend goes", "Model mix over time", "data-model-mix=cost",
+            "data-model-mix=output", "data-model-mix=executions",
+            "Speed &amp; timing diagnostics", "Observed output pace is a secondary diagnostic.",
+        ):
+            self.assertIn(marker, models)
+        diagnostics = models.split("id=m-diagnostics", 1)[1]
+        for marker in ("id=m-speed", "id=m-change", "id=m-wait", "id=m-chart", "id=m-metric"):
+            self.assertIn(marker, diagnostics)
+        self.assertNotIn("id=m-input", models)
+        self.assertNotIn("Logs (all)", models)
+        table_head = models.split("id=m-table><thead>", 1)[1].split("</thead>", 1)[0]
+        self.assertEqual(table_head.count("<th"), 8)
+        self.assertEqual(
+            [key for key in ("model", "cost", "cost_per_exec", "cache", "executions", "output", "wait")
+             if f"data-model-sort={key} data-tip=" in table_head],
+            ["model", "cost", "cost_per_exec", "cache", "executions", "output", "wait"],
+        )
+        self.assertIn("does not change with the History filter", table_head)
+        self.assertNotIn("<span class=\"fieldtip modelHelp\" tabindex=0", table_head)
+        self.assertEqual(table_head.count('<button class="modelSortBtn fieldtip modelHelp" type=button'), 7)
+        for marker in (
+            "const MODEL_SORT_KEYS=['model','cost','cost_per_exec','cache','executions','output','wait'];",
+            "localStorage.setItem('tm_model_sort',JSON.stringify(modelSort))",
+            "localStorage.setItem('tm_model_mix_metric',metric)",
+            "localStorage.setItem('tm_model_diagnostics_open'",
+            "without cost data ${uncosted===1?'is':'are'} excluded, not counted as $0.",
+            "th.setAttribute('aria-sort'",
+            "aria-expanded=${expanded}",
+            "data-model-clear",
+            "setLogHtml($('m-table').querySelector('tbody'),",
+            "const focus=modelFocusKey();", "restoreModelFocus(focus);",
+            "perExecPartial?'*':''",
+            '<div class=modelSpendBar id=m-spend-bar role=group',
+        ):
+            self.assertIn(marker, self.page)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard JavaScript")
+    def test_models_leaderboard_groups_variants_and_never_counts_missing_cost_as_zero(self):
+        script = f"""
+const fs=require('fs');
+const page=fs.readFileSync({json.dumps(str(Path(meter.__file__).with_name('page.html')))},'utf8');
+function extract(name){{let start=page.indexOf(`function ${{name}}(`);if(start<0)throw Error(`missing ${{name}}`);let i=page.indexOf('{{',start),depth=0;for(;i<page.length;i++){{if(page[i]==='{{')depth++;else if(page[i]==='}}'&&--depth===0)return page.slice(start,i+1);}}throw Error(`unclosed ${{name}}`);}}
+function constLine(name){{const start=page.indexOf(`const ${{name}}=`);if(start<0)throw Error(`missing ${{name}}`);return page.slice(start,page.indexOf('\\n',start));}}
+['MODEL_COUNTER_KEYS','MODEL_ARRAY_KEYS','metricAvailable','metricPartial','usageProvenance','usageBasis','hasLocalEstimate'].forEach(name=>eval(constLine(name).replace(/^const /,'globalThis.')));
+['modelWaitDistribution','modelMedian','modelDayInRange','aggregateModelDays','efficiencyMetrics','modelGroupKey','modelGroupRows','modelBoardValue','sortModelBoard','modelSpendRanking'].forEach(name=>eval(`globalThis.${{name}}=${{extract(name)}}`));
+globalThis.modelSort={{key:'cost',direction:'desc'}};
+const day=(d,extra)=>({{day:d,availability:{{tokens:true,cost:true,cache:true}},executions:10,output_tokens:100,input_tokens:1000,cache_read_tokens:800,cache_covered_input_tokens:1000,wait_samples:1,wait_seconds:5,wait_durations_s:[5],...extra}});
+const models=[
+ {{id:'sol::Codex::high',model:'sol',runtime:'Codex',reasoning_effort:'high',logs:3,daily:[day('2026-09-30',{{cost:6}}),day('2026-01-01',{{cost:100}})]}},
+ {{id:'sol::Codex::xhigh',model:'sol',runtime:'Codex',reasoning_effort:'xhigh',logs:2,daily:[day('2026-09-30',{{cost:4}})]}},
+ {{id:'sol::Cursor',model:'sol',runtime:'Cursor',logs:1,daily:[day('2026-09-30',{{cost:0,availability:{{tokens:true,cost:false}}}})]}},
+ {{id:'opus::Claude-3P',model:'opus',runtime:'Claude-3P',logs:5,daily:[day('2026-09-30',{{cost:7,executions:2}})]}},
+ {{id:'part::Codex',model:'part',runtime:'Codex',logs:1,daily:[day('2026-09-30',{{cost:6,executions:10,cost_covered_executions:6,cost_covered_cost:6}})]}},
+ {{id:'big::Cursor',model:'big',runtime:'Cursor',logs:1,daily:[day('2026-09-30',{{output_tokens:999999,availability:{{tokens:true,cost:false}}}})]}},
+];
+const window={{days:['2026-09-30'],daySet:new Set(['2026-09-30'])}};
+const groups=modelGroupRows(models,window),byKey=Object.fromEntries(groups.map(g=>[g.key,g]));
+const ranking=modelSpendRanking(groups);
+process.stdout.write(JSON.stringify({{
+ keys:groups.map(g=>g.key).sort(),
+ solVariants:byKey['sol::Codex'].variants.length,
+ solCost:modelBoardValue(byKey['sol::Codex'],'cost'),
+ cursorCost:modelBoardValue(byKey['sol::Cursor'],'cost'),
+ opusPerExec:modelBoardValue(byKey['opus::Claude-3P'],'cost_per_exec'),
+ partialPerExec:modelBoardValue(byKey['part::Codex'],'cost_per_exec'),
+ solCache:modelBoardValue(byKey['sol::Codex'],'cache'),
+ ranking:ranking.map(g=>g.key),
+ byExecAsc:sortModelBoard(groups,{{key:'executions',direction:'asc'}}).map(g=>g.key),
+ byCostAsc:sortModelBoard(groups,{{key:'cost',direction:'asc'}}).map(g=>g.key),
+}}));
+"""
+        payload = json.loads(subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=True,
+        ).stdout)
+        self.assertEqual(payload["keys"], ["big::Cursor", "opus::Claude-3P", "part::Codex", "sol::Codex", "sol::Cursor"])
+        self.assertEqual(payload["solVariants"], 2)
+        self.assertEqual(payload["solCost"], 10)
+        self.assertIsNone(payload["cursorCost"])
+        self.assertEqual(payload["opusPerExec"], 3.5)
+        self.assertAlmostEqual(payload["solCache"], 0.8)
+        self.assertEqual(payload["partialPerExec"], 1.0)
+        self.assertEqual(payload["ranking"], ["sol::Codex", "opus::Claude-3P", "part::Codex", "big::Cursor", "sol::Cursor"])
+        self.assertEqual(payload["byExecAsc"][0], "opus::Claude-3P")
+        self.assertEqual(set(payload["byCostAsc"][-2:]), {"sol::Cursor", "big::Cursor"})
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard JavaScript")
+    def test_models_focus_restore_keeps_the_focused_control_and_scopes_to_its_container(self):
+        script = f"""
+const fs=require('fs');
+const page=fs.readFileSync({json.dumps(str(Path(meter.__file__).with_name('page.html')))},'utf8');
+function extract(name){{let start=page.indexOf(`function ${{name}}(`);if(start<0)throw Error(`missing ${{name}}`);let i=page.indexOf('{{',start),depth=0;for(;i<page.length;i++){{if(page[i]==='{{')depth++;else if(page[i]==='}}'&&--depth===0)return page.slice(start,i+1);}}throw Error(`unclosed ${{name}}`);}}
+const start=page.indexOf('const MODEL_FOCUS_KEYS=');eval('globalThis.MODEL_FOCUS_KEYS='+page.slice(start+'const MODEL_FOCUS_KEYS='.length,page.indexOf(';',start)));
+eval('globalThis.modelFocusKey='+extract('modelFocusKey'));eval('globalThis.restoreModelFocus='+extract('restoreModelFocus'));
+function node(id,dataset,parent){{const el={{id,dataset:dataset||{{}},parent,children:[],isConnected:true,label:id,
+ contains(other){{for(let cur=other;cur;cur=cur.parent)if(cur===this)return true;return false;}},
+ closest(sel){{const ids=sel.split(',').map(x=>x.trim().slice(1));for(let cur=this;cur;cur=cur.parent)if(ids.includes(cur.id))return cur;return null;}},
+ querySelectorAll(sel){{const attr=sel.slice(1,-1),key=attr.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase());const out=[];const walk=n=>{{n.children.forEach(c=>{{if(key in c.dataset)out.push(c);walk(c);}});}};walk(this);return out;}},
+ focus(){{document.activeElement=this;}}}};if(parent)parent.children.push(el);byId[id]=el;return el;}}
+const byId={{}};globalThis.document={{activeElement:null}};globalThis.$=id=>byId[id]||null;
+const view=node('view-models');const bar=node('m-spend-bar',{{}},view),legend=node('m-spend-legend',{{}},view),table=node('m-table',{{}},view);
+const seg=node('seg',{{modelIds:'a::Codex::high\\na::Codex::xhigh'}},bar),chip=node('chip',{{modelIds:'a::Codex::high\\na::Codex::xhigh'}},legend);
+const expand=node('expand-old',{{modelExpand:'a::Codex'}},table);
+const results={{}};
+chip.focus();let focus=modelFocusKey();restoreModelFocus(focus);results.chipUnchanged=document.activeElement.label;
+focus=modelFocusKey();chip.isConnected=false;legend.children=[];const chip2=node('chip-new',{{modelIds:chip.dataset.modelIds}},legend);restoreModelFocus(focus);results.chipRebuilt=document.activeElement.label;
+expand.focus();focus=modelFocusKey();expand.isConnected=false;table.children=[];node('expand-new',{{modelExpand:'a::Codex'}},table);restoreModelFocus(focus);results.expandRebuilt=document.activeElement.label;
+const outside=node('outside',{{modelIds:'x'}},null);outside.focus();results.outsideKey=modelFocusKey();
+process.stdout.write(JSON.stringify(results));
+"""
+        payload = json.loads(subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=True,
+        ).stdout)
+        self.assertEqual(payload["chipUnchanged"], "chip")
+        self.assertEqual(payload["chipRebuilt"], "chip-new")
+        self.assertEqual(payload["expandRebuilt"], "expand-new")
+        self.assertIsNone(payload["outsideKey"])
+
+    def test_language_signals_section_is_collapsible(self):
+        self.assertIn("id=f-collapse type=button aria-expanded=true aria-controls=model-frustration", self.page)
+        self.assertIn("tm_language_signals_collapsed", self.page)
+        self.assertIn("#model-frustration.collapsed>*:not(.signalHead)", self.page)
+        self.assertIn("if(h==='frustration'){setLanguageSignalsCollapsed(false,false);", self.page)
+        self.assertIn("setLanguageSignalsCollapsed(location.hash!=='#frustration'&&localStorage.getItem('tm_language_signals_collapsed')==='1',false);", self.page)
+        self.assertIn("user language signals`);", self.page)
 
     def test_selected_session_token_split_fills_the_chart_column_gap(self):
         run_grid = self.page.split('<div class=previewRunGrid>', 1)[1].split(
@@ -7378,7 +8234,8 @@ console.log(JSON.stringify({
             "id=e-project", "id=e-model-picker", "id=e-model-options", "id=e-model-summary",
             "id=e-range", "id=e-output-dollar", "id=e-reasoning-ratio",
             "id=e-output-dollar-chart", "id=e-reasoning-chart",
-            "id=e-context-load", "id=e-output-execution", "id=e-model-table",
+            "id=e-context-load", "id=e-cache-hit", "id=e-model-table",
+            "data-efficiency-sort=cache_hit_ratio",
             "data-efficiency-sort=cost", "data-efficiency-sort=output_per_dollar",
             "function renderEfficiency", "function efficiencyMetrics",
             "function renderEfficiencyChart", "function sortEfficiencyRows",
@@ -7403,6 +8260,9 @@ console.log(JSON.stringify({
         )[0]
         self.assertIn("Output / $", efficiency)
         self.assertIn("Reasoning ratio", efficiency)
+        self.assertIn("Cache hit ratio", efficiency)
+        self.assertNotIn("Output / exec", efficiency)
+        self.assertNotIn("output_per_execution", self.page)
         self.assertIn("Mechanical efficiency", efficiency)
         self.assertIn("Spend", efficiency)
         self.assertNotIn("Cache leverage", efficiency)
@@ -7428,9 +8288,10 @@ console.log(JSON.stringify({
 
     def test_models_table_labels_effort_qualified_runtime_rows(self):
         self.assertIn(
-            "querySelectorAll('.modelRuntime').forEach((cell,index)=>cell.append(document.createTextNode(` · ${modelEffortLabel(tableRows[index])}`)))",
+            "`${modelEffortLabel(only)} · ${f(only.logs)} ${countWord(only.logs,'log')}`",
             self.page,
         )
+        self.assertIn("<div class=modelVariantName>${esc(modelEffortLabel(variant))}<small>${f(variant.logs)} ${countWord(variant.logs,'log')}</small>", self.page)
 
     def test_selected_session_has_a_compact_two_metric_efficiency_module(self):
         summary = self.page.split('<div class="session-panel on" id=panel-summary>', 1)[1].split(
@@ -7593,27 +8454,22 @@ console.log(JSON.stringify({complete,missing,partial,coveredZero,inputOnly,zeroI
             "output_per_dollar": 100,
             "reasoning_ratio": 0.5,
             "context_load": 5,
-            "cache_leverage": 0.5,
+            "cache_hit_ratio": 0.5,
             "retry_waste": 0.25,
             "failure_rate": 0.25,
-            "output_per_execution": 100,
         })
         self.assertEqual(payload["missing"], {
             "output_per_dollar": None,
             "reasoning_ratio": None,
             "context_load": 5,
-            "cache_leverage": None,
+            "cache_hit_ratio": None,
             "retry_waste": None,
             "failure_rate": None,
-            "output_per_execution": None,
         })
         self.assertEqual(payload["partial"]["output_per_dollar"], 100)
-        self.assertEqual(payload["partial"]["output_per_execution"], 55)
         self.assertIsNone(payload["partial"]["context_load"])
         self.assertEqual(payload["coveredZero"]["output_per_dollar"], 0)
-        self.assertEqual(payload["coveredZero"]["output_per_execution"], 0)
         self.assertIsNone(payload["inputOnly"]["output_per_dollar"])
-        self.assertIsNone(payload["inputOnly"]["output_per_execution"])
         self.assertEqual(payload["zeroInput"]["context_load"], 0)
 
     def test_efficiency_uses_one_range_for_overall_and_per_model_statistics(self):
@@ -7964,7 +8820,7 @@ console.log(JSON.stringify({
         )
         for marker in (
             "id=e-context-load-change",
-            "id=e-output-execution-change",
+            "id=e-cache-hit-change",
             "efficiencySupportDelta",
         ):
             self.assertIn(marker, efficiency)
@@ -7987,7 +8843,7 @@ console.log(JSON.stringify({
   dollar:efficiencyChartMetricPresentation(5200,'output_per_dollar'),
   reasoning:efficiencyChartMetricPresentation(.34,'reasoning_ratio'),
   context:efficiencyChartMetricPresentation(256,'context_load'),
-  execution:efficiencyChartMetricPresentation(484,'output_per_execution'),
+  cache:efficiencyChartMetricPresentation(.87,'cache_hit_ratio'),
 }));
 """
         result = subprocess.run(
@@ -7997,7 +8853,7 @@ console.log(JSON.stringify({
             "dollar": {"axis": "5.2K", "detail": "5,200 output tokens / $"},
             "reasoning": {"axis": "34.0%", "detail": "34.0% reasoning"},
             "context": {"axis": "256x", "detail": "256x context / output"},
-            "execution": {"axis": "484", "detail": "484 output tokens / exec"},
+            "cache": {"axis": "87.0%", "detail": "87.0% input from cache"},
         })
 
     def test_efficiency_support_cards_include_compact_daily_charts(self):
@@ -8006,7 +8862,7 @@ console.log(JSON.stringify({
         )[0]
         for metric, label in (
             ("context-load", "Daily context load"),
-            ("output-execution", "Daily output per execution"),
+            ("cache-hit", "Daily cache hit ratio"),
         ):
             self.assertIn(
                 f'id=e-{metric}-chart viewBox="0 0 520 96" preserveAspectRatio=none role=img tabindex=0 aria-label="{label}"',
@@ -8520,7 +9376,7 @@ console.log(JSON.stringify({merged:rows[0],total:aggregateModelDays(rows),select
             "Typical wait", "median wait", "human pause excluded",
             "modelWaitDistribution", "wait_durations_s", "p95_wait_s",
             "Matched pace", "renderMatchedPace", "modelRuntimeLabel",
-            "migrateModelRuntimeFilters", "Typical workload", "median_peak_input_tokens",
+            "migrateModelRuntimeFilters", "Typical workload (approximate shape, not semantic difficulty)", "median_peak_input_tokens",
             "95% CI", "Select 2 models", "TTFT unavailable",
         ):
             self.assertIn(marker, self.page)
@@ -8741,7 +9597,7 @@ console.log(JSON.stringify({
             "function modelDayInRange(day,window)",
             "mergeModelDays(selected,rangeWindow)",
             "buildModelTrend(selected,rangeWindow,names)",
-            ".filter(row=>modelDayInRange(row.day,rangeWindow))",
+            ".filter(day=>modelDayInRange(day.day,rangeWindow))",
             "modelRangeLabel(modelRange)",
         ):
             self.assertIn(marker, self.page)
@@ -9526,19 +10382,12 @@ console.log(JSON.stringify({
     def test_models_and_git_keep_secondary_copy_in_accessible_help(self):
         models = self.page.split("id=view-models", 1)[1].split("id=view-daily", 1)[0]
         for marker in (
-            "id=m-change-label", "id=m-wait-label", "id=m-input-label",
-            "id=m-output-label", "function setModelKpiHelp(labelId,detail)",
+            "id=m-change-label", "id=m-wait-label",
+            "function setModelKpiHelp(labelId,detail)",
             "setModelKpiHelp('m-speed-label',speedDetail)",
             "setModelKpiHelp('m-wait-label',waitDetail)",
-            "setModelKpiHelp('m-input-label',inputDetail)",
-            "setModelKpiHelp('m-output-label',outputDetail)",
             ".modelCellTip.fieldtip{display:table-cell}",
-            ".modelCellTip>span{display:none}",
-            "querySelectorAll('.workloadCell,.speedCell,.waitCell')",
-            "cell.classList.add('fieldtip','modelCellTip')",
-            "cell.setAttribute('aria-description',detail)",
-            "cell.dataset.tip=detail",
-            "cell.removeAttribute('title')",
+            "class=\"fieldtip modelCellTip modelNameCell\" tabindex=0 data-tip=\"${esc(tip)}\" aria-description=\"${esc(tip)}\"",
         ):
             self.assertIn(marker, self.page)
 
@@ -9935,17 +10784,18 @@ console.log(JSON.stringify({
         self.assertLess(self.page.index("id=g-clear"), self.page.index("id=g-sort"))
         for value in ("value=24h", "value=7d", "value=30d", "value=90d"):
             self.assertIn(value, self.page)
-        self.assertIn("globalApp&&appFilterGroup(s)!==globalApp", self.page)
+        self.assertIn("allSessionsView(workRows,{showChildren:globalShowChildren,app:globalApp,project:globalProject,rangeStart,query:q})", self.page)
+        self.assertIn("if(app&&appFilterGroup(s)!==app)return false;", self.page)
         self.assertIn("const appFilterGroup=session=>runtimeId(session)", self.page)
         self.assertIn("const appFilterLabel=session=>runtimeMeta(session).label", self.page)
         self.assertIn("['claude_code','claude_desktop'].includes(globalApp)", self.page)
-        self.assertIn("globalProject&&projectFilterValue(s.project)!==globalProject", self.page)
+        self.assertIn("if(project&&projectFilterValue(s.project)!==project)return false;", self.page)
         self.assertIn("Other local sessions", self.page)
         self.assertIn("Date.now()/1000-rangeSeconds", self.page)
         self.assertIn("tm_global_app", self.page)
         self.assertIn("tm_global_project", self.page)
         self.assertIn("tm_global_time", self.page)
-        self.assertIn("renderAllSessionStats(sessions)", self.page)
+        self.assertIn("renderAllSessionStats(view.statsRows)", self.page)
         self.assertIn("session.model_stats", self.page)
         self.assertIn("globalSearch='';globalApp='';globalProject='';globalTime='all'", self.page)
         self.assertIn("['tm_global_search','tm_global_app','tm_global_project','tm_global_time']", self.page)
@@ -9963,10 +10813,12 @@ console.log(JSON.stringify({
             "const interactingLogRow=forceAllSessionRowRefresh?null:root.querySelector('.srow:hover,.srow:focus-within');",
             "if(interactingLogRow)return;",
             "function mergeAllSessionInventory(inventory,liveSessions)",
-            "(liveSessions||[]).forEach(row=>rows.set(sessionRowKey(row),row))",
+            "(liveSessions||[]).forEach(row=>rows.set(key(row),row))",
             "const liveSessionIds=new Set((xs.current_sessions||[]).map(sessionRowKey));",
             "const live=liveSessionIds.has(key)",
-            "const className=`srow${active?' active':''}${live?' live':''}`",
+            "const hasChildren=childAgentsFor(s).length>0;",
+            "const compareIndex=compareIds.indexOf(rowKey);",
+            "className=`srow${active?' active':''}${live?' live':''}${hasChildren?' hasChildren':''}${compareIndex>=0?' compareSelected':''}`",
             ".srow.active,.srow.live{border-color:rgba(0,188,235,.62)",
             "const existing=new Map([...root.children]",
             "if(row.className!==className)row.className=className",
@@ -10034,11 +10886,11 @@ console.log(JSON.stringify({
             "function stateSessionKey(state){return String(state?.session||stateSessionId(state)||'');}",
             "renderedAllSessions=new Map(all.map(row=>[sessionRowKey(row),row]));",
             "const pinnedKey=pinned?(renderedAllSessions.has(pinned)?pinned:(stateSessionId(CURRENT)===pinned?stateSessionKey(CURRENT):'')):'';",
-            "const key=sessionRowKey(s),active=pinned?key===pinnedKey:Boolean(LATEST&&key===stateSessionKey(LATEST));",
+            "const key=sessionRowKey(s),rowKey=compareKeyFor(s),active=pinned?key===pinnedKey:Boolean(LATEST&&key===stateSessionKey(LATEST));",
             "row.dataset.id=key;",
             "data-delete-session=\"${esc(sessionRowKey(s))}\"",
             "body:JSON.stringify({session_id:target.id,trace:target.session||''})",
-            "if(workSessionFilter&&!workSessionFilter.keys.has(sessionRowKey(s)))return false;",
+            "const workRows=workSessionFilter?all.filter(s=>workSessionFilter.keys.has(sessionRowKey(s))):all;",
             "keys:new Set(payload.keys.map(String))",
             "data-spend-session=\"${esc(sessionRowKey(row))}\"",
             "data-spend-insight-session=\"${esc(sessionRowKey(row))}\"",
@@ -10063,6 +10915,20 @@ console.log(JSON.stringify({
         )
         self.assertIn('class="card currentSessionCard provider-${esc(provider)}', self.page)
         self.assertIn("Object.entries(RUNTIME_CATALOG).filter(([id])=>id!=='unknown-runtime')", self.page)
+
+    def test_sessions_show_skill_and_mcp_capability_counts(self):
+        self.assertIn("return `${f(counts.used)}/${counts.loaded==null?'—':f(counts.loaded)}${counts.basis==='configured'?'*':''}`;", self.page)
+        self.assertIn('</div>${identityAction}</div>\n  <div class=sactions>${sessionDeleteAvailable(s,renderedAllSessionActions)?', self.page)
+        self.assertNotIn('<div class="badge tok">', self.page)
+        self.assertIn('class="sessionDelete sessionDeleteIcon" data-delete-session="${esc(sessionRowKey(s))}" type=button aria-label="Delete session" title="Delete session"><svg', self.page)
+        self.assertIn('<span class="currentSessionCaps mono" title="${esc(CAPABILITY_SUMMARY_TIP)}">${esc(capabilitySummaryText(row.capabilities))}</span>', self.page)
+        self.assertIn('<div class=meta title="${esc(`${waitText} · ${avg}/exec${speed} · ${CAPABILITY_SUMMARY_TIP}`)}">${esc(s.project||\'local\')} · ${esc(s.last||s.start||\'\')} · ${esc(capabilitySummaryText(s.capabilities))}</div>', self.page)
+        self.assertIn("s.throughput,s.cost_approx,s.capabilities,childAgentsFor(s)", self.page)
+        self.assertIn("<div class=sbar><i></i></div>${childAgentSubsection(s)}</div>", self.page)
+        self.assertIn('id=ov-skills>--</div>', self.page)
+        self.assertIn('id=ov-mcp>--</div>', self.page)
+        self.assertIn("counts.loaded==null?'loaded list not recorded'", self.page)
+        self.assertIn("* means configured now, not recorded by this session.", self.page)
 
     def test_session_delete_actions_require_confirmation_and_use_trash_endpoint(self):
         for marker in ("id=session-delete", "data-delete-session", "id=session-delete-dialog",
@@ -10205,7 +11071,7 @@ console.log(JSON.stringify({
             "A ratio above 1 favors the named faster runtime",
             "The median is primary because the average can be pulled upward",
             "95% confidence interval", "Matched pace",
-            "model runtime", "Observed output pace", "Typical workload",
+            "model runtime", "Observed output pace", "Typical workload (approximate shape, not semantic difficulty)",
             "Typical wait", "semantic difficulty",
             "The 95% confidence interval crosses 1.00",
             "$('m-coverage').setAttribute('aria-valuenow'",
@@ -10279,7 +11145,7 @@ console.log(JSON.stringify({
         self.assertNotIn("data-current-panel=sessions", self.page)
         self.assertNotIn('id=current-tabs', self.page)
         self.assertRegex(self.page, r"id=tab-session[^>]*>.*?<span class=tabLabel>Sessions</span>")
-        self.assertIn("if(h==='sessions'||h==='sessions-all'||h==='current-sessions')", self.page)
+        self.assertIn("if(h==='sessions'||h==='sessions-all'||h==='sessions-compare'||h==='current-sessions')", self.page)
         self.assertIn("history.replaceState(null,'','/#sessions')", self.page)
         self.assertIn("function currentSessionModelName", self.page)
         self.assertIn("row.session_name||row.project||'Untitled session'", self.page)
@@ -15021,6 +15887,75 @@ class CapabilityConfigTests(unittest.TestCase):
 
 
 class DailySummaryTests(unittest.TestCase):
+    def test_compare_sessions_state_projects_selected_sessions_without_content(self):
+        from token_meter.domain.compare import trace_key
+        pool = [
+            {"id": "one", "path": "/private/traces/ws/one/messages.jsonl", "provider": "kiro"},
+            {"id": "two", "path": "/private/traces/ws/two/messages.jsonl", "provider": "kiro"},
+            {"id": "root", "path": "/private/traces/rollout-9-root.jsonl", "provider": "codex"},
+        ]
+        key = {source["id"]: trace_key(source) for source in pool}
+
+        def summary(source):
+            return {
+                "id": source["id"], "path": source["path"], "title": "Same prompt",
+                "label": "Kiro", "provider": source["provider"], "models": ["m"],
+                "usage_basis": "reported", "availability": {"cost": True},
+            }
+
+        def state(source):
+            cost = 1.0 if source["id"] == "one" else 2.5
+            return {
+                "availability": {"cost": True, "tokens": True},
+                "total_cost": cost, "turns": 4, "total_tokens": 1000,
+                "timing": {"duration_s": 60, "duration_available": True},
+                "series": [{"i": 1, "cost": cost, "in": 10, "out": 5,
+                            "user_message": "PRIVATE PROMPT TEXT"}],
+                "source": {"path": source["path"]},
+            }
+
+        saved_cache = dict(meter._xsess)
+        try:
+            meter._xsess["sessions"] = [
+                {"id": "one", "title": "Same prompt", "path": pool[0]["path"]},
+                {"id": "root", "title": "same prompt", "mtime": 5, "cost": 0.4, "path": pool[2]["path"]},
+                {"id": "four", "title": "Different", "path": "/private/traces/four.jsonl"},
+            ]
+            with mock.patch.object(meter, "cached_session_sources", return_value=(pool, True)), \
+                    mock.patch.object(meter, "session_summary", side_effect=summary), \
+                    mock.patch.object(meter, "cached_session_state", side_effect=state):
+                payload, status = meter.compare_sessions_state(f"{key['one']},{key['two']},tgone")
+                single, single_status = meter.compare_sessions_state(key["one"])
+                empty, empty_status = meter.compare_sessions_state("")
+                missing, missing_status = meter.compare_sessions_state("tgone,talsogone")
+        finally:
+            meter._xsess.clear()
+            meter._xsess.update(saved_cache)
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual([row["letter"] for row in payload["sessions"]], ["A", "B"])
+        self.assertEqual([row["id"] for row in payload["sessions"]], ["one", "two"])
+        # Repeated file names fall back to the session id; unique stems open the exact trace.
+        self.assertEqual([row["open_id"] for row in payload["sessions"]], ["one", "two"])
+        self.assertEqual(payload["missing"], ["tgone"])
+        self.assertTrue(payload["same_title"])
+        self.assertEqual(payload["best"]["cost"], key["one"])
+        self.assertEqual([row["key"] for row in payload["matches"]], [key["root"]])
+        self.assertEqual(payload["matches"][0]["open_id"], "rollout-9-root")
+        encoded = json.dumps(payload)
+        self.assertNotIn("PRIVATE PROMPT TEXT", encoded)
+        self.assertNotIn("/private/traces", encoded)
+        self.assertEqual(single_status, 200)
+        self.assertEqual(single["insights"], [])
+        self.assertEqual((empty_status, empty["ok"]), (400, False))
+        self.assertEqual((missing_status, missing["ok"]), (404, False))
+        self.assertIn(
+            'elif req_path == "/session/compare":',
+            Path(meter.IMPLEMENTATION_FILE).read_text(),
+        )
+        self.assertFalse(meter.is_dashboard_page_path("/session/compare"))
+
     def test_spend_logs_state_validates_and_returns_full_range(self):
         sessions = (
             {
@@ -15247,6 +16182,27 @@ class MonthlyBudgetTests(unittest.TestCase):
         self.assertEqual(result["session"]["budget_usd"], 5)
         self.assertNotIn("default_session_budget_usd", result)
         self.assertNotIn("session_budget_overrides", result)
+        self.assertNotIn("lower bound", result["caveat"])
+
+    def test_agent_budget_caveat_marks_partial_family_spend_as_lower_bound(self):
+        source = {"id": "ses_root", "provider": "opencode", "client": "OpenCode"}
+        state = {"total_cost": 1.0, "availability": {"cost": True}}
+        family = [
+            {"id": "ses_root", "provider": "opencode", "cost": 1.0,
+             "availability": {"cost": True}},
+            {"id": "ses_child", "provider": "opencode", "cost": 0.0,
+             "is_child_session": True, "root_session_id": "ses_root",
+             "availability": {"cost": False}},
+        ]
+        settings = meter.normalize_budget_settings({})
+        with mock.patch.object(meter, "resolve_agent_source", return_value=(source, "explicit")), \
+                mock.patch.object(meter, "recompute", return_value=state), \
+                mock.patch.object(meter, "budget_settings", return_value=settings), \
+                mock.patch.dict(meter._xsess, {"sessions": family}):
+            result = meter.agent_budget(session_id="ses_root")
+
+        self.assertTrue(result["session"]["cost_partial"])
+        self.assertIn("Spend is a lower bound", result["caveat"])
 
     def test_session_override_compare_and_set_rejects_a_stale_budget(self):
         """A delayed agent must not silently replace a newer session cap."""
@@ -15746,6 +16702,1010 @@ class PiRuntimeTests(unittest.TestCase):
         self.assertEqual(state["total_cost"], 0)
 
 
+class PiSubagentTests(unittest.TestCase):
+    """Pi child runs live inside the parent transcript and must be accounted."""
+
+    CONTENT_CANARY = "PI-CONTENT-CANARY-7731"
+
+    @staticmethod
+    def _child_usage(input_tokens=1000, output_tokens=100, cache_read=0,
+                     cache_write=0, cost=0.25, turns=2, breakdown=False):
+        # The shipped subagent tool reports a scalar cost, so that is the
+        # default shape; breakdown=True is the documented Pi Usage object.
+        usage = {
+            "input": input_tokens,
+            "output": output_tokens,
+            "cacheRead": cache_read,
+            "cacheWrite": cache_write,
+            "cost": cost,
+            "contextTokens": input_tokens + cache_read + cache_write,
+            "turns": turns,
+        }
+        if breakdown:
+            usage["cost"] = {
+                "input": cost, "output": 0.0, "cacheRead": 0.0,
+                "cacheWrite": 0.0, "total": cost,
+            }
+        return usage
+
+    def _child_result(self, agent="probe", *, usage=None, exit_code=0,
+                      stop_reason="stop", model="opencode-go/deepseek-v4.1-flash",
+                      step=None):
+        result = {
+            "agent": agent,
+            "agentSource": "user",
+            "task": self.CONTENT_CANARY + "-task",
+            "exitCode": exit_code,
+            "messages": [{
+                "role": "assistant",
+                "content": [{"type": "text", "text": self.CONTENT_CANARY}],
+            }],
+            "stderr": self.CONTENT_CANARY + "-stderr",
+            "stopReason": stop_reason,
+            "model": model,
+        }
+        if usage is not None:
+            result["usage"] = usage
+        if step is not None:
+            result["step"] = step
+        return result
+
+    def _write_subagent_session(self, agent_root, *, results=None,
+                                top_usage=None, include_result=True,
+                                arguments=None, tool_name="subagent",
+                                mode="single", recent_seconds=None,
+                                stop_reason="stop", final_turn_usage=None):
+        directory = Path(agent_root) / "sessions" / "--repo--"
+        directory.mkdir(parents=True)
+        path = directory / "pi-subagent-session.jsonl"
+        if recent_seconds is None:
+            stamps = [
+                "2026-09-04T10:00:00Z", "2026-09-04T10:00:01Z",
+                "2026-09-04T10:00:02Z", "2026-09-04T10:00:05Z",
+                "2026-09-04T10:00:09Z", "2026-09-04T10:00:12Z",
+            ]
+        else:
+            base = (
+                datetime.datetime.now(datetime.timezone.utc)
+                - datetime.timedelta(seconds=recent_seconds)
+            )
+            stamps = [
+                (base + datetime.timedelta(seconds=offset)).isoformat()
+                .replace("+00:00", "Z")
+                for offset in (0, 1, 2, 5, 9, 12)
+            ]
+        tool_call = {
+            "type": "toolCall", "id": "call-subagent", "name": tool_name,
+            "arguments": arguments or {"agent": "probe", "task": self.CONTENT_CANARY},
+        }
+        assistant_message = {
+            "role": "assistant", "model": "claude-test", "provider": "anthropic",
+            "content": [tool_call],
+            "usage": {"input": 100, "output": 20, "cacheRead": 10,
+                      "cacheWrite": 5, "totalTokens": 135,
+                      "cost": {"input": 0.001, "output": 0.002,
+                               "cacheRead": 0.0001, "cacheWrite": 0.0002}},
+        }
+        if stop_reason is not None:
+            assistant_message["stopReason"] = stop_reason
+        rows = [
+            {"type": "session", "version": 3, "id": "pi-session",
+             "timestamp": stamps[0], "cwd": "/repo"},
+            {"type": "model_change", "id": "model-change", "parentId": None,
+             "timestamp": stamps[1], "provider": "anthropic",
+             "modelId": "claude-test"},
+            {"type": "message", "id": "user", "parentId": "model-change",
+             "timestamp": stamps[2],
+             "message": {"role": "user", "content": []}},
+            {"type": "message", "id": "assistant", "parentId": "user",
+             "timestamp": stamps[3], "message": assistant_message},
+        ]
+        if include_result:
+            message = {
+                "role": "toolResult", "toolCallId": "call-subagent",
+                "toolName": tool_name,
+                "content": [{"type": "text", "text": self.CONTENT_CANARY}],
+                "details": {
+                    "mode": mode, "agentScope": "user", "projectAgentsDir": None,
+                    "results": list(results if results is not None else []),
+                },
+            }
+            if top_usage is not None:
+                message["usage"] = top_usage
+            rows.append({
+                "type": "message", "id": "result", "parentId": "assistant",
+                "timestamp": stamps[4], "message": message,
+            })
+        if final_turn_usage is not None:
+            rows.append({
+                "type": "message", "id": "assistant-final",
+                "parentId": "result", "timestamp": stamps[5],
+                "message": {
+                    "role": "assistant", "model": "claude-test",
+                    "provider": "anthropic", "content": [],
+                    "stopReason": "stop", "usage": final_turn_usage,
+                },
+            })
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        return path
+
+    def _load(self, root):
+        with mock.patch.object(meter, "PI_AGENT_DIR", str(root)), \
+                mock.patch.object(meter, "_pi_native_adapters", {}), \
+                mock.patch.object(meter, "_RUNTIME_REGISTRY", None):
+            source = meter.pi_session_sources()[0]
+            return source, meter.recompute(source), meter.pi_summary(source)
+
+    def _records(self, summary):
+        return {record["kind"]: record for record in summary["_agent_records"]}
+
+    def test_single_child_run_adds_spend_and_emits_root_and_spawned_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(
+                root, results=[self._child_result(usage=self._child_usage())],
+            )
+            source, state, summary = self._load(root)
+
+        # Parent turn 100/20/10/5 plus child 1000/100/0/0.
+        self.assertEqual(state["tokens"], {
+            "input": 1100, "output": 120, "cache_read": 10, "cache_write": 5,
+        })
+        self.assertEqual(state["total_tokens"], 1235)
+        self.assertAlmostEqual(state["total_cost"], 0.2533)
+        # Child work is not presented as a parent model call.
+        self.assertEqual(len(state["executions"]), 1)
+        self.assertEqual(summary["turns"], 1)
+
+        records = self._records(summary)
+        self.assertEqual(set(records), {"root", "spawned"})
+        root_record, child = records["root"], records["spawned"]
+        self.assertEqual(root_record["session_id"], source["id"])
+        self.assertEqual(root_record["tokens"], 135)
+        self.assertAlmostEqual(root_record["cost"], 0.0033)
+        self.assertTrue(root_record["tokens_available"])
+        self.assertEqual(child["parent_id"], root_record["id"])
+        self.assertEqual(child["depth"], 1)
+        self.assertEqual(child["role"], "probe")
+        self.assertEqual(child["model"], "opencode-go/deepseek-v4.1-flash")
+        self.assertEqual(child["tokens"], 1100)
+        self.assertAlmostEqual(child["cost"], 0.25)
+        self.assertTrue(child["tokens_available"])
+        self.assertTrue(child["cost_available"])
+        self.assertEqual(child["executions"], 2)
+        self.assertEqual(child["activity_state"], "complete")
+        self.assertEqual(child["started_at"], state["executions"][0]["ts"])
+        self.assertEqual(child["session_id"], None)
+        self.assertTrue(child["id"].startswith("pi-agent-"))
+        self.assertNotIn(source["id"], child["id"])
+        # Root plus child equals the session headline exactly.
+        self.assertEqual(
+            root_record["tokens"] + child["tokens"], state["total_tokens"],
+        )
+        self.assertAlmostEqual(
+            root_record["cost"] + child["cost"], state["total_cost"], places=9,
+        )
+
+    def test_shipped_extension_scalar_cost_shape_is_measured(self):
+        for reported in (0.0, 0.42):
+            with self.subTest(cost=reported), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "agent"
+                # Exact usage shape persisted by the shipped subagent example.
+                usage = {
+                    "input": 1461, "output": 27, "cacheRead": 0,
+                    "cacheWrite": 0, "cost": reported,
+                    "contextTokens": 1488, "turns": 1,
+                }
+                self._write_subagent_session(
+                    root, results=[self._child_result(usage=usage)],
+                )
+                _source, state, summary = self._load(root)
+
+                child = self._records(summary)["spawned"]
+                self.assertTrue(child["cost_available"])
+                self.assertEqual(child["cost"], reported)
+                self.assertTrue(state["availability"]["cost"])
+                self.assertAlmostEqual(
+                    state["total_cost"], 0.0033 + reported, places=6,
+                )
+
+    def test_reported_cost_breakdown_shape_is_still_supported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(root, results=[
+                self._child_result(
+                    usage=self._child_usage(cost=0.25, breakdown=True),
+                ),
+            ])
+            _source, state, summary = self._load(root)
+
+        child = self._records(summary)["spawned"]
+        self.assertTrue(child["cost_available"])
+        self.assertAlmostEqual(child["cost"], 0.25)
+        self.assertAlmostEqual(state["total_cost"], 0.2533)
+
+    def test_child_output_does_not_change_parent_pace_coverage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(
+                root, results=[self._child_result(usage=self._child_usage())],
+            )
+            _source, state, summary = self._load(root)
+
+        self.assertTrue(summary["throughput"]["available"])
+        self.assertAlmostEqual(
+            summary["throughput"]["timing_coverage"], 1.0,
+        )
+        self.assertAlmostEqual(summary["throughput"]["output_tps"], 20 / 3)
+        self.assertAlmostEqual(state["throughput"]["timing_coverage"], 1.0)
+
+    def test_parallel_child_results_each_emit_a_record_and_sum_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(root, mode="parallel", results=[
+                self._child_result("scout", usage=self._child_usage(600, 60, cost=0.1)),
+                self._child_result("reviewer", usage=self._child_usage(400, 40, cost=0.2)),
+            ])
+            _source, state, summary = self._load(root)
+
+        children = [
+            record for record in summary["_agent_records"]
+            if record["kind"] == "spawned"
+        ]
+        self.assertEqual(sorted(record["role"] for record in children),
+                         ["reviewer", "scout"])
+        self.assertEqual(sum(record["tokens"] for record in children), 1100)
+        self.assertAlmostEqual(sum(record["cost"] for record in children), 0.3)
+        self.assertEqual(state["total_tokens"], 1235)
+        self.assertAlmostEqual(state["total_cost"], 0.3033)
+        self.assertEqual(len({record["id"] for record in children}), 2)
+
+    def test_top_level_result_usage_without_details_emits_one_aggregate_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(
+                root, results=[], top_usage=self._child_usage(500, 50, cost=0.3),
+            )
+            _source, state, summary = self._load(root)
+
+        children = [
+            record for record in summary["_agent_records"]
+            if record["kind"] == "spawned"
+        ]
+        self.assertEqual(len(children), 1)
+        self.assertEqual(children[0]["role"], "probe")
+        self.assertEqual(children[0]["tokens"], 550)
+        self.assertAlmostEqual(children[0]["cost"], 0.3)
+        self.assertEqual(state["total_tokens"], 685)
+
+    def test_top_level_breakdown_usage_emits_aggregate_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(
+                root, results=[],
+                top_usage=self._child_usage(500, 50, cost=0.3, breakdown=True),
+            )
+            _source, state, summary = self._load(root)
+
+        child = self._records(summary)["spawned"]
+        self.assertTrue(child["cost_available"])
+        self.assertAlmostEqual(child["cost"], 0.3)
+        self.assertEqual(state["total_tokens"], 685)
+
+    def test_reconciling_details_and_top_level_usage_count_spend_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(
+                root, mode="parallel",
+                results=[
+                    self._child_result("scout", usage=self._child_usage(300, 30, cost=0.1)),
+                    self._child_result("worker", usage=self._child_usage(200, 20, cost=0.2)),
+                ],
+                top_usage=self._child_usage(500, 50, cost=0.3),
+            )
+            _source, state, summary = self._load(root)
+
+        children = [
+            record for record in summary["_agent_records"]
+            if record["kind"] == "spawned"
+        ]
+        self.assertEqual(sorted(record["role"] for record in children),
+                         ["scout", "worker"])
+        self.assertEqual(sum(record["tokens"] for record in children), 550)
+        self.assertEqual(state["total_tokens"], 685)
+        self.assertAlmostEqual(state["total_cost"], 0.3033)
+
+    def test_unreconciled_details_fall_back_to_one_aggregate_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(
+                root, mode="parallel",
+                arguments={"tasks": [
+                    {"agent": "scout", "task": self.CONTENT_CANARY},
+                    {"agent": "worker", "task": self.CONTENT_CANARY},
+                ]},
+                results=[
+                    self._child_result("scout", usage=self._child_usage(300, 30, cost=0.1)),
+                    self._child_result("worker", usage=self._child_usage(200, 20, cost=0.2)),
+                ],
+                top_usage=self._child_usage(900, 90, cost=0.9),
+            )
+            _source, state, summary = self._load(root)
+
+        children = [
+            record for record in summary["_agent_records"]
+            if record["kind"] == "spawned"
+        ]
+        self.assertEqual(len(children), 1)
+        self.assertIsNone(children[0]["role"])
+        self.assertEqual(children[0]["tokens"], 990)
+        self.assertEqual(state["total_tokens"], 1125)
+        self.assertAlmostEqual(state["total_cost"], 0.9033)
+
+    def test_run_without_usage_reports_unavailable_not_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(root, results=[self._child_result()])
+            _source, state, summary = self._load(root)
+
+        child = self._records(summary)["spawned"]
+        self.assertFalse(child["tokens_available"])
+        self.assertFalse(child["cost_available"])
+        self.assertIsNone(child["tokens"])
+        self.assertIsNone(child["cost"])
+        self.assertFalse(summary["availability"]["cost"])
+        self.assertFalse(summary["availability"]["tokens"])
+        self.assertFalse(state["availability"]["cost"])
+        self.assertFalse(state["availability"]["tokens"])
+        self.assertEqual(state["total_tokens"], 135)
+
+    def test_failed_child_run_marks_incomplete_and_keeps_role(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(root, results=[
+                self._child_result("reviewer", usage=self._child_usage(cost=0.05),
+                                   exit_code=1, stop_reason="error"),
+            ])
+            _source, _state, summary = self._load(root)
+
+        child = self._records(summary)["spawned"]
+        self.assertEqual(child["role"], "reviewer")
+        self.assertEqual(child["activity_state"], "incomplete")
+        self.assertEqual(child["failed_attempts"], 1)
+        self.assertIsNone(child["ended_at"])
+
+    def test_partial_failure_keeps_successful_sibling_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            path = self._write_subagent_session(root, mode="parallel", results=[
+                self._child_result("scout", usage=self._child_usage(cost=0.1)),
+                self._child_result("worker", usage=self._child_usage(cost=0.0),
+                                   exit_code=1, stop_reason="error"),
+            ])
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            rows[-1]["message"]["isError"] = True
+            path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            _source, _state, summary = self._load(root)
+
+        children = {
+            record["role"]: record for record in summary["_agent_records"]
+            if record["kind"] == "spawned"
+        }
+        self.assertEqual(children["scout"]["activity_state"], "complete")
+        self.assertEqual(children["worker"]["activity_state"], "incomplete")
+        self.assertEqual(children["worker"]["failed_attempts"], 1)
+
+    def test_zero_cost_child_is_a_measured_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(
+                root, results=[self._child_result(usage=self._child_usage(cost=0.0))],
+            )
+            _source, _state, summary = self._load(root)
+
+        child = self._records(summary)["spawned"]
+        self.assertTrue(child["cost_available"])
+        self.assertEqual(child["cost"], 0.0)
+        self.assertTrue(summary["availability"]["cost"])
+
+    def test_unfinished_child_call_is_incomplete_without_invented_spend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(root, include_result=False)
+            _source, state, summary = self._load(root)
+
+        child = self._records(summary)["spawned"]
+        self.assertEqual(child["activity_state"], "incomplete")
+        self.assertEqual(child["failed_attempts"], 0)
+        self.assertFalse(child["tokens_available"])
+        self.assertFalse(child["cost_available"])
+        self.assertEqual(state["total_tokens"], 135)
+        self.assertEqual(state["total_cost"], 0.0033)
+
+    def test_fresh_unfinished_child_call_is_working(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(
+                root, include_result=False, recent_seconds=10,
+            )
+            _source, _state, summary = self._load(root)
+
+        child = self._records(summary)["spawned"]
+        self.assertEqual(child["activity_state"], "working")
+        self.assertEqual(child["failed_attempts"], 0)
+
+    def test_finished_session_root_reports_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(
+                root, results=[self._child_result(usage=self._child_usage())],
+            )
+            _source, _state, summary = self._load(root)
+
+        # Session-row liveness is intentionally unchanged for this PR.
+        self.assertFalse(summary["terminal"])
+        root_record = self._records(summary)["root"]
+        self.assertEqual(root_record["activity_state"], "complete")
+        self.assertEqual(
+            root_record["ended_at"], root_record["last_activity_at"],
+        )
+
+    def test_realistic_tool_use_then_stop_marks_root_complete(self):
+        final_usage = {
+            "input": 50, "output": 10, "cacheRead": 0, "cacheWrite": 0,
+            "totalTokens": 60,
+            "cost": {"input": 0.0005, "output": 0.0005,
+                     "cacheRead": 0.0, "cacheWrite": 0.0},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(
+                root, stop_reason="toolUse",
+                results=[self._child_result(usage=self._child_usage())],
+                final_turn_usage=final_usage,
+            )
+            _source, state, summary = self._load(root)
+
+        self.assertEqual(summary["turns"], 2)
+        self.assertEqual(
+            self._records(summary)["root"]["activity_state"], "complete",
+        )
+        self.assertAlmostEqual(state["total_cost"], 0.2543)
+
+    def test_nonterminal_session_root_stays_incomplete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(
+                root, stop_reason="toolUse",
+                results=[self._child_result(usage=self._child_usage())],
+            )
+            _source, _state, summary = self._load(root)
+
+        self.assertFalse(summary["terminal"])
+        root_record = self._records(summary)["root"]
+        self.assertEqual(root_record["activity_state"], "incomplete")
+        self.assertIsNone(root_record["ended_at"])
+
+    def test_empty_results_run_emits_no_agent_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(root, results=[])
+            _source, _state, summary = self._load(root)
+
+        self.assertNotIn("_agent_records", summary)
+
+    def test_child_role_rejects_paths_urls_credentials_and_prose(self):
+        bad_roles = [
+            "/Users/henry/agents/secret.md",
+            "https://example.test/agent",
+            "bearer abcdef",
+            "api_key=abcdef",
+            "a" * 80,
+            "two words here",
+            "scout\x00hidden",
+        ]
+        for bad in bad_roles:
+            with self.subTest(bad=bad), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "agent"
+                self._write_subagent_session(
+                    root, results=[self._child_result(bad, usage=self._child_usage())],
+                )
+                _source, state, summary = self._load(root)
+                child = self._records(summary)["spawned"]
+                self.assertIsNone(child["role"])
+                encoded = json.dumps({"summary": summary, "state": state})
+                self.assertNotIn(bad, encoded)
+
+    def test_child_model_rejects_credential_and_path_shapes(self):
+        for bad in ("sk-secret-value", "bearer abc", "/Users/henry/model",
+                    "https://example.test/model", "model with space",
+                    "probe?x=1", "models/llama-3.gguf",
+                    "Users/henry/.ssh/id_rsa", "a/../../etc/passwd",
+                    "example.com/secret", "localhost:8080/model",
+                    "home/henry/model", "C:/Users/henry/model",
+                    "example.com:8080/secret", "127.0.0.1:8000/model",
+                    "my-server.internal:8000/model", "10.0.0.5:9000/model"):
+            with self.subTest(model=bad), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "agent"
+                self._write_subagent_session(root, results=[
+                    self._child_result(
+                        usage=self._child_usage(), model=bad,
+                    ),
+                ])
+                _source, state, summary = self._load(root)
+
+                child = self._records(summary)["spawned"]
+                self.assertEqual(child["model"], "unknown-model")
+                encoded = json.dumps({"summary": summary, "state": state})
+                self.assertNotIn(bad, encoded)
+
+    def test_child_model_accepts_provider_prefixed_ids(self):
+        good_models = (
+            "@cf/meta/llama-3.1-8b-instruct",
+            "opencode-go/deepseek-v4.1-flash",
+            "anthropic/claude-opus-4-8",
+            "meta-llama/Llama-3.1-70B-Instruct",
+            "accounts/fireworks/models/llama-v3p1-70b-instruct",
+            "qwen2.5-coder:32b",
+            "amazon.nova-pro-v1:0",
+        )
+        for good in good_models:
+            with self.subTest(model=good), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "agent"
+                self._write_subagent_session(root, results=[
+                    self._child_result(usage=self._child_usage(), model=good),
+                ])
+                _source, _state, summary = self._load(root)
+
+                child = self._records(summary)["spawned"]
+                self.assertEqual(child["model"], good.lower())
+
+    def test_unreported_child_model_is_unknown_not_the_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(root, results=[
+                self._child_result(usage=self._child_usage(), model=""),
+            ])
+            _source, state, summary = self._load(root)
+
+        child = self._records(summary)["spawned"]
+        self.assertEqual(child["model"], "unknown-model")
+        self.assertEqual(summary["primary_model"], "claude-test")
+        self.assertEqual(summary["_model_cost"]["unknown-model"], 0.25)
+        self.assertAlmostEqual(summary["_model_cost"]["claude-test"], 0.0033)
+        mix = {row["model"]: row["cost"] for row in state["analyses"]["model_mix"]}
+        self.assertEqual(mix["unknown-model"], 0.25)
+        self.assertAlmostEqual(mix["claude-test"], 0.0033)
+
+    def test_child_content_never_reaches_summary_state_or_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(
+                root, results=[self._child_result(usage=self._child_usage())],
+            )
+            _source, state, summary = self._load(root)
+
+        # The records must exist for this to be a meaningful negative check.
+        self.assertTrue(summary.get("_agent_records"))
+        encoded = json.dumps({"summary": summary, "state": state})
+        self.assertNotIn(self.CONTENT_CANARY, encoded)
+        self.assertNotIn("stderr", encoded)
+        self.assertNotIn("agentSource", encoded)
+        self.assertNotIn("messages", encoded)
+
+    def test_non_subagent_tool_usage_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(
+                root, tool_name="summarize",
+                results=[self._child_result(usage=self._child_usage())],
+            )
+            _source, state, summary = self._load(root)
+
+        self.assertEqual(state["total_tokens"], 135)
+        self.assertNotIn("_agent_records", summary)
+        # A non-subagent Pi session keeps its pre-existing session liveness.
+        self.assertFalse(summary["terminal"])
+
+    def _write_many_calls(self, agent_root, call_results, *, extra_rows=()):
+        """Write one parent turn issuing N subagent calls with given results."""
+        directory = Path(agent_root) / "sessions" / "--repo--"
+        directory.mkdir(parents=True)
+        path = directory / "pi-subagent-many.jsonl"
+        calls = [
+            {"type": "toolCall", "id": "call-{}".format(index),
+             "name": "subagent", "arguments": {"agent": "probe"}}
+            for index in range(len(call_results))
+        ]
+        rows = [
+            {"type": "session", "version": 3, "id": "pi-session",
+             "timestamp": "2026-09-04T10:00:00Z", "cwd": "/repo"},
+            {"type": "message", "id": "user", "timestamp": "2026-09-04T10:00:01Z",
+             "message": {"role": "user", "content": []}},
+            {"type": "message", "id": "assistant",
+             "timestamp": "2026-09-04T10:00:02Z",
+             "message": {
+                 "role": "assistant", "model": "claude-test",
+                 "provider": "anthropic", "stopReason": "stop",
+                 "content": calls,
+                 "usage": {"input": 100, "output": 20, "cacheRead": 10,
+                           "cacheWrite": 5,
+                           "cost": {"input": 0.001, "output": 0.002,
+                                    "cacheRead": 0.0001, "cacheWrite": 0.0002}},
+             }},
+        ]
+        for index, results in enumerate(call_results):
+            rows.append({
+                "type": "message", "id": "result-{}".format(index),
+                "timestamp": "2026-09-04T10:00:05Z",
+                "message": {
+                    "role": "toolResult", "toolCallId": "call-{}".format(index),
+                    "toolName": "subagent",
+                    "details": {"mode": "single", "results": results},
+                },
+            })
+        rows.extend(extra_rows)
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        return path
+
+    def _native_load(self, root):
+        adapter = pi_runtime.PiRuntimeAdapter(root)
+        source = adapter.discover(DiscoveryContext(home="/home/test"))[0]
+        return adapter.load(source, meter.DetailLevel.SUMMARY)
+
+    def test_call_cap_marks_nested_spend_partial_not_complete(self):
+        one_cent = [self._child_result(usage=self._child_usage(10, 1, cost=0.01))]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_many_calls(root, [one_cent] * 600)
+            _source, state, summary = self._load(root)
+            loaded = self._native_load(root)
+
+        children = [
+            record for record in summary["_agent_records"]
+            if record["kind"] == "spawned"
+        ]
+        self.assertLessEqual(len(children), pi_runtime.MAX_SUBAGENT_RUNS)
+        for payload in (state, summary):
+            self.assertFalse(payload["availability"]["cost"])
+            self.assertFalse(payload["availability"]["tokens"])
+            self.assertFalse(payload["availability"]["cache"])
+        self.assertIsNone(loaded.usage.cost_usd.value)
+        self.assertIsNone(loaded.usage.input_tokens.value)
+        self.assertIsNone(loaded.usage.cache_read_tokens.value)
+        self.assertIn("history_truncated",
+                      [warning.code for warning in loaded.warnings])
+
+    def test_per_call_details_respect_the_run_cap(self):
+        single = [self._child_result(usage=self._child_usage(10, 1, cost=0.01))]
+        wide = [
+            self._child_result(usage=self._child_usage(10, 1, cost=0.01))
+            for _ in range(pi_runtime.MAX_SUBAGENT_RUNS)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_many_calls(
+                root, [single] * (pi_runtime.MAX_SUBAGENT_RUNS - 1) + [wide],
+            )
+            _source, state, summary = self._load(root)
+
+        children = [
+            record for record in summary["_agent_records"]
+            if record["kind"] == "spawned"
+        ]
+        self.assertEqual(len(children), pi_runtime.MAX_SUBAGENT_RUNS)
+        self.assertFalse(summary["availability"]["cost"])
+        self.assertFalse(state["availability"]["cost"])
+
+    def test_calls_within_the_cap_stay_complete(self):
+        one_cent = [self._child_result(usage=self._child_usage(10, 1, cost=0.01))]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_many_calls(root, [one_cent] * 3)
+            _source, state, summary = self._load(root)
+
+        self.assertTrue(summary["availability"]["cost"])
+        self.assertTrue(state["availability"]["cost"])
+        self.assertAlmostEqual(state["total_cost"], 0.0333)
+
+    def test_nonempty_results_without_valid_entries_is_an_unavailable_run(self):
+        for results in (["not-a-dict"], [None, 7], [["nested"]]):
+            with self.subTest(results=results), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "agent"
+                self._write_subagent_session(root, results=results)
+                _source, state, summary = self._load(root)
+
+                children = [
+                    record for record in summary.get("_agent_records", [])
+                    if record["kind"] == "spawned"
+                ]
+                self.assertEqual(len(children), 1)
+                self.assertFalse(children[0]["tokens_available"])
+                self.assertFalse(children[0]["cost_available"])
+                self.assertFalse(summary["availability"]["cost"])
+                self.assertFalse(state["availability"]["cost"])
+
+    def test_non_list_results_without_usage_is_an_unavailable_run(self):
+        for results in ("not-a-list", {"agent": "probe"}, 7):
+            with self.subTest(results=results), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "agent"
+                # Written raw: details.results is the malformed value itself.
+                self._write_many_calls(root, [results])
+                _source, state, summary = self._load(root)
+
+                children = [
+                    record for record in summary.get("_agent_records", [])
+                    if record["kind"] == "spawned"
+                ]
+                self.assertEqual(len(children), 1)
+                self.assertFalse(children[0]["tokens_available"])
+                self.assertFalse(children[0]["cost_available"])
+                self.assertFalse(summary["availability"]["cost"])
+                self.assertFalse(state["availability"]["cost"])
+
+    def test_call_cap_surfaces_in_cross_session_agent_inventory(self):
+        one_cent = [self._child_result(usage=self._child_usage(10, 1, cost=0.01))]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_many_calls(root, [one_cent] * 600)
+            _source, _state, summary = self._load(root)
+            cross = self._cross(root)
+
+        self.assertTrue(summary["_agent_records_partial"])
+        self.assertNotIn("_agent_records_truncated", summary)
+        usage = cross["agent_usage"]
+        self.assertEqual(usage["totals"]["agents"], pi_runtime.MAX_SUBAGENT_RUNS)
+        self.assertFalse(usage["totals"]["cost_available"])
+        self.assertFalse(usage["totals"]["tokens_available"])
+        self.assertIsNone(usage["totals"]["cost"])
+        self.assertAlmostEqual(
+            usage["totals"]["known_cost"], 0.01 * pi_runtime.MAX_SUBAGENT_RUNS,
+        )
+        # The run cap is partial coverage, not the inventory display limit.
+        self.assertFalse(usage["inventory_truncated"])
+        for row in usage["roles"] + usage["models"]:
+            self.assertFalse(row["cost_available"], row["id"])
+            self.assertEqual(
+                row["cost_covered_agents"], row["agents"], row["id"],
+            )
+        public = json.dumps(cross, default=str)
+        self.assertNotIn("_agent_records_partial", public)
+        self.assertNotIn("_coverage_partial", public)
+
+    def test_per_call_result_cap_surfaces_in_cross_session_inventory(self):
+        wide = [
+            self._child_result(usage=self._child_usage(10, 1, cost=0.01))
+            for _ in range(pi_runtime.MAX_SUBAGENT_RUNS + 5)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_many_calls(root, [wide])
+            cross = self._cross(root)
+
+        usage = cross["agent_usage"]
+        self.assertFalse(usage["inventory_truncated"])
+        self.assertFalse(usage["totals"]["cost_available"])
+        self.assertIsNone(usage["totals"]["cost"])
+        self.assertGreater(usage["totals"]["known_cost"], 0)
+
+    def test_calls_within_the_cap_keep_cross_session_inventory_complete(self):
+        one_cent = [self._child_result(usage=self._child_usage(10, 1, cost=0.01))]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_many_calls(root, [one_cent] * 3)
+            _source, _state, summary = self._load(root)
+            cross = self._cross(root)
+
+        self.assertNotIn("_agent_records_truncated", summary)
+        self.assertNotIn("_agent_records_partial", summary)
+        usage = cross["agent_usage"]
+        self.assertEqual(usage["totals"]["agents"], 3)
+        self.assertTrue(usage["totals"]["cost_available"])
+        self.assertTrue(usage["totals"]["tokens_available"])
+        self.assertFalse(usage["inventory_truncated"])
+
+    def test_repeated_call_id_does_not_overwrite_finished_evidence(self):
+        repeat = {
+            "type": "message", "id": "assistant-repeat",
+            "timestamp": "2026-09-04T10:00:09Z",
+            "message": {
+                "role": "assistant", "model": "claude-test",
+                "provider": "anthropic", "stopReason": "stop",
+                "content": [{"type": "toolCall", "id": "call-0",
+                             "name": "subagent",
+                             "arguments": {"agent": "other"}}],
+                "usage": {"input": 1, "output": 1, "cacheRead": 0,
+                          "cacheWrite": 0,
+                          "cost": {"input": 0.0, "output": 0.0,
+                                   "cacheRead": 0.0, "cacheWrite": 0.0}},
+            },
+        }
+        result = [self._child_result(usage=self._child_usage(cost=0.25))]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_many_calls(root, [result], extra_rows=[repeat])
+            _source, state, summary = self._load(root)
+
+        children = [
+            record for record in summary["_agent_records"]
+            if record["kind"] == "spawned"
+        ]
+        self.assertEqual(len(children), 1)
+        self.assertEqual(children[0]["role"], "probe")
+        self.assertEqual(children[0]["activity_state"], "complete")
+        self.assertAlmostEqual(children[0]["cost"], 0.25)
+        self.assertTrue(state["availability"]["cost"])
+        self.assertAlmostEqual(state["total_cost"], 0.2533)
+
+    def test_child_without_cache_keys_is_not_a_complete_token_total(self):
+        usage = self._child_usage()
+        del usage["cacheRead"]
+        del usage["cacheWrite"]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(
+                root, results=[self._child_result(usage=usage)],
+            )
+            _source, state, summary = self._load(root)
+
+        child = self._records(summary)["spawned"]
+        self.assertFalse(child["cache_available"])
+        self.assertFalse(child["tokens_available"])
+        self.assertIsNone(child["tokens"])
+        self.assertFalse(summary["availability"]["cache"])
+        self.assertFalse(state["availability"]["cache"])
+
+    def _cross(self, root):
+        saved = dict(meter._xsess)
+        try:
+            meter._xsess.update({"data": None, "at": 0, "agent_groups": ()})
+            with mock.patch.object(meter, "PI_AGENT_DIR", str(root)), \
+                    mock.patch.object(meter, "_pi_native_adapters", {}), \
+                    mock.patch.object(meter, "_RUNTIME_REGISTRY", None), \
+                    mock.patch.object(meter, "capability_inventory", return_value={}):
+                return meter.cross_session(sources=meter.pi_session_sources())
+        finally:
+            meter._xsess.clear()
+            meter._xsess.update(saved)
+
+    def test_child_model_sanitizer_table(self):
+        accepted = (
+            "claude-opus-5-5", "anthropic/claude-sonnet-5-5", "openai/gpt-5.6",
+            "gpt-5.6-sol", "grok-4.7", "llama3.1:8b", "qwen2.5-coder:32b",
+            "amazon.nova-pro-v1:0", "claude-opus-4@20250514",
+            "@cf/meta/llama-3.1-8b-instruct",
+            "us.anthropic.claude-sonnet-4-20250514-v1:0",
+            "us.anthropic.claude-opus-5-5-v1:0",
+            "eu.anthropic.claude-sonnet-5-5-v1:0",
+            "meta.llama3-70b-instruct-v1:0", "claude-sonnet-4@20250514",
+            "model@latest", "model@v2.1.0", "model@1.2", "model@v1",
+            "@cf/meta/llama-3-8b", "accounts/fireworks/models/x",
+            "openrouter/anthropic/claude-opus-5-5", "gemini-2.5-pro",
+            "deepseek-r1:70b", "qwen2.5-coder:7b", "gpt-oss:20b",
+            "phi3:3.8b", "model:latest", "hf.co/unsloth/model",
+            "huggingface.co/org/model",
+            # Short vendor prefixes followed by an ordinary word stay names.
+            "xai-researcher", "hf_transformers",
+        )
+        rejected = (
+            "internal.corp.example.com:8443", "10.0.0.5:11434", "10.0.0.5",
+            "localhost:8080", "internal.corp.example.com",
+            "alice@corp.example.com", "user@host", "model@corp.example.com",
+            "sk-proj-abc123", "openai/sk-proj-abc123",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl",
+            "ghp_abcdefghijklmnop", "gho_abcdefghijklmnop",
+            "github_pat_11ABCDEFG", "xoxb-1234-5678-abcd", "xoxp-1234-5678",
+            "AKIAIOSFODNN7EXAMPLE", "vendor/AKIAIOSFODNN7EXAMPLE",
+            # Host, IP, or host:port in any path segment.
+            "ollama/10.0.0.5:11434", "provider/host.example.com:8443/m",
+            "hf.co/10.0.0.5:8080/model", "vendor/gateway:8080",
+            # Account or host after @ instead of a version.
+            "bob@10.0.0.5", "model@1.2.3.4", "a@1host.corp.com",
+            "ollama@192.168.1.4", "model@2.example.com",
+            # Single-label host with a port-shaped tag.
+            "myhost:11434", "gateway:8080",
+            # Additional vendor credential prefixes, any case.
+            "hf_AbCdEfGhIjKlMnOpQrStUvWx", "HF_AbCdEfGhIjKlMnOpQrStUvWx",
+            "xai-AbCdEfGhIjKlMnOpQrStUv", "AIzaSyA1234567890abcdefghij",
+            "glpat-abcdefgh", "GLPAT-abcdefgh", "npm_AbCdEfGhIjKlMnOpQrStUv",
+            "sk_live_abc123", "sk_test_abc123", "pk_live_abc123",
+            "rk_live_abc123", "akiaiosfodnn7example",
+            "vendor/glpat-abcdefgh",
+        )
+        for value in accepted:
+            self.assertEqual(pi_runtime._subagent_model_id(value), value)
+        for value in rejected:
+            self.assertEqual(pi_runtime._subagent_model_id(value), "", value)
+        for value in rejected:
+            with self.subTest(model=value), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "agent"
+                self._write_subagent_session(root, results=[
+                    self._child_result(usage=self._child_usage(), model=value),
+                ])
+                _source, state, summary = self._load(root)
+                cross = self._cross(root)
+
+                child = self._records(summary)["spawned"]
+                self.assertEqual(child["model"], "unknown-model")
+                encoded = json.dumps(
+                    {"summary": summary, "state": state, "cross": cross},
+                    default=str,
+                )
+                self.assertNotIn(value, encoded)
+                self.assertNotIn(value.lower(), encoded)
+
+    def test_child_role_rejects_secret_token_shapes(self):
+        accepted = (
+            "probe", "scout", "task-runner", "worker_2", "skeptic",
+            # Short prefixes need a 16+ character key-like run to count.
+            "xai-researcher", "hf_helper", "npm_runner", "aizawa",
+        )
+        rejected = (
+            "sk-abcdef", "my-sk-abcdef", "ghp_abcdef", "gho_abcdef",
+            "github_pat_11ABC", "xoxb-1234", "xoxp-1234",
+            "AKIAIOSFODNN7EXAMPLE", "akiaiosfodnn7example",
+            "hf_AbCdEfGhIjKlMnOpQr", "xai-AbCdEfGhIjKlMnOpQr",
+            "npm_AbCdEfGhIjKlMnOpQr", "AIzaSyA1234567890abcdef",
+            "glpat-abcdef", "sk_live_abc", "sk_test_abc", "pk_live_abc",
+            "rk_live_abc", "worker-glpat-x",
+        )
+        for value in accepted:
+            self.assertEqual(pi_runtime._safe_agent_role(value), value)
+        for value in rejected:
+            self.assertEqual(pi_runtime._safe_agent_role(value), "", value)
+        for value in rejected:
+            with self.subTest(role=value), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "agent"
+                self._write_subagent_session(
+                    root, arguments={"agent": value},
+                    results=[self._child_result(value, usage=self._child_usage())],
+                )
+                _source, state, summary = self._load(root)
+                cross = self._cross(root)
+
+                self.assertIsNone(self._records(summary)["spawned"]["role"])
+                encoded = json.dumps(
+                    {"summary": summary, "state": state, "cross": cross},
+                    default=str,
+                )
+                self.assertNotIn(value, encoded)
+
+    def test_canonical_agent_sources_selects_pi_rows(self):
+        source = {
+            "id": "pi-session", "path": "/tmp/pi.jsonl", "provider": "pi",
+            "runtime": "Pi", "label": "Pi", "project": "/repo", "mtime": 1,
+        }
+        other = {
+            "id": "kiro-session", "path": "/tmp/kiro.json",
+            "provider": "kiro", "runtime": "Kiro", "label": "Kiro",
+            "project": "/repo", "mtime": 1,
+        }
+        selected = meter.canonical_agent_sources([source, other])
+        self.assertEqual(selected, [source])
+
+    def test_agent_group_and_inventory_include_pi_children(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_subagent_session(
+                root, results=[self._child_result(usage=self._child_usage())],
+            )
+            _source, _state, summary = self._load(root)
+
+        groups = meter._domain_build_agent_groups([summary])
+        usage = meter._agent_usage_projection(
+            meter._domain_aggregate_agent_usage(groups)
+        )
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(usage["totals"]["agents"], 1)
+        self.assertAlmostEqual(usage["totals"]["cost"], 0.25)
+        self.assertEqual(usage["inventory"][0]["role"], "probe")
+        self.assertEqual(usage["inventory"][0]["runtime"], "pi")
+        self.assertEqual(
+            usage["models"][0]["id"],
+            "opencode-go/deepseek-v4.1-flash::pi::spawned",
+        )
+
+
 class OpenCodeTests(unittest.TestCase):
     """OpenCode is discovered from its read-only SQLite database."""
 
@@ -15785,7 +17745,7 @@ class OpenCodeTests(unittest.TestCase):
     def _message(self, mid, sid, data, created):
         return (mid, sid, created, created, json.dumps(data))
 
-    def test_discovery_labels_and_filters_children_and_archived(self):
+    def test_discovery_labels_roots_and_child_sessions_and_filters_archived(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             conn = self._build_db(root)
@@ -15806,8 +17766,13 @@ class OpenCodeTests(unittest.TestCase):
             conn.close()
             with mock.patch.object(meter, "OPENCODE_DB", str(db_path := root / "opencode.db")):
                 sources = meter.opencode_session_sources()
-        self.assertEqual([row["id"] for row in sources], ["ses_top"])
-        source = sources[0]
+        # Child sessions are discovered so their spend reaches totals, and only
+        # the archived session stays hidden.
+        self.assertEqual(
+            [row["id"] for row in sources], ["ses_child", "ses_top"],
+        )
+        by_id = {row["id"]: row for row in sources}
+        source = by_id["ses_top"]
         self.assertEqual(source["provider"], "opencode")
         self.assertEqual(source["label"], "OpenCode")
         self.assertEqual(source["runtime"], "OpenCode")
@@ -15817,6 +17782,15 @@ class OpenCodeTests(unittest.TestCase):
         self.assertAlmostEqual(source["mtime"], 1_784_548_900.0)
         self.assertEqual(source["signature_mtime"], source["mtime"])
         self.assertEqual(meter.source_runtime_label(source), "OpenCode")
+
+        # A child records its private parent reference and role, and resolves its
+        # project from the parent root rather than its own agent column.
+        child_source = by_id["ses_child"]
+        self.assertEqual(child_source["agent_parent_id"], "ses_top")
+        self.assertEqual(child_source["agent_depth"], 1)
+        self.assertEqual(child_source["project"], "/repo")
+        self.assertEqual(child_source["path"], "opencode:ses_child")
+        self.assertNotIn("ses_arch", by_id)
 
     def test_discovery_joins_all_session_sources(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -15869,6 +17843,630 @@ class OpenCodeTests(unittest.TestCase):
                 source = meter.opencode_session_sources()[0]
         self.assertEqual(source["mtime"], base / 1000)
         self.assertEqual(source["signature_mtime"], (base + 20_000) / 1000)
+
+    def _insert_sessions(self, conn, rows):
+        for row in rows:
+            conn.execute(
+                "INSERT INTO session VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (row["id"], row["project_id"], row["parent_id"], row["slug"],
+                 row["directory"], row["title"], row["version"], row["time_created"],
+                 row["time_updated"], row["time_archived"], row["agent"], row["model"],
+                 row["cost"], row["tokens_input"], row["tokens_output"],
+                 row["tokens_reasoning"], row["tokens_cache_read"],
+                 row["tokens_cache_write"]),
+            )
+
+    def _child_agent_row(self, source):
+        """Return the single spawned agent record a child session emits."""
+        meter._opencode_compatibility.cache_clear() \
+            if hasattr(meter._opencode_compatibility, "cache_clear") else None
+        row = meter.session_summary(source)
+        records = row.get("_agent_records") or []
+        self.assertEqual(len(records), 1, records)
+        return records[0]
+
+    def test_child_session_spend_is_additive_and_not_double_counted(self):
+        """Parent cost excludes child cost, so totals gain exactly the children."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = self._build_db(root)
+            base = 1_784_548_900_000
+            # The parent costs less than its children combined, matching the
+            # observed OpenCode shape where child spend is additive.
+            parent = self._session_row("ses_top", "/repo", "Root", "model-a",
+                                       1.25, 1000, 200, 0, 0, 0, base)
+            child_a = self._session_row("ses_a", "/repo", "Child A", "model-a",
+                                        3.00, 100, 50, 0, 0, 0, base + 1000,
+                                        parent_id="ses_top", agent="gsd-planner")
+            child_b = self._session_row("ses_b", "/repo", "Child B", "model-b",
+                                        4.50, 200, 60, 0, 0, 0, base + 2000,
+                                        parent_id="ses_top", agent="explore")
+            self._insert_sessions(conn, (parent, child_a, child_b))
+            conn.commit()
+            conn.close()
+            with mock.patch.object(meter, "OPENCODE_DB", str(root / "opencode.db")):
+                sources = meter.opencode_session_sources()
+                by_id = {row["id"]: row for row in sources}
+                meter._summary_cache.clear()
+                costs = {
+                    sid: meter.session_summary(row)["cost"]
+                    for sid, row in sorted(by_id.items())
+                }
+                rows = {sid: meter.session_summary(row) for sid, row in by_id.items()}
+                groups = meter._domain_build_agent_groups([
+                    rows[sid] for sid in sorted(rows)
+                ])
+                public = agent_usage_projection(
+                    meter._domain_aggregate_agent_usage(groups)
+                )
+
+        self.assertEqual(sorted(costs), ["ses_a", "ses_b", "ses_top"])
+        self.assertAlmostEqual(costs["ses_top"], 1.25)
+        self.assertAlmostEqual(costs["ses_a"], 3.00)
+        self.assertAlmostEqual(costs["ses_b"], 4.50)
+        # Additive, never folded into the parent headline.
+        self.assertAlmostEqual(sum(costs.values()), 8.75)
+        self.assertGreater(sum(costs.values()), costs["ses_top"])
+
+        # One group forms, and the subagent rollup counts children only.
+        self.assertEqual(len(groups), 1)
+        group = groups[0]
+        self.assertEqual(len(group["agents"]), 3)
+        self.assertAlmostEqual(group["totals"]["cost"], 8.75)
+        self.assertEqual(public["totals"]["agents"], 2)
+        self.assertAlmostEqual(public["totals"]["cost"], 7.50)
+        self.assertEqual(public["totals"]["parent_sessions"], 1)
+        # The parent's own work is never counted as subagent spend.
+        self.assertLess(
+            public["totals"]["cost"], group["totals"]["cost"],
+        )
+        roles = {row["role"] for row in public["roles"]}
+        self.assertIn("gsd-planner", roles)
+        self.assertIn("explore", roles)
+
+    def test_child_emits_one_spawned_record_with_opaque_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = self._build_db(root)
+            base = 1_784_548_900_000
+            parent = self._session_row("ses_top", "/repo", "Root", "model-a",
+                                       0.5, 100, 20, 0, 0, 0, base)
+            child = self._session_row("ses_child", "/repo", "Child", "model-a",
+                                      0.75, 300, 60, 0, 0, 0, base + 1000,
+                                      parent_id="ses_top", agent="gsd-executor")
+            self._insert_sessions(conn, (parent, child))
+            conn.commit()
+            conn.close()
+            with mock.patch.object(meter, "OPENCODE_DB", str(root / "opencode.db")):
+                sources = {row["id"]: row for row in meter.opencode_session_sources()}
+                meter._summary_cache.clear()
+                record = self._child_agent_row(sources["ses_child"])
+
+        self.assertEqual(record["kind"], "spawned")
+        self.assertEqual(record["depth"], 1)
+        self.assertEqual(record["runtime"], "opencode")
+        self.assertEqual(record["role"], "gsd-executor")
+        self.assertTrue(record["id"].startswith("opencode-agent-"))
+        self.assertTrue(record["parent_id"].startswith("opencode-agent-"))
+        # Identity is a digest: neither the child nor the parent session id leaks.
+        self.assertNotIn("ses_child", record["id"])
+        self.assertNotIn("ses_top", record["parent_id"])
+        self.assertEqual(record["cost"], 0.75)
+        self.assertTrue(record["cost_available"])
+        self.assertEqual(record["input_tokens"], 300)
+        self.assertEqual(record["output_tokens"], 60)
+        self.assertEqual(record["tokens"], 360)
+
+    def test_agent_record_never_projects_private_identity_or_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = self._build_db(root)
+            base = 1_784_548_900_000
+            parent = self._session_row("ses_top", "/secret/workdir", "Root", "model-a",
+                                       0.5, 100, 20, 0, 0, 0, base)
+            child = self._session_row("ses_child", "/secret/workdir", "Child", "model-a",
+                                      0.75, 300, 60, 0, 0, 0, base + 1000,
+                                      parent_id="ses_top", agent="explore")
+            self._insert_sessions(conn, (parent, child))
+            conn.execute(
+                "INSERT INTO message VALUES (?,?,?,?,?)",
+                ("m1", "ses_child", base, base,
+                 json.dumps({"role": "user", "content": "private prompt text"})),
+            )
+            conn.execute(
+                "INSERT INTO part VALUES (?,?,?,?,?,?)",
+                ("p1", "m1", "ses_child", base, base,
+                 json.dumps({"type": "tool", "tool": "read", "input": "secret arg"})),
+            )
+            conn.commit()
+            conn.close()
+            with mock.patch.object(meter, "OPENCODE_DB", str(root / "opencode.db")):
+                sources = {row["id"]: row for row in meter.opencode_session_sources()}
+                meter._summary_cache.clear()
+                record = self._child_agent_row(sources["ses_child"])
+                row = meter.session_summary(sources["ses_child"])
+                public = agent_usage_projection(
+                    meter._domain_aggregate_agent_usage(
+                        meter._domain_build_agent_groups([row])
+                    )
+                )
+
+        serialized = json.dumps({"record": record, "public": public}, default=str)
+        for private in (
+            "/secret/workdir", "private prompt text", "secret arg", "workdir",
+        ):
+            self.assertNotIn(private, serialized)
+        # The agent and parent identities are opaque digests, never raw ids.
+        self.assertNotIn("ses_child", record["id"])
+        self.assertNotIn("ses_top", record["parent_id"])
+        # The established public session id stays, so the row is navigable.
+        self.assertEqual(record["session_id"], "ses_child")
+
+    def test_free_tier_child_reports_measured_zero_not_unavailable(self):
+        """A real free-tier price of zero is measured evidence, not a gap."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = self._build_db(root)
+            base = 1_784_548_900_000
+            free_model = json.dumps({"id": "space-bunny-free", "providerID": "opencode"})
+            parent = self._session_row("ses_top", "/repo", "Root", "model-a",
+                                       0.5, 100, 20, 0, 0, 0, base)
+            child = self._session_row("ses_child", "/repo", "Child", "model-a",
+                                      0.0, 19084935, 0, 0, 0, 0, base + 1000,
+                                      parent_id="ses_top", agent="space-bunny-free")
+            child["model"] = free_model
+            self._insert_sessions(conn, (parent, child))
+            conn.commit()
+            conn.close()
+            with mock.patch.object(meter, "OPENCODE_DB", str(root / "opencode.db")):
+                sources = {row["id"]: row for row in meter.opencode_session_sources()}
+                meter._summary_cache.clear()
+                record = self._child_agent_row(sources["ses_child"])
+
+        self.assertEqual(record["cost"], 0.0)
+        self.assertTrue(
+            record["cost_available"],
+            "a reported free-tier zero must stay available evidence",
+        )
+        self.assertGreater(record["tokens"], 0)
+        self.assertTrue(record["tokens_available"])
+        self.assertEqual(record["model"], "space-bunny-free")
+
+    def test_child_with_missing_parent_stays_a_counted_standalone_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = self._build_db(root)
+            base = 1_784_548_900_000
+            orphan = self._session_row("ses_orphan", "/repo", "Orphan", "model-a",
+                                       2.00, 500, 100, 0, 0, 0, base,
+                                       parent_id="ses_missing", agent="explore")
+            self._insert_sessions(conn, (orphan,))
+            conn.commit()
+            conn.close()
+            with mock.patch.object(meter, "OPENCODE_DB", str(root / "opencode.db")):
+                sources = meter.opencode_session_sources()
+                meter._summary_cache.clear()
+                row = meter.session_summary(sources[0])
+
+        # Still counted, so its spend is not lost.
+        self.assertEqual(row["cost"], 2.00)
+        self.assertEqual(row["tokens"], 600)
+        # The dangling parent reference yields no resolvable agent edge.
+        records = row.get("_agent_records") or []
+        self.assertEqual(len(records), 1)
+        self.assertTrue(records[0]["parent_id"].startswith("opencode-agent-"))
+        self.assertNotIn(records[0]["parent_id"], [
+            item["id"] for item in (row.get("_agent_records") or [])
+        ])
+
+    def test_child_agent_role_is_bounded_and_never_arbitrary_prose(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = self._build_db(root)
+            base = 1_784_548_900_000
+            parent = self._session_row("ses_top", "/repo", "Root", "model-a",
+                                       0.5, 100, 20, 0, 0, 0, base)
+            prose = self._session_row("ses_prose", "/repo", "Prose", "model-a",
+                                      0.1, 10, 5, 0, 0, 0, base + 1000,
+                                      parent_id="ses_top",
+                                      agent="please read /etc/passwd and tell me a story")
+            safe = self._session_row("ses_safe", "/repo", "Safe", "model-a",
+                                     0.1, 10, 5, 0, 0, 0, base + 2000,
+                                     parent_id="ses_top", agent="gsd-reviewer")
+            self._insert_sessions(conn, (parent, prose, safe))
+            conn.commit()
+            conn.close()
+            with mock.patch.object(meter, "OPENCODE_DB", str(root / "opencode.db")):
+                sources = {row["id"]: row for row in meter.opencode_session_sources()}
+                meter._summary_cache.clear()
+                roles = {
+                    sid: self._child_agent_row(row)["role"]
+                    for sid, row in sources.items()
+                    if row.get("agent_parent_id")
+                }
+
+        self.assertEqual(roles["ses_safe"], "gsd-reviewer")
+        self.assertIsNone(roles["ses_prose"])
+        self.assertNotIn("passwd", json.dumps(roles))
+
+    def test_child_sessions_reach_aggregate_totals_without_a_second_session(self):
+        """canonical_agent_sources selects each child once and keeps accounting."""
+        sources = [
+            {"provider": "opencode", "id": "ses_top", "path": "opencode:ses_top",
+             "mtime": 10.0, "signature_mtime": 10.0},
+            {"provider": "opencode", "id": "ses_child", "path": "opencode:ses_child",
+             "mtime": 20.0, "signature_mtime": 20.0,
+             "agent_parent_id": "ses_top", "agent_depth": 1},
+            {"provider": "claude", "id": "claude-1", "path": "/trace.jsonl",
+             "mtime": 5.0, "signature_mtime": 5.0},
+        ]
+        selected = meter.canonical_agent_sources(sources)
+
+        self.assertEqual(
+            sorted(row["id"] for row in selected),
+            ["claude-1", "ses_child", "ses_top"],
+        )
+        # Accounting sources are untouched by the agent selection.
+        self.assertEqual(
+            sorted(row["id"] for row in meter.canonical_aggregation_sources(sources)),
+            ["claude-1", "ses_child", "ses_top"],
+        )
+
+    def test_old_child_reports_incomplete_not_complete(self):
+        """A child with no terminal evidence is a stale nonterminal trace."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = self._build_db(root)
+            base = 1_784_548_900_000
+            parent = self._session_row("ses_top", "/repo", "Root", "model-a",
+                                       0.5, 100, 20, 0, 0, 0, base)
+            # One hour old: past the working window, with no terminal evidence.
+            old_child = self._session_row("ses_old", "/repo", "Old child", "model-a",
+                                          0.1, 10, 5, 0, 0, 0, base - 3_600_000,
+                                          parent_id="ses_top", agent="explore")
+            self._insert_sessions(conn, (parent, old_child))
+            conn.commit()
+            conn.close()
+            with mock.patch.object(meter, "OPENCODE_DB", str(root / "opencode.db")):
+                sources = {row["id"]: row for row in meter.opencode_session_sources()}
+                meter._summary_cache.clear()
+                record = self._child_agent_row(sources["ses_old"])
+
+        self.assertEqual(record["activity_state"], "incomplete")
+        self.assertNotEqual(record["activity_state"], "complete")
+        self.assertNotEqual(record["activity_state"], "recent")
+
+    def test_parent_with_only_archived_children_emits_no_root_record(self):
+        """A parent whose children are all archived has no live child group."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = self._build_db(root)
+            base = 1_784_548_900_000
+            parent = self._session_row("ses_top", "/repo", "Root", "model-a",
+                                       0.5, 100, 20, 0, 0, 0, base)
+            archived_child = self._session_row(
+                "ses_arch", "/repo", "Archived child", "model-a",
+                0.1, 10, 5, 0, 0, 0, base + 1000,
+                parent_id="ses_top", agent="explore", archived=base + 2000,
+            )
+            self._insert_sessions(conn, (parent, archived_child))
+            conn.commit()
+            conn.close()
+            with mock.patch.object(meter, "OPENCODE_DB", str(root / "opencode.db")):
+                sources = meter.opencode_session_sources()
+                meter._summary_cache.clear()
+                rows = [meter.session_summary(s) for s in sources]
+
+        # The archived child is not discovered, so the parent has no live
+        # children and must not emit a root record for a group that cannot form.
+        self.assertEqual([row["id"] for row in rows], ["ses_top"])
+        self.assertFalse(rows[0].get("_agent_records"))
+
+    def _assistant(self, conn, mid, sid, cost, created, inp=10, out=5):
+        conn.execute("INSERT INTO message VALUES (?,?,?,?,?)", (
+            mid, sid, created, created + 500, json.dumps({
+                "role": "assistant", "modelID": "model-a", "providerID": "opencode-go",
+                "time": {"created": created, "completed": created + 500},
+                "tokens": {"input": inp, "output": out, "reasoning": 0,
+                           "cache": {"read": 0, "write": 0}},
+                "cost": cost,
+            }),
+        ))
+
+    def _family_db(self, root, base, rows, messages=True):
+        """Insert sessions plus one assistant message carrying each row's cost."""
+        conn = self._build_db(root)
+        self._insert_sessions(conn, rows)
+        if messages:
+            for index, row in enumerate(rows):
+                self._assistant(conn, "m-" + row["id"], row["id"], row["cost"],
+                                base + index)
+        conn.commit()
+        conn.close()
+        return root / "opencode.db"
+
+    def _cross(self, db_path, sources=None):
+        saved = dict(meter._xsess)
+        try:
+            meter._xsess["data"], meter._xsess["at"] = None, 0
+            meter._summary_cache.clear()
+            with mock.patch.object(meter, "OPENCODE_DB", str(db_path)), \
+                    mock.patch.object(meter, "capability_inventory", return_value={}):
+                sources = meter.opencode_session_sources() if sources is None else sources
+                cross = meter.cross_session(sources=sources)
+                family_rows = list(meter._xsess.get("sessions") or [])
+            return sources, cross, family_rows
+        finally:
+            meter._xsess.clear()
+            meter._xsess.update(saved)
+            meter._summary_cache.clear()
+
+    def test_child_parent_id_stays_out_of_allowlisted_projections(self):
+        """Raw parent linkage never reaches sessions, /logs rows, or Subagents."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = 1_784_548_900_000
+            parent = self._session_row("ses_top", "/repo", "Root", "model-a",
+                                       0.5, 100, 20, 0, 0, 0, base)
+            child = self._session_row("ses_child", "/repo", "Child", "model-a",
+                                      0.75, 300, 60, 0, 0, 0, base + 1000,
+                                      parent_id="ses_top", agent="explore")
+            orphan = self._session_row("ses_orphan", "/repo", "Orphan", "model-a",
+                                       0.25, 30, 6, 0, 0, 0, base + 2000,
+                                       parent_id="ses_private_missing", agent="explore")
+            db_path = self._family_db(root, base, (parent, child, orphan))
+            _sources, cross, family_rows = self._cross(db_path)
+
+        by_id = {row["id"]: row for row in cross["sessions"]}
+        public = json.dumps({
+            "sessions": cross["sessions"], "family": family_rows,
+            "agent_usage": agent_usage_projection(cross["agent_usage"]),
+        }, default=str)
+        self.assertNotIn("child_parent_id", public)
+        # The unlisted parent reference of an orphan never leaves the server.
+        self.assertNotIn("ses_private_missing", public)
+        # Only the resolved, listed root id is published on a child row.
+        self.assertEqual(by_id["ses_child"]["root_session_id"], "ses_top")
+        self.assertTrue(by_id["ses_child"]["is_child_session"])
+        self.assertNotIn("root_session_id", by_id["ses_orphan"])
+        self.assertNotIn("root_session_id", by_id["ses_top"])
+
+    def test_archived_root_excludes_its_whole_family_from_totals(self):
+        """An archived root hides its children and grandchildren, as before."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = 1_784_548_900_000
+            rows = (
+                self._session_row("ses_arch", "/old", "Archived", "model-a",
+                                  1.00, 10, 5, 0, 0, 0, base, archived=base + 9000),
+                self._session_row("ses_arch_child", "/old", "Archived child", "model-a",
+                                  2.00, 10, 5, 0, 0, 0, base + 1000,
+                                  parent_id="ses_arch", agent="explore"),
+                self._session_row("ses_arch_grand", "/old", "Archived grandchild", "model-a",
+                                  4.00, 10, 5, 0, 0, 0, base + 2000,
+                                  parent_id="ses_arch_child", agent="explore"),
+                self._session_row("ses_live", "/repo", "Live", "model-a",
+                                  0.50, 10, 5, 0, 0, 0, base + 3000),
+                self._session_row("ses_live_child", "/repo", "Live child", "model-a",
+                                  0.25, 10, 5, 0, 0, 0, base + 4000,
+                                  parent_id="ses_live", agent="explore"),
+            )
+            db_path = self._family_db(root, base, rows)
+            sources, cross, _family = self._cross(db_path)
+
+        ids = sorted(row["id"] for row in sources)
+        self.assertEqual(ids, ["ses_live", "ses_live_child"])
+        self.assertAlmostEqual(cross["total_cost"], 0.75)
+        self.assertEqual(cross["total_sessions"], 2)
+        # Nothing is left looking like an unattributed child of an archived parent.
+        self.assertEqual(cross["agent_usage"]["totals"]["unresolved_agents"], 0)
+        self.assertNotIn("ses_arch", json.dumps(cross["sessions"]))
+
+    def test_missing_parent_is_the_only_unresolved_family(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = 1_784_548_900_000
+            rows = (
+                self._session_row("ses_live", "/repo", "Live", "model-a",
+                                  0.50, 10, 5, 0, 0, 0, base),
+                self._session_row("ses_orphan", "/repo", "Orphan", "model-a",
+                                  0.40, 10, 5, 0, 0, 0, base + 1000,
+                                  parent_id="ses_gone", agent="explore"),
+            )
+            db_path = self._family_db(root, base, rows)
+            _sources, cross, _family = self._cross(db_path)
+
+        self.assertAlmostEqual(cross["total_cost"], 0.90)
+        self.assertEqual(cross["agent_usage"]["totals"]["unresolved_agents"], 1)
+        self.assertAlmostEqual(
+            cross["agent_usage"]["totals"]["unresolved_known_cost"], 0.40,
+        )
+
+    def test_grandchild_resolves_root_project_depth_and_root_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = 1_784_548_900_000
+            rows = (
+                self._session_row("ses_root", "/repo/root", "Root", "model-a",
+                                  0.50, 10, 5, 0, 0, 0, base),
+                self._session_row("ses_mid", "/repo/mid", "Mid", "model-a",
+                                  0.25, 10, 5, 0, 0, 0, base + 1000,
+                                  parent_id="ses_root", agent="explore"),
+                self._session_row("ses_leaf", "/repo/leaf", "Leaf", "model-a",
+                                  0.125, 10, 5, 0, 0, 0, base + 2000,
+                                  parent_id="ses_mid", agent="gsd-reviewer"),
+            )
+            db_path = self._family_db(root, base, rows)
+            sources, cross, _family = self._cross(db_path)
+            with mock.patch.object(meter, "OPENCODE_DB", str(db_path)):
+                meter._summary_cache.clear()
+                by_source = {row["id"]: row for row in sources}
+                leaf_record = self._child_agent_row(by_source["ses_leaf"])
+                meter._summary_cache.clear()
+
+        by_source = {row["id"]: row for row in sources}
+        self.assertEqual(by_source["ses_leaf"]["project"], "/repo/root")
+        self.assertEqual(by_source["ses_mid"]["project"], "/repo/root")
+        self.assertEqual(by_source["ses_leaf"]["agent_depth"], 2)
+        self.assertEqual(by_source["ses_mid"]["agent_depth"], 1)
+        self.assertEqual(by_source["ses_leaf"]["agent_root_id"], "ses_root")
+        self.assertTrue(by_source["ses_mid"]["agent_has_children"])
+        self.assertEqual(leaf_record["depth"], 2)
+        sessions = {row["id"]: row for row in cross["sessions"]}
+        self.assertEqual(sessions["ses_leaf"]["root_session_id"], "ses_root")
+        self.assertEqual(sessions["ses_leaf"]["child_depth"], 2)
+        self.assertAlmostEqual(cross["total_cost"], 0.875)
+        self.assertEqual(cross["agent_usage"]["totals"]["unresolved_agents"], 0)
+        self.assertEqual(cross["agent_usage"]["totals"]["agents"], 2)
+
+    def test_parent_cost_excludes_children_so_headline_is_parent_plus_children(self):
+        """Pin the additive assumption against message-level parent evidence."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = 1_784_548_900_000
+            rows = (
+                self._session_row("ses_top", "/repo", "Root", "model-a",
+                                  1.25, 10, 5, 0, 0, 0, base),
+                self._session_row("ses_a", "/repo", "A", "model-a",
+                                  3.00, 10, 5, 0, 0, 0, base + 1000,
+                                  parent_id="ses_top", agent="explore"),
+            )
+            db_path = self._family_db(root, base, rows)
+            _sources, cross, family = self._cross(db_path)
+
+        costs = {row["id"]: row["cost"] for row in cross["sessions"]}
+        self.assertAlmostEqual(costs["ses_top"], 1.25)
+        self.assertAlmostEqual(cross["total_cost"], 4.25)
+        self.assertFalse(any("_cost_includes_children" in row for row in family))
+
+    def test_parent_cost_above_own_messages_is_kept_and_children_added(self):
+        """A parent reporting more than its own message sum is never reduced.
+
+        Reverted messages leave a parent's session cost above its remaining
+        message-level cost; that gap must not be read as included child spend.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = 1_784_548_900_000
+            parent = self._session_row("ses_top", "/repo", "Root", "model-a",
+                                       3.00, 10, 5, 0, 0, 0, base)
+            child = self._session_row("ses_a", "/repo", "A", "model-a",
+                                      0.50, 10, 5, 0, 0, 0, base + 1000,
+                                      parent_id="ses_top", agent="explore")
+            conn = self._build_db(root)
+            self._insert_sessions(conn, (parent, child))
+            self._assistant(conn, "m-top", "ses_top", 1.00, base)
+            self._assistant(conn, "m-a", "ses_a", 0.50, base + 1)
+            conn.commit()
+            conn.close()
+            _sources, cross, family = self._cross(root / "opencode.db")
+
+        costs = {row["id"]: row["cost"] for row in cross["sessions"]}
+        self.assertAlmostEqual(costs["ses_top"], 3.00)
+        self.assertAlmostEqual(costs["ses_a"], 0.50)
+        self.assertAlmostEqual(sum(row["cost"] for row in family), 3.50)
+
+    def test_live_child_runs_fold_into_one_current_root_session(self):
+        """Root + active child + grandchild form one current session and one cap."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            now_ms = int(time.time() * 1000)
+            # The root itself is idle; only its descendants are active.
+            rows = (
+                self._session_row("ses_root", "/repo", "Root", "model-a",
+                                  1.00, 10, 5, 0, 0, 0, now_ms - 40 * 60_000),
+                self._session_row("ses_child", "/repo", "Child", "model-a",
+                                  2.00, 20, 10, 0, 0, 0, now_ms - 30_000,
+                                  parent_id="ses_root", agent="explore"),
+                self._session_row("ses_grand", "/repo", "Grand", "model-a",
+                                  4.00, 40, 20, 0, 0, 0, now_ms - 20_000,
+                                  parent_id="ses_child", agent="explore"),
+            )
+            db_path = self._family_db(root, now_ms - 50 * 60_000, rows)
+            sources, cross, family = self._cross(db_path)
+
+        current = cross["current_sessions"]
+        self.assertEqual([row["id"] for row in current], ["ses_root"])
+        self.assertAlmostEqual(current[0]["cost"], 7.00)
+        self.assertEqual(current[0]["turns"], 3)
+        self.assertNotIn("subagent_runs", current[0])
+        self.assertFalse(current[0]["cost_partial"])
+        self.assertEqual(current[0]["activity_state"], "working")
+
+        # The native recent-session list offers the root, never a child run.
+        recent = meter.menubar_recent_sessions(sources, summaries=current)
+        self.assertEqual([row["id"] for row in recent], ["ses_root"])
+        # The watcher's live source is the root even though a child is newest.
+        self.assertEqual(meter.newest_current_source(sources)["id"], "ses_root")
+
+        # A child run has no separate cap: it reports the root's cap, and the
+        # root cap's spend includes every child run.
+        settings = meter.normalize_budget_settings({})
+        with mock.patch.dict(meter._xsess, {"sessions": family}):
+            root_snapshot = meter.session_budget_snapshot(
+                {"id": "ses_root"}, {"total_cost": 1.0, "availability": {"cost": True}},
+                settings,
+            )
+            child_snapshot = meter.session_budget_snapshot(
+                {"id": "ses_grand"}, {"total_cost": 4.0, "availability": {"cost": True}},
+                settings,
+            )
+        self.assertEqual(root_snapshot["id"], "ses_root")
+        self.assertAlmostEqual(root_snapshot["spend_usd"], 7.0)
+        self.assertNotIn("subagent_runs", root_snapshot)
+        self.assertFalse(root_snapshot["cost_partial"])
+        self.assertEqual(child_snapshot["id"], "ses_root")
+        self.assertAlmostEqual(child_snapshot["spend_usd"], 7.0)
+
+    def test_session_cap_spend_combines_family_cost_availability(self):
+        """Measured family spend is kept and any unavailable member is partial."""
+        def family(root_available, child_available):
+            return [
+                {"id": "ses_root", "provider": "opencode", "cost": 1.0,
+                 "availability": {"cost": root_available}},
+                {"id": "ses_child", "provider": "opencode", "cost": 2.5,
+                 "is_child_session": True, "root_session_id": "ses_root",
+                 "availability": {"cost": child_available}},
+            ]
+
+        settings = meter.normalize_budget_settings({})
+        with mock.patch.dict(meter._xsess, {"sessions": family(False, True)}):
+            unavailable_root = meter.session_budget_snapshot(
+                {"id": "ses_root"},
+                {"total_cost": 0.0, "availability": {"cost": False}},
+                settings,
+            )
+        self.assertAlmostEqual(unavailable_root["spend_usd"], 2.5)
+        self.assertTrue(unavailable_root["cost_available"])
+        self.assertTrue(unavailable_root["cost_partial"])
+
+        with mock.patch.dict(meter._xsess, {"sessions": family(True, False)}):
+            unavailable_child = meter.session_budget_snapshot(
+                {"id": "ses_root"},
+                {"total_cost": 1.0, "availability": {"cost": True}},
+                settings,
+            )
+        self.assertAlmostEqual(unavailable_child["spend_usd"], 1.0)
+        self.assertTrue(unavailable_child["cost_partial"])
+
+        with mock.patch.dict(meter._xsess, {"sessions": family(False, False)}):
+            unmeasured = meter.session_budget_snapshot(
+                {"id": "ses_root"},
+                {"total_cost": 0.0, "availability": {"cost": False}},
+                settings,
+            )
+        self.assertIsNone(unmeasured["spend_usd"])
+        self.assertFalse(unmeasured["cost_available"])
+        self.assertEqual(unmeasured["threshold_state"], "unavailable")
+
+        # A session with no child runs keeps its existing payload shape.
+        with mock.patch.dict(meter._xsess, {"sessions": []}):
+            solo = meter.session_budget_snapshot(
+                {"id": "ses_solo"},
+                {"total_cost": 1.0, "availability": {"cost": True}},
+                settings,
+            )
+        self.assertNotIn("cost_partial", solo)
 
     def test_discovery_reuses_idle_database_inventory(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -16333,6 +18931,235 @@ class OpenCodeTests(unittest.TestCase):
         split = meter._opencode_distribute(0.02, usage)
         self.assertAlmostEqual(sum(split.values()), 0.02, places=6)
         self.assertEqual(meter._opencode_distribute(0.0, usage)["output"], 0.0)
+
+
+class OpenCodeSubagentDashboardContractTests(unittest.TestCase):
+    """The All sessions view keeps child runs out of the list but shows them."""
+
+    def setUp(self):
+        self.page = Path(__file__).resolve().parents[1].joinpath("page.html").read_text(
+            encoding="utf-8"
+        )
+
+    def test_child_sessions_are_filtered_from_the_default_list(self):
+        self.assertIn("const view=allSessionsView(workRows,{showChildren:globalShowChildren", self.page)
+        self.assertIn("rows=(all||[]).filter(s=>!s.is_child_session&&", self.page)
+        self.assertIn("let globalShowChildren=localStorage.getItem('tm_global_children')", self.page)
+        self.assertIn("data-gchildren=hide", self.page)
+        self.assertIn("data-gchildren=show", self.page)
+        # The preference is a stored browser preference and is restored on load.
+        self.assertIn("paintGlobalChildren();", self.page)
+        # The control matches the g-sort segmented buttons: plain tab-reachable
+        # buttons with pressed state, not an ARIA radio group without arrow keys.
+        control = re.search(r'id=g-children[^>]*>(.*?)</div>', self.page, re.S).group(0)
+        self.assertNotIn("role=radio", control)
+        self.assertIn("type=button aria-pressed=true data-gchildren=hide", control)
+        self.assertIn("type=button aria-pressed=false data-gchildren=show", control)
+        self.assertNotIn("role=radiogroup", self.page)
+        self.assertIn("b.setAttribute('aria-pressed',on?'true':'false');", self.page)
+
+    def test_hidden_child_spend_is_still_reported_in_the_row_count_line(self):
+        # Filtering rows out of a list must not imply their spend was excluded.
+        self.assertIn("renderAllSessionStats(view.statsRows);", self.page)
+        self.assertIn("setLogText($('g-count'),allSessionsCountText(view));", self.page)
+        self.assertIn("counted, ${parentNote}", self.page)
+        self.assertIn("listed under parents", self.page)
+        self.assertIn("with no parent session", self.page)
+
+    def test_current_session_card_marks_partial_family_cost_as_lower_bound(self):
+        self.assertIn("const costPartial=costAvailable&&!!row.cost_partial;", self.page)
+        self.assertIn("costLabel=costPartial?'Cost, at least':'Cost'", self.page)
+        self.assertNotIn("(costPartial?'≥':'')", self.page)
+        self.assertIn(
+            "Cost is a lower bound: some runs in this session family have no cost evidence.",
+            self.page,
+        )
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard JavaScript")
+    def test_session_cap_display_and_alert_use_family_spend(self):
+        """An OpenCode family cap reports and alerts on root plus child spend."""
+        page_path = Path(__file__).resolve().parents[1].joinpath("page.html")
+        script = f"""
+const fs=require('fs');
+const page=fs.readFileSync({json.dumps(str(page_path))},'utf8');
+function extract(name){{let start=page.indexOf(`function ${{name}}(`);if(start<0)throw Error(`missing ${{name}}`);let i=page.indexOf('{{',start),depth=0;for(;i<page.length;i++){{if(page[i]==='{{')depth++;else if(page[i]==='}}'&&--depth===0)return page.slice(start,i+1);}}throw Error(`unclosed ${{name}}`);}}
+const metricAvailable=(row,metric)=>row?.availability?.[metric]!==false,money=n=>'$'+Number(n).toFixed(2);
+const nodes={{}},el=id=>nodes[id]||(nodes[id]={{value:'',max:'',min:'0.5',textContent:'',style:{{setProperty(){{}}}}}});
+const $=el,defaultSessionBudget=10,SESSION_BUDGET_SLIDER_MIN=0.5,SESSION_BUDGET_SLIDER_BASE_MAX=50,formatBudgetInput=n=>String(n);
+let cap=10;const dollarInputValue=()=>cap;
+eval(extract('sessionCapSpend'));
+eval(extract('sessionBudgetSliderMax'));
+eval(extract('syncSessionBudgetControls'));
+eval(extract('sessionAlert'));
+const family=(partial,rootAvailable=true)=>({{provider:'opencode',source:{{id:'ses_root'}},total_cost:1,availability:{{cost:rootAvailable}},
+ session_budget:{{id:'ses_root',budget_usd:10,spend_usd:10.5,cost_available:true,cost_partial:partial}}}});
+const out={{}};
+const complete=family(false);syncSessionBudgetControls(10,complete);
+out.familySpend=el('session-budget-spend').textContent;out.familyAlert=sessionAlert(complete);
+const partial=family(true,false);syncSessionBudgetControls(10,partial);
+out.partialSpend=el('session-budget-spend').textContent;out.partialAlert=sessionAlert(partial);
+const claude={{provider:'claude',source:{{id:'c1'}},total_cost:1,availability:{{cost:true}},
+ session_budget:{{id:'c1',budget_usd:10,spend_usd:1,cost_available:true}}}};
+syncSessionBudgetControls(10,claude);out.claudeSpend=el('session-budget-spend').textContent;out.claudeAlert=sessionAlert(claude);
+const claudeOver={{...claude,total_cost:12,session_budget:undefined}};out.claudeOverAlert=sessionAlert(claudeOver);
+const unmeasured={{...claude,availability:{{cost:false}}}};syncSessionBudgetControls(10,unmeasured);
+out.unmeasuredSpend=el('session-budget-spend').textContent;out.unmeasuredAlert=sessionAlert(unmeasured);
+process.stdout.write(JSON.stringify(out));
+"""
+        completed = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        out = json.loads(completed.stdout)
+        self.assertEqual(out["familySpend"], "Session spend $10.50")
+        self.assertEqual(out["familyAlert"]["type"], "budget")
+        self.assertEqual(out["familyAlert"]["current"], 10.5)
+        self.assertIn("now $10.50", out["familyAlert"]["msg"])
+        # A measured lower bound is still available and is labeled as such.
+        self.assertEqual(out["partialSpend"], "Session spend at least $10.50")
+        self.assertIn("now at least $10.50", out["partialAlert"]["msg"])
+        # Sessions without a folded family keep their own-cost behavior.
+        self.assertEqual(out["claudeSpend"], "Session spend $1.00")
+        self.assertEqual(out["claudeAlert"]["msg"], "")
+        self.assertIn("now $12.00", out["claudeOverAlert"]["msg"])
+        self.assertEqual(out["unmeasuredSpend"], "Session spend unavailable")
+        self.assertEqual(out["unmeasuredAlert"]["msg"], "")
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard JavaScript")
+    def test_all_sessions_view_counts_children_and_respects_filters(self):
+        page_path = Path(__file__).resolve().parents[1].joinpath("page.html")
+        script = f"""
+const fs=require('fs');
+const page=fs.readFileSync({json.dumps(str(page_path))},'utf8');
+function extract(name){{let start=page.indexOf(`function ${{name}}(`);if(start<0)throw Error(`missing ${{name}}`);let i=page.indexOf('{{',start),depth=0;for(;i<page.length;i++){{if(page[i]==='{{')depth++;else if(page[i]==='}}'&&--depth===0)return page.slice(start,i+1);}}throw Error(`unclosed ${{name}}`);}}
+const appFilterGroup=s=>s.provider,projectFilterValue=p=>p||'',metricAvailable=(row,key)=>row?.availability?.[key]!==false,hasLocalEstimate=()=>false;
+const f=n=>String(n),money=n=>'$'+Number(n).toFixed(2),countWord=(n,w)=>n===1?w:w+'s';
+eval(extract('childRootId'));eval(page.slice(page.indexOf('function allSessionsView('),page.indexOf('function allSessionsCountText(')));eval(extract('allSessionsCountText'));
+const all=[
+ {{id:'root',provider:'opencode',project:'/a',title:'Root work',cost:1,mtime:100}},
+ {{id:'mid',provider:'opencode',project:'/a',title:'Mid run',cost:2,mtime:200,is_child_session:true,root_session_id:'root',child_depth:1}},
+ {{id:'leaf',provider:'opencode',project:'/a',title:'Needle leaf',cost:4,mtime:300,is_child_session:true,root_session_id:'root',child_depth:2}},
+ {{id:'orphan',provider:'opencode',project:'/a',title:'Orphan',cost:8,mtime:300,is_child_session:true}},
+ {{id:'other',provider:'claude',project:'/b',title:'Other',cost:16,mtime:400}},
+];
+const hidden=allSessionsView(all,{{}});
+const listed=allSessionsView(all,{{showChildren:true}});
+const project=allSessionsView(all,{{project:'/b'}});
+const search=allSessionsView(all,{{query:'needle'}});
+const spend=v=>v.statsRows.filter(r=>metricAvailable(r,'cost')).reduce((a,b)=>a+(b.cost||0),0);
+const filters={{search:{{query:'needle'}},time:{{rangeStart:250}},project:{{project:'/a'}},searchTime:{{query:'leaf',rangeStart:250}},none:{{}}}};
+const parity=Object.fromEntries(Object.entries(filters).map(([name,opts])=>{{
+ const h=allSessionsView(all,opts),l=allSessionsView(all,{{...opts,showChildren:true}});
+ return [name,{{hidden:spend(h),listed:spend(l),hiddenCovered:h.statsRows.length,listedCovered:l.statsRows.length}}];
+}}));
+const time=allSessionsView(all,{{rangeStart:250}});
+console.log(JSON.stringify({{
+ parity,searchText:allSessionsCountText(search),listedText:allSessionsCountText(listed),
+ time:{{rows:time.rows.map(r=>r.id),text:allSessionsCountText(time)}},
+ hiddenRows:hidden.rows.map(r=>r.id),hiddenStatsCost:hidden.statsRows.reduce((a,b)=>a+b.cost,0),
+ listedStatsCost:listed.statsRows.reduce((a,b)=>a+b.cost,0),listedRows:listed.rows.length,
+ hidden:{{children:hidden.children,underParent:hidden.underParent,unparented:hidden.unparented,total:hidden.total}},
+ hiddenText:allSessionsCountText(hidden),
+ project:{{rows:project.rows.map(r=>r.id),children:project.children,text:allSessionsCountText(project)}},
+ search:{{rows:search.rows.map(r=>r.id),children:search.children,underParent:search.underParent}},
+}}));
+"""
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["hiddenRows"], ["root", "other"])
+        # Header stats include hidden child spend, identical to Listed mode.
+        self.assertEqual(data["hiddenStatsCost"], 31)
+        self.assertEqual(data["listedStatsCost"], 31)
+        self.assertEqual(data["listedRows"], 5)
+        # The grandchild counts under its root card even though its parent is hidden.
+        self.assertEqual(data["hidden"], {"children": 3, "underParent": 2, "unparented": 1, "total": 2})
+        self.assertIn("2 of 2 sessions · $31.00 covered spend · 5 of 5 cost-covered", data["hiddenText"])
+        # Hidden and Listed header spend and coverage are equal under every filter,
+        # and a root surfaced only by a matching child adds none of its own cost.
+        for name, row in data["parity"].items():
+            self.assertEqual(row["hidden"], row["listed"], name)
+            self.assertEqual(row["hiddenCovered"], row["listedCovered"], name)
+        self.assertEqual(data["parity"]["search"]["hidden"], 4)
+        self.assertEqual(data["parity"]["time"]["hidden"], 28)
+        self.assertEqual(data["parity"]["searchTime"]["hidden"], 4)
+        self.assertIn("0 of 2 sessions · $4.00 covered spend · 1 of 1 cost-covered", data["searchText"])
+        self.assertIn("1 parent card shown for matching runs", data["searchText"])
+        self.assertIn("2 of 2 sessions + 3 subagent runs · $31.00 covered spend · 5 of 5 cost-covered", data["listedText"])
+        self.assertNotIn("parent card shown", data["listedText"])
+        self.assertEqual(data["time"]["rows"], ["root", "other"])
+        self.assertIn("1 of 2 sessions · $28.00 covered spend · 3 of 3 cost-covered", data["time"]["text"])
+        self.assertIn("3 subagent runs ($14.00) counted, 2 shown under parent cards · 1 with no parent session", data["hiddenText"])
+        # The hidden-children note respects the active project filter.
+        self.assertEqual(data["project"]["rows"], ["other"])
+        self.assertEqual(data["project"]["children"], 0)
+        self.assertNotIn("subagent", data["project"]["text"])
+        # Search in Hidden mode finds a child run by surfacing its root card.
+        self.assertEqual(data["search"], {"rows": ["root"], "children": 1, "underParent": 1})
+
+    def test_parent_card_renders_an_accessible_child_subsection(self):
+        self.assertIn("function childAgentSubsection(s)", self.page)
+        self.assertIn('class=subagents', self.page)
+        self.assertIn('class=subagentRow type=button data-open-session="${esc(sessionRowKey(child))}"', self.page)
+        # Children are real buttons with a complete accessible name, so depth
+        # and identity are never carried by indentation alone.
+        self.assertIn('aria-label="Open subagent run ${esc(title)}"', self.page)
+        # The role is provider-reported metadata, surfaced verbatim and bounded.
+        self.assertIn('class=subagentRole>${esc(child.child_agent_role)}<', self.page)
+        self.assertIn("Unreported role", self.page)
+
+    def test_child_rows_navigate_without_double_firing_the_parent(self):
+        self.assertIn("const childButton=event.target.closest('[data-open-session]');", self.page)
+        self.assertIn("event.stopPropagation();", self.page)
+        self.assertIn("selectSession(childRow.id)", self.page)
+
+    def test_measured_free_tier_zero_is_not_presented_as_unavailable(self):
+        # A real free-tier price renders as $0.00, distinct from missing billing.
+        self.assertIn("child.cost>0?costValueHtml", self.page)
+        self.assertIn("Measured free-tier price", self.page)
+        self.assertIn("cost unavailable", self.page)
+
+    def test_child_subsection_is_bounded_and_reports_the_hidden_count(self):
+        self.assertIn("const CHILD_SECTION_LIMIT=6;", self.page)
+        self.assertIn("const shown=children.slice(0,CHILD_SECTION_LIMIT);", self.page)
+        self.assertIn("more ${countWord(hidden,'run')} not shown", self.page)
+
+    def test_child_changes_invalidate_the_cached_parent_row(self):
+        self.assertIn("childAgentsFor(s).map(c=>[c.id,c.cost,c.tokens", self.page)
+        self.assertIn("function indexChildSessions(rows)", self.page)
+        # Every descendant is keyed by its published root id, never a raw parent id.
+        self.assertIn("const key=childRootId(row);", self.page)
+        self.assertNotIn("child_parent_id", self.page)
+
+    def test_subagents_page_discloses_unattributed_child_runs(self):
+        # A child run whose parent was never discovered is counted in totals but
+        # has no parent card, so the explorer must disclose the gap rather than
+        # let the rollup look complete.
+        self.assertIn('id=subagent-coverage-note', self.page)
+        self.assertIn("usage?.totals?.unresolved_agents", self.page)
+        self.assertIn("usage?.totals?.unresolved_known_cost", self.page)
+        self.assertIn("could not be attributed to a parent session", self.page)
+        self.assertIn("counted in global totals", self.page)
+        # Archived families are excluded from discovery, so the only remaining
+        # cause is a missing parent record; the copy must not blame archiving.
+        self.assertNotIn("usually because the parent session was archived", self.page)
+        self.assertIn("parent session record is missing", self.page)
+        self.assertIn(".subagentCoverageNote[hidden]{display:none}", self.page)
+
+    def test_parent_row_with_children_uses_top_aligned_metrics(self):
+        # A parent with a tall child subsection must not center its own
+        # headline metrics beside the middle of that subsection.
+        self.assertIn(".srow.hasChildren{align-items:start}", self.page)
+        self.assertIn("const hasChildren=childAgentsFor(s).length>0;", self.page)
+        self.assertIn("${hasChildren?' hasChildren':''}", self.page)
+
+    def test_subagent_subsection_never_overflows_its_parent_at_laptop_width(self):
+        # Long role/model/time text must truncate inside the grid track rather
+        # than push the page wider at the 1024px laptop width.
+        self.assertIn(".subagentMain{min-width:0;overflow:hidden}", self.page)
+        self.assertIn(
+            ".subagentMain .meta{font-size:11px;color:var(--faint);margin-top:2px;"
+            "display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+            "min-width:0}",
+            self.page,
+        )
 
 
 if __name__ == "__main__":

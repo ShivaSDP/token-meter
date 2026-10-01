@@ -83,12 +83,21 @@ from token_meter.domain.aggregates import (
 )
 from token_meter.domain.agents import (
     aggregate_agent_usage as _domain_aggregate_agent_usage,
+    build_agent_graph as _domain_build_agent_graph,
     build_agent_groups as _domain_build_agent_groups,
     find_agent_group as _domain_find_agent_group,
 )
 from token_meter.domain.builder_recap import (
     VALID_RECAP_RANGES,
     build_builder_recap as _domain_build_builder_recap,
+)
+from token_meter.domain.compare import (
+    compare_entry as _compare_entry,
+    compare_sessions as _compare_sessions,
+    matching_sessions as _compare_matching_sessions,
+    normalize_compare_ids,
+    trace_key as _compare_trace_key,
+    trace_stem as _compare_trace_stem,
 )
 from token_meter.domain.insights import (
     build_cost_insights as _domain_build_cost_insights,
@@ -109,6 +118,7 @@ from token_meter.domain.tools import (
     capability_control_groups as _domain_capability_control_groups,
     optional_capability_summary as _domain_optional_capability_summary,
     summarize_tool_evidence as _domain_summarize_tool_evidence,
+    session_capabilities as _domain_session_capabilities,
     tool_identity as _domain_tool_identity,
     tool_summary as _domain_tool_summary,
 )
@@ -181,6 +191,7 @@ from token_meter.runtimes.codex import (
     AUTO_REVIEW_MODEL,
     CodexRuntimeAdapter,
     CodexRuntimeAdapterProxy,
+    codex_mcp_tool_name,
 )
 from token_meter.runtimes.claude import (
     ClaudeRuntimeAdapter,
@@ -298,6 +309,12 @@ TOKEN_METER_GIT_DELIVERY_DB = os.path.expanduser(
 TOKEN_METER_WORK_INSIGHTS_DB = os.path.expanduser(
     os.environ.get("TOKEN_METER_WORK_INSIGHTS_DB", "~/.token-meter/work-insights.sqlite3")
 )
+TOKEN_METER_MATCHED_PACE_CACHE = os.path.expanduser(
+    os.environ.get(
+        "TOKEN_METER_MATCHED_PACE_CACHE",
+        "~/.token-meter/matched-pace-cache.json",
+    )
+)
 PORT = 8722
 
 DEFAULT_FRUSTRATION_TERMS = [
@@ -398,6 +415,24 @@ _summary_cache = {}
 _summary_cache_lock = threading.Lock()
 _matched_pace_cache = {"signature": None, "data": None}
 _matched_pace_cache_lock = threading.Lock()
+# One entry per model-runtime pair for the global (all-session) scope, so a
+# changed model only rebuilds the pairs it participates in. Reused across
+# restarts via TOKEN_METER_MATCHED_PACE_CACHE. Loaded, read, mutated, and saved
+# only by the thread holding the single-flight build flag below; it is never
+# touched by project-scoped builds.
+_matched_pace_pair_cache = {}
+_matched_pace_pair_cache_loaded = False
+# Single-flight guard: one rebuild at a time, so concurrent requests share one
+# computation instead of each starting its own.
+_matched_pace_build_condition = threading.Condition(threading.Lock())
+_matched_pace_build_state = {"building": False}
+# Persistence is opt-in so importing the module (tests, tools) never writes the
+# user's cache file. The server entrypoint turns it on.
+_matched_pace_persist = False
+# Bump whenever the matching algorithm, thresholds, result fields, or pair-key
+# format change, so stale persisted comparisons are discarded on load.
+MATCHED_PACE_CACHE_SCHEMA = 2
+MATCHED_PACE_CACHE_MAX_PAIRS = 4000
 _SKILL_CATALOG_TTL_S = 60.0
 _skill_catalog_cache = {"rows": None, "at": 0.0}
 _skill_catalog_cache_lock = threading.Lock()
@@ -5264,6 +5299,7 @@ def recompute(source):
     return result.value
 
 
+
 def source_revision_signature(source):
     """Track trace activity plus display metadata stored outside the trace."""
     if not source:
@@ -5430,6 +5466,18 @@ def build_state(source, tot, cost, total_tokens, total_cost, series, executions,
     tool_data["catalog_coverage"] = catalog_coverage
     tool_data["loaded_namespaces"] = list(source.get("tool_namespaces") or [])
     tool_data["catalog"] = tool_catalog[:80]
+    capabilities = _domain_session_capabilities(
+        {
+            "skills": tool_data.get("skills"),
+            "tools": [tool for row in executions for tool in row.get("tools") or ()],
+            "catalog": tool_catalog,
+        },
+        source.get("_loaded_skills"),
+        source.get("_loaded_mcp_servers"),
+    )
+    capabilities = with_configured_capabilities(
+        capabilities, source.get("provider"), source.get("project") or "",
+    )
     availability = availability or metric_availability(
         source["provider"], context=bool(context_window),
         timing=bool(active_available or wait_samples),
@@ -5480,6 +5528,7 @@ def build_state(source, tot, cost, total_tokens, total_cost, series, executions,
         "primary_model": primary_model,
         "turns": len(series),
         "subagent_turns": side_turns,
+        "capabilities": capabilities,
         "cache_ratio": cache_ratio,
         "cache_saved": cache["saved"],
         "cache": cache,
@@ -5685,6 +5734,7 @@ def codex_tool_call_evidence(objs):
         ts = parse_iso(obj.get("timestamp", "")) or 0
         if ptype in ("function_call", "custom_tool_call", "web_search_call", "tool_search_call"):
             name = payload.get("name") or ("web.search" if ptype == "web_search_call" else ptype.replace("_call", ""))
+            name = codex_mcp_tool_name(name, payload.get("namespace"))
             call_id = payload.get("call_id") or payload.get("id") or f"call-{len(order) + 1}"
             if call_id not in calls:
                 arguments = payload.get("arguments") or payload.get("input")
@@ -5874,6 +5924,11 @@ def session_summary(source, opencode_conn=None):
                               {}, {}, {}, False, availability=metric_availability("unknown"))
     finally:
         work_turns, _WORK_TURNS.turns = getattr(_WORK_TURNS, "turns", None), None
+    if isinstance(row, dict):
+        row["capabilities"] = with_configured_capabilities(
+            row.get("capabilities") or _domain_session_capabilities(row.get("_tool_evidence")),
+            source.get("provider"), source.get("project") or row.get("project") or "",
+        )
     row["session"] = str(source.get("session") or row.get("id") or "")
     if _work_is_child_row(row):
         row["subagent"] = True
@@ -5910,6 +5965,71 @@ def current_session_summaries(rows, now=None, max_age_s=CURRENT_SESSION_MAX_AGE_
     )
 
 
+def folded_child_root_id(source):
+    """Return the root session id an additive child source folds into, if any.
+
+    Only OpenCode child sessions with a resolved root carry `agent_root_id`;
+    every other source returns an empty string and keeps its own identity.
+    """
+    if not isinstance(source, dict) or source.get("provider") != "opencode":
+        return ""
+    return str(source.get("agent_root_id") or "")
+
+
+def fold_child_source(selected, sources):
+    """Map a folded child source to its discovered root source, else keep it."""
+    root_id = folded_child_root_id(selected)
+    if not root_id:
+        return selected
+    for source in sources or ():
+        if (
+            source.get("provider") == selected.get("provider")
+            and str(source.get("id") or "") == root_id
+        ):
+            return source
+    return selected
+
+
+def newest_current_source(sources):
+    """Pick the live source, keeping a child run under its root session."""
+    rows = list(sources or ())
+    if not rows:
+        return None
+    newest = max(rows, key=lambda source: source.get("mtime") or 0)
+    return fold_child_source(newest, rows)
+
+
+def session_budget_family(session_id, rows=None, root_id=None):
+    """Return the budget owner id, root row, and child rows for one session.
+
+    An OpenCode child run has no separate session cap: it spends against its
+    root session's cap, which in turn includes every child's spend.
+    """
+    sid = str(session_id or "")
+    rows = list(rows if rows is not None else (_xsess.get("sessions") or ()))
+    owner = str(root_id or "")
+    if not owner:
+        own = next((
+            row for row in rows
+            if str(row.get("id") or "") == sid and row.get("provider") == "opencode"
+        ), None)
+        owner = (
+            str(own.get("root_session_id") or "")
+            if own and own.get("is_child_session") else ""
+        ) or sid
+    root_row = next((
+        row for row in rows
+        if str(row.get("id") or "") == owner and row.get("provider") == "opencode"
+        and not row.get("is_child_session")
+    ), None)
+    children = [
+        row for row in rows
+        if row.get("provider") == "opencode" and row.get("is_child_session")
+        and str(row.get("root_session_id") or "") == owner
+    ] if owner else []
+    return owner, root_row, children
+
+
 def global_tool_waste(session_rows):
     return _domain_global_tool_waste(
         session_rows, runtime_resolver=source_runtime_label,
@@ -5918,6 +6038,84 @@ def global_tool_waste(session_rows):
 
 def codex_mcp_states():
     return {name: bool(row.get("enabled")) for name, row in toml_named_sections(CODEX_CONFIG, "mcp_servers").items()}
+
+
+_CONFIGURED_CAPABILITY_TTL_S = 60.0
+_configured_capability_cache = {}
+_configured_capability_cache_lock = threading.Lock()
+
+
+def _skill_dir_names(*roots):
+    names = set()
+    for root in roots:
+        for path in glob.glob(os.path.join(root, "*", "SKILL.md")):
+            names.add(os.path.basename(os.path.dirname(path)))
+    return names
+
+
+def _json_mcp_server_names(*paths):
+    names = set()
+    for path in paths:
+        data = load_json(path, {})
+        servers = data.get("mcpServers") if isinstance(data, dict) else None
+        if isinstance(servers, dict):
+            names.update(str(name) for name in servers)
+    return names
+
+
+def _scan_configured_capabilities(provider, project):
+    if provider == "codex":
+        skills = {
+            row["name"] for row in discovered_skills()
+            if row.get("runtime") == "Codex" and row.get("enabled") is not False
+        }
+        return skills, {name for name, enabled in codex_mcp_states().items() if enabled}
+    if provider == "cursor":
+        cursor_root = os.path.expanduser("~/.cursor")
+        project_root = os.path.join(project, ".cursor") if project and os.path.isabs(project) else ""
+        skill_roots = [os.path.join(cursor_root, "skills"), os.path.join(cursor_root, "skills-cursor")]
+        mcp_paths = [os.path.join(cursor_root, "mcp.json")]
+        if project_root:
+            skill_roots.append(os.path.join(project_root, "skills"))
+            mcp_paths.append(os.path.join(project_root, "mcp.json"))
+        return _skill_dir_names(*skill_roots), _json_mcp_server_names(*mcp_paths)
+    return None, None
+
+
+def configured_capabilities(provider, project=""):
+    """Return currently configured skill and MCP names for runtimes whose traces omit them."""
+    key = (str(provider or ""), str(project or ""))
+    now = time.monotonic()
+    with _configured_capability_cache_lock:
+        cached = _configured_capability_cache.get(key)
+        if cached and now - cached[0] < _CONFIGURED_CAPABILITY_TTL_S:
+            return cached[1]
+    result = _scan_configured_capabilities(*key)
+    with _configured_capability_cache_lock:
+        if len(_configured_capability_cache) > 256:
+            _configured_capability_cache.clear()
+        _configured_capability_cache[key] = (now, result)
+    return result
+
+
+def with_configured_capabilities(capabilities, provider, project=""):
+    """Fill unrecorded loaded counts from current configuration and label each basis."""
+    capabilities = capabilities if isinstance(capabilities, dict) else {}
+    configured = None
+    result = {}
+    for index, key in enumerate(("skills", "mcp_servers")):
+        counts = dict(capabilities.get(key) or {})
+        used = int(counts.get("used") or 0)
+        loaded = counts.get("loaded")
+        basis = "session" if isinstance(loaded, int) else "unavailable"
+        if loaded is None:
+            if configured is None:
+                configured = configured_capabilities(provider, project)
+            names = configured[index]
+            if names is not None:
+                loaded, basis = max(len(names), used), "configured"
+        result[key] = {"loaded": loaded, "used": used, "basis": basis}
+    return result
 
 
 def claude_mcp_states():
@@ -7068,18 +7266,30 @@ def pace_match_distance(left, right):
     right_tools = int(right.get("tool_calls") or 0)
     if bool(left_tools) != bool(right_tools):
         return None
-    dimensions = [
-        (_pace_log_distance(
-            left.get("peak_input_tokens") or left.get("input_tokens"),
-            right.get("peak_input_tokens") or right.get("input_tokens"), 2.0,
-        ), 0.28),
-        (_pace_log_distance(left.get("input_tokens"), right.get("input_tokens"), 3.0), 0.17),
-        (_pace_log_distance(left.get("output_tokens"), right.get("output_tokens"), 2.0), 0.22),
-        (_pace_log_distance(left.get("model_calls") or 1, right.get("model_calls") or 1, 2.0), 0.16),
-    ]
-    if left_tools:
-        dimensions.append((_pace_log_distance(left_tools, right_tools, 2.0), 0.12))
-    if any(distance is None for distance, _ in dimensions):
+    # Reject on the first failing dimension instead of scoring all of them and
+    # discarding the result. Measured over real histories, output rejects the
+    # most candidates and input almost none, so the cheap discriminating gates
+    # run first and the cost of a rejected pair stays low.
+    output_distance = _pace_log_distance(
+        left.get("output_tokens"), right.get("output_tokens"), 2.0,
+    )
+    if output_distance is None:
+        return None
+    peak_distance = _pace_log_distance(
+        left.get("peak_input_tokens") or left.get("input_tokens"),
+        right.get("peak_input_tokens") or right.get("input_tokens"), 2.0,
+    )
+    if peak_distance is None:
+        return None
+    input_distance = _pace_log_distance(
+        left.get("input_tokens"), right.get("input_tokens"), 3.0,
+    )
+    if input_distance is None:
+        return None
+    model_distance = _pace_log_distance(
+        left.get("model_calls") or 1, right.get("model_calls") or 1, 2.0,
+    )
+    if model_distance is None:
         return None
     left_input = max(1, int(left.get("input_tokens") or 0))
     right_input = max(1, int(right.get("input_tokens") or 0))
@@ -7088,7 +7298,15 @@ def pace_match_distance(left, right):
     cache_distance = abs(left_cache - right_cache)
     if cache_distance > 0.60:
         return None
-    score = sum(distance * weight for distance, weight in dimensions)
+    score = peak_distance * 0.28
+    score += input_distance * 0.17
+    score += output_distance * 0.22
+    score += model_distance * 0.16
+    if left_tools:
+        tool_distance = _pace_log_distance(left_tools, right_tools, 2.0)
+        if tool_distance is None:
+            return None
+        score += tool_distance * 0.12
     score += (cache_distance / 0.60) * 0.05
     recency_days = abs(float(left.get("ts") or 0) - float(right.get("ts") or 0)) / 86400.0
     score += min(1.0, recency_days / 90.0) * 0.03
@@ -7183,8 +7401,262 @@ def matched_pace_comparison(a_id, a_samples, b_id, b_samples, distance_cache=Non
     return result
 
 
-def matched_pace_windows(sample_groups, now_ts=None):
-    """Build pairwise matched-pace comparisons for every dashboard history window."""
+def _pace_samples_signature(samples, fields):
+    """Return a stable digest of the fields that affect a pace comparison."""
+    digest = hashlib.sha256()
+    for sample in samples or ():
+        digest.update(b"\0sample\0")
+        digest.update(
+            repr(tuple(sample.get(field) for field in fields)).encode(
+                "utf-8", errors="replace",
+            )
+        )
+    return digest.hexdigest()
+
+
+MATCHED_PACE_WINDOW_KEYS = ("today", "yesterday", "7", "30", "90", "all")
+_MATCHED_PACE_INT_FIELDS = ("a_samples", "b_samples", "matched_pairs")
+_MATCHED_PACE_FLOAT_FIELDS = ("coverage", "pace_ratio", "ci_low", "ci_high")
+
+
+_MATCHED_PACE_COMPARISON_KEYS = frozenset(
+    ("a_id", "b_id", "available", "reason")
+    + _MATCHED_PACE_INT_FIELDS + _MATCHED_PACE_FLOAT_FIELDS
+)
+# Stored numbers outside these bounds are corrupt; the pair is recomputed.
+_MATCHED_PACE_MAX_COUNT = 10 ** 9
+_MATCHED_PACE_MAX_RATIO = 1e15
+_MATCHED_PACE_MAX_REASON = 200
+# Every reason string matched_pace_comparison can produce.
+_MATCHED_PACE_REASON_RE = re.compile(
+    r"|needs \d{1,9} timed turns per runtime"
+    r"|only \d{1,9} comparable turns; needs \d{1,9}"
+    r"|only \d{1,9}% of the smaller history overlaps"
+)
+
+
+def _valid_matched_pace_comparison(value, a_id, b_id):
+    """Return a rebuilt comparison with exactly the builder keys, else None.
+
+    Never raises: magnitude checks run before any float conversion, so a huge
+    JSON integer cannot overflow. Unknown keys reject the comparison so stored
+    content can never reach API output beyond the builder's own fields.
+    """
+    if not isinstance(value, dict) or set(value) != _MATCHED_PACE_COMPARISON_KEYS:
+        return None
+    if value["a_id"] != a_id or value["b_id"] != b_id:
+        return None
+    for field in _MATCHED_PACE_INT_FIELDS:
+        number = value[field]
+        if (isinstance(number, bool) or not isinstance(number, int)
+                or not 0 <= number <= _MATCHED_PACE_MAX_COUNT):
+            return None
+    for field in _MATCHED_PACE_FLOAT_FIELDS:
+        number = value[field]
+        if isinstance(number, bool) or not isinstance(number, (int, float)):
+            return None
+        # Chained comparison is exact for ints of any size and rejects NaN.
+        if not 0 <= number <= _MATCHED_PACE_MAX_RATIO:
+            return None
+        if isinstance(number, float) and not math.isfinite(number):
+            return None
+    if not 0 <= value["coverage"] <= 1:
+        return None
+    if not isinstance(value["available"], bool):
+        return None
+    reason = value["reason"]
+    if (not isinstance(reason, str) or len(reason) > _MATCHED_PACE_MAX_REASON
+            or not _MATCHED_PACE_REASON_RE.fullmatch(reason)):
+        return None
+    return {key: value[key] for key in (
+        "a_id", "b_id", "a_samples", "b_samples", "matched_pairs", "coverage",
+        "pace_ratio", "ci_low", "ci_high", "available", "reason",
+    )}
+
+
+def _valid_matched_pace_entry(entry):
+    """Return the (key, cached) pair for a usable stored entry, else None."""
+    if not isinstance(entry, dict):
+        return None
+    a_id, b_id = entry.get("a_id"), entry.get("b_id")
+    signature, windows = entry.get("signature"), entry.get("windows")
+    if not (isinstance(a_id, str) and isinstance(b_id, str)
+            and isinstance(signature, str) and isinstance(windows, dict)):
+        return None
+    if set(windows) != set(MATCHED_PACE_WINDOW_KEYS):
+        return None
+    rebuilt = {}
+    for window in MATCHED_PACE_WINDOW_KEYS:
+        comparison = _valid_matched_pace_comparison(windows[window], a_id, b_id)
+        if comparison is None:
+            return None
+        rebuilt[window] = comparison
+    return (a_id, b_id), {"signature": signature, "windows": rebuilt}
+
+
+def _ensure_matched_pace_cache_loaded():
+    """Load the persisted pair cache once. Caller holds the single-flight flag."""
+    global _matched_pace_pair_cache_loaded
+    if _matched_pace_pair_cache_loaded:
+        return
+    _matched_pace_pair_cache_loaded = True
+    if not _matched_pace_persist:
+        return
+    try:
+        with open(TOKEN_METER_MATCHED_PACE_CACHE, encoding="utf-8") as fh:
+            stored = json.load(fh)
+    except (OSError, ValueError, RecursionError):
+        # Missing, unreadable, undecodable (including invalid UTF-8), or
+        # malformed files are a cold cache, never a request failure.
+        return
+    if not isinstance(stored, dict):
+        return
+    if stored.get("schema") != MATCHED_PACE_CACHE_SCHEMA:
+        return
+    pairs = stored.get("pairs")
+    if not isinstance(pairs, list):
+        return
+    for entry in pairs:
+        if len(_matched_pace_pair_cache) >= MATCHED_PACE_CACHE_MAX_PAIRS:
+            break
+        try:
+            valid = _valid_matched_pace_entry(entry)
+        except (OverflowError, TypeError, ValueError, RecursionError):
+            # Defense in depth: one malformed entry is skipped, never fatal.
+            valid = None
+        if valid is not None:
+            _matched_pace_pair_cache[valid[0]] = valid[1]
+
+
+def _save_matched_pace_pair_cache():
+    """Persist the pair cache so a restart reuses unchanged comparisons.
+
+    The stored fields are model and runtime identifiers plus aggregate duration,
+    token, ratio, and coverage numbers. No prompt, response, tool, path, or raw
+    trace content is written. Caller holds the single-flight flag.
+    """
+    if not _matched_pace_persist:
+        return
+    entries = [
+        {
+            "a_id": pair_key[0],
+            "b_id": pair_key[1],
+            "signature": cached.get("signature"),
+            "windows": cached.get("windows"),
+        }
+        for pair_key, cached in _matched_pace_pair_cache.items()
+    ]
+    try:
+        atomic_write_text(
+            TOKEN_METER_MATCHED_PACE_CACHE,
+            json.dumps({"schema": MATCHED_PACE_CACHE_SCHEMA, "pairs": entries}),
+        )
+    except OSError:
+        pass
+
+
+def _build_matched_pace_windows(sample_groups, today, signature_fields, pair_cache):
+    """Compute every model-runtime pair comparison, reusing ``pair_cache``.
+
+    Returns ``(data, changed)`` where ``changed`` reports whether any pair cache
+    entry was added, replaced, or removed. Caller owns no lock; for the global
+    pair cache the caller holds the single-flight flag.
+    """
+    changed = False
+    rules = {
+        "today": ("exact", today.isoformat()),
+        "yesterday": ("exact", (today - datetime.timedelta(days=1)).isoformat()),
+        "7": ("since", (today - datetime.timedelta(days=6)).isoformat()),
+        "30": ("since", (today - datetime.timedelta(days=29)).isoformat()),
+        "90": ("since", (today - datetime.timedelta(days=89)).isoformat()),
+        "all": ("all", ""),
+    }
+    result = {window: [] for window in rules}
+    ids = sorted(sample_groups)
+    windowed_samples = {}
+    id_signatures = {}
+    for runtime_id in ids:
+        buckets = {window: [] for window in rules}
+        for sample in sample_groups[runtime_id]:
+            day = str(sample.get("day") or "")
+            for window, (match, boundary) in rules.items():
+                if (
+                    match == "all"
+                    or (match == "exact" and day == boundary)
+                    or (match == "since" and day >= boundary)
+                ):
+                    buckets[window].append(sample)
+        windowed_samples[runtime_id] = buckets
+        id_signatures[runtime_id] = _pace_samples_signature(
+            sample_groups[runtime_id], signature_fields,
+        )
+    live_pairs = {
+        (a_id, b_id)
+        for a_index, a_id in enumerate(ids) for b_id in ids[a_index + 1:]
+    }
+    # Drop pairs that no longer exist before admitting new ones, so the freed
+    # room is usable in this same build.
+    for stale_key in set(pair_cache) - live_pairs:
+        del pair_cache[stale_key]
+        changed = True
+    for a_index, a_id in enumerate(ids):
+        for b_id in ids[a_index + 1:]:
+            pair_key = (a_id, b_id)
+            # Windows are cut relative to today, so the day is part of the key:
+            # a cached pair from a previous day must never be reused.
+            pair_signature = (
+                f"{today.isoformat()}|{id_signatures[a_id]}|{id_signatures[b_id]}"
+            )
+            cached = pair_cache.get(pair_key)
+            if cached is not None and cached["signature"] == pair_signature:
+                per_window = cached["windows"]
+            else:
+                # Every model-runtime pair is an all-pairs comparison of its
+                # completed turns. Caching per pair means a new turn for one
+                # model only rebuilds the pairs that model takes part in,
+                # instead of every pair in the cross-session state.
+                distance_cache = {}
+                per_window = {
+                    window: matched_pace_comparison(
+                        a_id, windowed_samples[a_id][window],
+                        b_id, windowed_samples[b_id][window],
+                        distance_cache=distance_cache,
+                    )
+                    for window in rules
+                }
+                # Bound memory and the persisted file. A cached pair is always
+                # refreshed in place; a new pair is admitted only while there
+                # is room. Pairs beyond the cap are still reported, simply
+                # recomputed on the next build, and never evict cached pairs,
+                # so an unchanged over-cap history causes no rewrite.
+                if (cached is not None
+                        or len(pair_cache) < MATCHED_PACE_CACHE_MAX_PAIRS):
+                    pair_cache[pair_key] = {
+                        "signature": pair_signature,
+                        "windows": per_window,
+                    }
+                    changed = True
+            for window in rules:
+                result[window].append(per_window[window])
+    # Only a lowered cap can leave the cache oversized; trim the oldest once.
+    while len(pair_cache) > MATCHED_PACE_CACHE_MAX_PAIRS:
+        del pair_cache[next(iter(pair_cache))]
+        changed = True
+    data = {
+        "method": "nearest workload match on context, input, output, cache, model calls, tools, and recency",
+        "min_pairs": MATCHED_PACE_MIN_PAIRS,
+        "min_coverage": MATCHED_PACE_MIN_COVERAGE,
+        "windows": result,
+    }
+    return data, changed
+
+
+def matched_pace_windows(sample_groups, now_ts=None, persistent=True):
+    """Build pairwise matched-pace comparisons for every dashboard history window.
+
+    ``persistent=False`` is the project scope: it computes from a private pair
+    cache and never reads, evicts, overwrites, or persists global entries.
+    """
     today = datetime.date.fromtimestamp(float(now_ts if now_ts is not None else time.time()))
     digest = hashlib.sha256(today.isoformat().encode("utf-8"))
     signature_fields = (
@@ -7200,53 +7672,44 @@ def matched_pace_windows(sample_groups, now_ts=None):
             digest.update(repr(values).encode("utf-8", errors="replace"))
     signature = digest.hexdigest()
 
-    with _matched_pace_cache_lock:
-        if (
-            _matched_pace_cache.get("signature") == signature
-            and _matched_pace_cache.get("data") is not None
-        ):
-            return copy.deepcopy(_matched_pace_cache["data"])
+    if not persistent:
+        data, _ = _build_matched_pace_windows(
+            sample_groups, today, signature_fields, {},
+        )
+        return data
 
-        rules = {
-            "today": ("exact", today.isoformat()),
-            "yesterday": ("exact", (today - datetime.timedelta(days=1)).isoformat()),
-            "7": ("since", (today - datetime.timedelta(days=6)).isoformat()),
-            "30": ("since", (today - datetime.timedelta(days=29)).isoformat()),
-            "90": ("since", (today - datetime.timedelta(days=89)).isoformat()),
-            "all": ("all", ""),
-        }
-        result = {window: [] for window in rules}
-        ids = sorted(sample_groups)
-        windowed_samples = {}
-        for runtime_id in ids:
-            buckets = {window: [] for window in rules}
-            for sample in sample_groups[runtime_id]:
-                day = str(sample.get("day") or "")
-                for window, (match, boundary) in rules.items():
-                    if (
-                        match == "all"
-                        or (match == "exact" and day == boundary)
-                        or (match == "since" and day >= boundary)
-                    ):
-                        buckets[window].append(sample)
-            windowed_samples[runtime_id] = buckets
-        for a_index, a_id in enumerate(ids):
-            for b_id in ids[a_index + 1:]:
-                distance_cache = {}
-                for window in rules:
-                    result[window].append(matched_pace_comparison(
-                        a_id, windowed_samples[a_id][window],
-                        b_id, windowed_samples[b_id][window],
-                        distance_cache=distance_cache,
-                    ))
-        data = {
-            "method": "nearest workload match on context, input, output, cache, model calls, tools, and recency",
-            "min_pairs": MATCHED_PACE_MIN_PAIRS,
-            "min_coverage": MATCHED_PACE_MIN_COVERAGE,
-            "windows": result,
-        }
-        _matched_pace_cache["signature"] = signature
-        _matched_pace_cache["data"] = data
+    while True:
+        with _matched_pace_cache_lock:
+            if (
+                _matched_pace_cache.get("signature") == signature
+                and _matched_pace_cache.get("data") is not None
+            ):
+                return copy.deepcopy(_matched_pace_cache["data"])
+
+        # Only one thread rebuilds at a time. A rebuild takes seconds on a large
+        # history; running the same one concurrently saturates the CPU and every
+        # other cross-session request waits behind it on the cache lock.
+        with _matched_pace_build_condition:
+            if _matched_pace_build_state["building"]:
+                _matched_pace_build_condition.wait(timeout=5)
+                continue
+            _matched_pace_build_state["building"] = True
+        data = None
+        try:
+            _ensure_matched_pace_cache_loaded()
+            data, changed = _build_matched_pace_windows(
+                sample_groups, today, signature_fields, _matched_pace_pair_cache,
+            )
+            if changed:
+                _save_matched_pace_pair_cache()
+        finally:
+            if data is not None:
+                with _matched_pace_cache_lock:
+                    _matched_pace_cache["signature"] = signature
+                    _matched_pace_cache["data"] = data
+            with _matched_pace_build_condition:
+                _matched_pace_build_state["building"] = False
+                _matched_pace_build_condition.notify_all()
         return copy.deepcopy(data)
 
 
@@ -7779,12 +8242,18 @@ def git_delivery_watcher():
         next_scan_at = time.monotonic() + GIT_DELIVERY_INTERVAL_S
 
 
-def aggregate_model_stats(session_rows):
+def aggregate_model_stats(session_rows, global_scope=True):
+    # Project-scoped stats see a subset of samples; they must not evict or
+    # overwrite the persisted global pair cache.
+    matched_pace = (
+        matched_pace_windows if global_scope
+        else functools.partial(matched_pace_windows, persistent=False)
+    )
     return _domain_aggregate_model_stats(
         session_rows,
         runtime_resolver=source_runtime_label,
         throughput_finalizer=_finalize_throughput_fields,
-        matched_pace=matched_pace_windows,
+        matched_pace=matched_pace,
         project_option_limit=MODEL_PROJECT_OPTION_LIMIT,
         project_resolver=project_filter_key,
     )
@@ -7904,14 +8373,21 @@ def canonical_agent_sources(sources):
     selected = []
 
     for source in canonical_aggregation_sources(source_rows):
-        if source.get("provider") in ("claude", "cursor"):
+        if source.get("provider") in ("claude", "cursor", "pi"):
             selected.append(source)
 
     groups = defaultdict(list)
     for index, source in enumerate(source_rows):
-        if source.get("provider") != "codex":
+        provider = source.get("provider")
+        if provider not in ("codex", "opencode"):
             continue
-        physical_id = str(source.get("physical_trace_id") or "")
+        if provider == "opencode":
+            # One OpenCode session id is one physical agent. Select it once so a
+            # child is never summarized twice, and never collapse a child into
+            # its parent or another child.
+            physical_id = str(source.get("id") or "")
+        else:
+            physical_id = str(source.get("physical_trace_id") or "")
         key = physical_id or "path:" + str(source.get("path") or index)
         groups[key].append((index, source))
 
@@ -7932,12 +8408,12 @@ def canonical_agent_sources(sources):
             str(source.get("path") or ""),
         )
 
-    codex_selected = {
+    selected_agents = {
         min(candidates, key=rank)[0] for candidates in groups.values()
     }
     selected.extend(
         source for index, source in enumerate(source_rows)
-        if index in codex_selected
+        if index in selected_agents
     )
     return selected
 
@@ -7990,9 +8466,13 @@ def cross_session(sources=None):
         if row.get("_agent_records"):
             agent_rows.append(row)
 
-    agent_groups = _domain_build_agent_groups(agent_rows, now=now)
+    agent_groups, unresolved_agents = _domain_build_agent_graph(
+        agent_rows, now=now,
+    )
     agent_usage = _agent_usage_projection(
-        _domain_aggregate_agent_usage(agent_groups, now=now)
+        _domain_aggregate_agent_usage(
+            agent_groups, unresolved=unresolved_agents, now=now,
+        )
     )
 
     aggregate = _domain_aggregate_cross_session_rows(
@@ -8158,7 +8638,7 @@ def project_model_stats(project):
     ]
     if not matching:
         return {"ok": False, "error": "Project was not found."}, 404
-    stats = aggregate_model_stats(matching)
+    stats = aggregate_model_stats(matching, global_scope=False)
     stats.pop("projects", None)
     stats.pop("projects_truncated", None)
     cache[project] = stats
@@ -8216,6 +8696,46 @@ def spend_logs_state(start_day, end_day):
         "sessions": sessions,
         "total_sessions": len(sessions),
         "total_cost": sum(float(row.get("cost") or 0) for row in sessions),
+    }, 200
+
+
+def compare_sessions_state(raw_ids):
+    """Compare up to four selected traces with a bounded, content-free projection."""
+    keys, error = normalize_compare_ids(raw_ids)
+    if error:
+        return {"ok": False, "error": error}, 400
+    inventory, ready = cached_session_sources()
+    pool = inventory if ready else all_session_sources()
+    by_key = {_compare_trace_key(source): source for source in pool}
+    stem_counts = defaultdict(int)
+    for source in pool:
+        stem_counts[_compare_trace_stem(source)] += 1
+
+    def open_id(row):
+        stem = _compare_trace_stem(row)
+        return stem if stem and stem_counts.get(stem) == 1 else str(row.get("id") or "")
+
+    entries, missing = [], []
+    for key in keys:
+        source = by_key.get(key)
+        state = cached_session_state(source) if source else None
+        if not state:
+            missing.append(key)
+            continue
+        entries.append(_compare_entry(session_summary(source), state, key=key, open_id=open_id(source)))
+    if not entries:
+        return {
+            "ok": False,
+            "error": "The selected sessions could not be loaded.",
+            "missing": missing,
+        }, 404
+    comparison = _compare_sessions(entries)
+    rows = _xsess.get("sessions") or (_xsess.get("data") or {}).get("sessions") or ()
+    return {
+        "ok": True,
+        **comparison,
+        "missing": missing,
+        "matches": _compare_matching_sessions(comparison["sessions"], rows, open_id=open_id),
     }, 200
 
 
@@ -8589,6 +9109,8 @@ def resolve_agent_source(session_id=None, caller=None, sources=None):
         return None, "No matching {} run was found.".format(supported_runtime_phrase())
     selected = max(candidates, key=lambda row: float(row.get("mtime") or 0))
     mtime = float(selected.get("mtime") or 0)
+    # A child run's live activity belongs to its root session's current run.
+    selected = fold_child_source(selected, candidates)
     if not mtime or time.time() - mtime > AGENT_CURRENT_MAX_AGE_S:
         runtime = runtime_display_label(provider) if provider else "agent"
         return None, f"No recent {runtime} run matched the caller's current project."
@@ -8673,10 +9195,30 @@ def session_budget_snapshot(source, state, settings=None):
     """Build the bounded budget state shared by dashboard and MCP surfaces."""
     source = source or {}
     state = state or {}
-    session_id = str(source.get("id") or "").strip()
+    own_id = str(source.get("id") or "").strip()
+    session_id, root_row, children = session_budget_family(
+        own_id, root_id=folded_child_root_id(source) or None,
+    )
     budget_usd, source_kind = effective_session_budget(session_id, settings)
-    cost_available = metric_available(state, "cost")
-    spend_usd = round(float(state.get("total_cost") or 0), 4) if cost_available else None
+    own_cost_available = metric_available(state, "cost")
+    spend = float(state.get("total_cost") or 0) if own_cost_available else None
+    cost_partial = False
+    if children:
+        # One cap covers the root and every child run: add the cached spend of
+        # each other family member to this session's live spend. Measured
+        # members count even when this session's own cost is unavailable, and
+        # any unavailable member makes the spend a lower bound.
+        others = [row for row in children if str(row.get("id") or "") != own_id]
+        if own_id != session_id and root_row is not None:
+            others.append(root_row)
+        measured = [row for row in others if metric_available(row, "cost")]
+        if measured:
+            spend = (spend or 0.0) + sum(float(row.get("cost") or 0) for row in measured)
+        cost_partial = spend is not None and (
+            not own_cost_available or len(measured) < len(others)
+        )
+    cost_available = spend is not None
+    spend_usd = round(spend, 4) if spend is not None else None
     percent_used = round((100 * spend_usd / budget_usd), 2) if spend_usd is not None else None
     remaining_usd = round(budget_usd - spend_usd, 4) if spend_usd is not None else None
     thresholds = list((normalize_budget_settings(
@@ -8697,6 +9239,7 @@ def session_budget_snapshot(source, state, settings=None):
         ),
         "reached_thresholds": reached,
         "cost_available": cost_available,
+        **({"cost_partial": cost_partial} if children else {}),
     }
 
 
@@ -8713,7 +9256,10 @@ def agent_budget(session_id=None, caller=None):
         "answer": "Session budget is available for this run.",
         "evidence": [],
         "recommended_action": "Use the remaining session budget when deciding whether to continue or narrow scope.",
-        "caveat": "Spend is an estimate when this runtime uses public API rates.",
+        "caveat": "Spend is an estimate when this runtime uses public API rates." + (
+            " Spend is a lower bound: some runs in this session family have no cost evidence."
+            if session.get("cost_partial") else ""
+        ),
         "dashboard_url": agent_dashboard_url(source.get("id"), "summary"),
         "as_of": agent_as_of(),
         "data_scope": "session_budget",
@@ -8732,8 +9278,11 @@ def agent_set_session_budget(session_id=None, budget_usd=None,
     source, resolution = resolve_agent_source(session_id=session_id, caller=caller)
     if not source:
         return agent_no_session(resolution)
+    budget_id = session_budget_family(
+        source.get("id"), root_id=folded_child_root_id(source) or None,
+    )[0]
     result = set_session_budget_override(
-        source.get("id"), budget_usd,
+        budget_id, budget_usd,
         expected_current_budget_usd=expected_current_budget_usd,
     )
     if not result.get("ok"):
@@ -9697,8 +10246,33 @@ def menubar_recent_sessions(sources, selected_id=None, limit=5, summaries=None):
         if key[1] and name and key not in summary_names:
             summary_names[key] = name
 
+    # A child run is listed through its root session, which inherits the
+    # child's newer activity, so the menu never offers a child as its own run.
+    source_list = list(sources or [])
+    root_keys = {
+        (str(row.get("provider") or ""), str(row.get("id") or ""))
+        for row in source_list
+    }
+    child_activity = {}
+    for row in source_list:
+        root_id = folded_child_root_id(row)
+        key = (str(row.get("provider") or ""), root_id)
+        if root_id and key in root_keys:
+            child_activity[key] = max(
+                child_activity.get(key, 0), float(row.get("mtime") or 0),
+            )
+    listed = []
+    for row in source_list:
+        key = (str(row.get("provider") or ""), folded_child_root_id(row))
+        if key[1] and key in root_keys:
+            continue
+        own_key = (str(row.get("provider") or ""), str(row.get("id") or ""))
+        if own_key in child_activity and child_activity[own_key] > float(row.get("mtime") or 0):
+            row = dict(row, mtime=child_activity[own_key])
+        listed.append(row)
+
     ordered, seen = [], set()
-    for source in sorted(sources or [], key=lambda row: -(row.get("mtime") or 0)):
+    for source in sorted(listed, key=lambda row: -(row.get("mtime") or 0)):
         sid = str(source.get("id") or "")
         if not sid or sid in seen:
             continue
@@ -10014,7 +10588,7 @@ def watcher():
         if inventory_refreshed:
             publish_source_inventory(sources)
         nf = (
-            max(sources, key=lambda source: source["mtime"])
+            newest_current_source(sources)
             if inventory_refreshed and sources else cur
         )
         sources_sig = (
@@ -10403,8 +10977,11 @@ class H(BaseHTTPRequestHandler):
             if source is None:
                 result = {"ok": False, "error": "The requested Token Meter session was not found."}
             else:
+                budget_id = session_budget_family(
+                    session_id, root_id=folded_child_root_id(source) or None,
+                )[0]
                 result = set_session_budget_override(
-                    session_id, payload.get("budget_usd"),
+                    budget_id, payload.get("budget_usd"),
                     expected_current_budget_usd=payload.get("expected_current_budget_usd"),
                 )
                 if result.get("ok"):
@@ -10543,7 +11120,10 @@ class H(BaseHTTPRequestHandler):
                     str(row.get("id") or "")
                     for row in (cross.get("current_sessions") or [])
                 }
-                st["ended"] = not live or str((st.get("source") or {}).get("id") or "") not in current_ids
+                live_id = folded_child_root_id(source) or str(
+                    (st.get("source") or {}).get("id") or ""
+                )
+                st["ended"] = not live or live_id not in current_ids
                 st["selected_live"] = live
                 if st.get("timing"):
                     st["timing"]["end_label"] = "Last activity"
@@ -10563,6 +11143,11 @@ class H(BaseHTTPRequestHandler):
             }), "application/json")
         elif req_path == "/logs":
             self._send(json.dumps(log_sessions_state()), "application/json")
+        elif req_path == "/session/compare":
+            payload, status = compare_sessions_state(
+                (parse_qs(parsed.query).get("ids") or [""])[0],
+            )
+            self._send(json.dumps(payload), "application/json", status=status)
         elif req_path == "/spend/logs":
             query = parse_qs(parsed.query)
             payload, status = spend_logs_state(
@@ -10710,6 +11295,8 @@ def application():
 
 def main():
     """Run the local HTTP application and its background services."""
+    global _matched_pace_persist
+    _matched_pace_persist = True
     print("Auto-following newest {} sessions. Ctrl-C to stop.".format(
         supported_runtime_phrase()
     ))

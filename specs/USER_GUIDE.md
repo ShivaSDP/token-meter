@@ -104,7 +104,15 @@ and select it from **Sessions**.
 ### Sessions
 
 **Current sessions** shows recently active runs. **All sessions** searches
-history by project, application, or activity window. **Sessions → Subagents**
+history by project, application, or activity window. Tick the box at the start
+of up to four rows and choose **Compare** to see them side by side in
+**Sessions → Compare**: setup differences, cost, tokens, cache, time, context,
+tools, cumulative cost or tokens by execution, where the cost went, and short
+insights. To judge repeated runs of one prompt, select one run and add the
+other sessions with the same title from the list below the comparison; with
+three or more same-prompt runs, Compare reports the run-to-run spread. Compare
+measures effort, not answer quality, and unavailable evidence shows `--`
+rather than zero. **Sessions → Subagents**
 investigates child-agent runs and issues; the top-level **Subagents** page compares
 roles. Selecting a session opens a
 durable local URL such as `/sessions/<id>#summary`.
@@ -187,6 +195,24 @@ and the exact reasons for a review signal. **Open parent session** moves to the
 normal session detail and its full Agent activity hierarchy. Parent titles are
 resolved from the existing local session history; no prompt or response text
 is added to the child-agent projection.
+
+OpenCode child runs are counted in every total from the moment they exist, because
+an OpenCode parent session's cost does not include its children. To keep the All
+sessions list readable, those runs are not listed as rows by default. Their spend
+still appears in global totals, and the row-count line states how much subagent
+spend is counted and listed under parents. Each parent session card carries a
+**Subagents** subsection showing its child runs inline with the reported role,
+model, tokens, and cost; selecting one opens that run like any other session. Use
+the **Subagents** filter, set to **Hidden** or **Listed**, to include child runs as
+their own rows. The All sessions header figures include child-run spend in both
+modes, and searching in **Hidden** mode finds a child run by showing its parent
+session card. Nested runs appear under their top-level session. A child run
+priced at $0.00 on a free tier shows a measured zero rather than missing billing.
+Archiving an OpenCode session removes it and its child runs from Token Meter.
+
+While a child run is active, it appears as part of its parent's current session:
+the parent's live cost and session cap include every child run, and a child run
+has no separate cap.
 
 Session deletion is available only where the runtime and platform expose a
 safe, recoverable target.
@@ -449,6 +475,15 @@ and semantic token classification remain unavailable because Pi's records do
 not establish them. A provider resource identifier, such as an
 application-profile reference, is replaced with a safe generic model label;
 Token Meter does not infer or price a foundation model from it.
+
+Pi child runs started by the `subagent` tool are counted in the owning
+session's totals and appear under **Sessions → Subagents** and in the selected
+session's agent group with their provider-reported agent name, model, duration,
+and completion state. Token Meter reads only the structural result fields of
+that tool; child prompts, tasks, messages, stderr, and outputs stay unread. A
+child that reports no usage keeps its tokens and cost unavailable rather than
+zero, and a session with more child runs than Token Meter retains shows its
+totals as unavailable rather than as a complete figure.
 
 ### Costs and estimates
 
