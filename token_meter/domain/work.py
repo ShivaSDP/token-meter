@@ -366,6 +366,7 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
             cell["flag"] = "possible_false_economy"
 
     effort = _effort(in_window)
+    flagged = _flagged_spend(in_window, cells, effort, tiers)
     kpis = {"current": _kpis(in_window), "previous": _kpis(earlier) if earlier else None,
             "previous_months": sorted(previous_months)}
     position = _position(in_window)
@@ -385,7 +386,7 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
         "allocation": allocation,
         "economics": economics,
         "rework": rework,
-        "right_sizing": {"cells": cells, "tiers_known": bool(tiers), "effort": effort},
+        "right_sizing": {"cells": cells, "tiers_known": bool(tiers), "effort": effort, "flagged": flagged},
         "kpis": kpis,
         "model_fit": model_fit,
         "choices": _choices(model_fit),
@@ -544,6 +545,21 @@ def _effort(in_window):
                          "flag": "possible_overthinking" if group_name == "routine" and effort in HIGH_EFFORTS
                          and spend > 0 else ""})
     return {"efforts": efforts, "cells": rows}
+
+
+def _flagged_spend(in_window, cells, effort, tiers):
+    """Spend on sessions in any mismatched cell, counting a session once even when tier and effort both flag it."""
+    groups = dict(COMPLEXITY_GROUPS)
+    flagged_tiers = {(c["complexity"], c["tier"]) for c in cells if c["flag"]}
+    flagged_efforts = {(c["complexity"], c["effort"]) for c in (effort or {}).get("cells", []) if c["flag"]}
+    complexity_of = {member: name for name, members in groups.items() for member in members}
+    labeled = [s for s in in_window if s["complexity"] in complexity_of]
+    hit = [s for s in labeled
+           if (complexity_of[s["complexity"]], s["tier"]) in flagged_tiers
+           or (complexity_of[s["complexity"]], s["effort"]) in flagged_efforts]
+    spend, total = sum(_cost(s) for s in hit), sum(_cost(s) for s in labeled)
+    return {"sessions": len(hit), "spend": round(spend, 6), "labeled_spend": round(total, 6),
+            "share": spend / total if total else None}
 
 
 def _resolved(group, corrections_for):

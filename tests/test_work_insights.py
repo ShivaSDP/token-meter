@@ -1183,6 +1183,15 @@ class SurfaceContractTests(unittest.TestCase):
             self.assertIn(marker, self.page)
         self.assertNotIn("--w1:#3987e5", self.page)
 
+    def test_sizing_and_scorecard_numbers_match_their_labels(self):
+        for marker in ("const flagged=insights?.right_sizing?.flagged||{}",
+                       "slice(rework.grain==='day'?-31:-26)",
+                       "lowest=ranked.length>=2?",
+                       "sessions started in this period",
+                       "no routine work on premium models"):
+            self.assertIn(marker, self.page)
+        self.assertNotIn("rows.reduce((sum,item)=>sum+(item.spend||0),0)", self.page)
+
     def test_settings_card_explains_what_text_is_read(self):
         self.assertIn("id=work-insights-settings", self.page)
         self.assertIn("reads the prompts you typed, plus the last few lines of the assistant reply", self.page)
@@ -1731,3 +1740,19 @@ class ModelScorecardTests(unittest.TestCase):
         self.assertIsNone(cursor["resolved_rate"])
         self.assertIsNone(cursor["cost_per_resolved"])
         self.assertEqual([r["model"] for r in out["model_scorecard"]][:1], ["gpt-5.6"])
+
+
+class FlaggedSpendTests(unittest.TestCase):
+    def test_a_session_flagged_for_tier_and_effort_counts_once(self):
+        rows = [row("both", model="gpt-5.6", cost=10.0), row("a", model="cheap", cost=1.0),
+                row("b", model="mid", cost=1.0)]
+        rows[0]["reasoning_effort"] = "xhigh"
+        labels = {key: {"area": "Personal", "complexity": "routine"} for key in ("both", "a", "b")}
+        prices = {"gpt-5.6": 10.0, "cheap": 1.0, "mid": 4.0}
+        out = domain.build_work_insights(rows, labels, lambda ident: ident.split("\0")[0], DomainTests.AREAS,
+                                         lambda m, p: prices.get(m), today="2026-09-30")
+        kinds = {item["kind"] for item in out["opportunities"]}
+        self.assertEqual(kinds, {"premium_routine", "effort_routine"})
+        flagged = out["right_sizing"]["flagged"]
+        self.assertEqual((flagged["sessions"], flagged["spend"], flagged["labeled_spend"]), (1, 10.0, 12.0))
+        self.assertAlmostEqual(flagged["share"], 10 / 12)
