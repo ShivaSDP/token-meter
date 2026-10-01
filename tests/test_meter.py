@@ -6210,6 +6210,10 @@ class SessionDeleteTests(unittest.TestCase):
             self.assertTrue(first.exists())
             self.assertTrue(second.exists())
 
+    def test_trace_key_longer_than_the_bound_is_rejected(self):
+        result = meter.trash_session_log("shared", trace="x" * 241, sources=[])
+        self.assertEqual(result["error_code"], "invalid_id")
+
     def test_delete_route_checks_the_provider_of_the_exact_trace(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -6244,11 +6248,20 @@ class SessionDeleteTests(unittest.TestCase):
             root = Path(tmp)
             first, second, sources = self.rollout_pair(root)
             sources[1]["provider"] = "opencode"
-            with mock.patch.object(meter, "all_session_sources", return_value=sources):
+            with mock.patch.object(meter, "all_session_sources", return_value=sources), \
+                    mock.patch.object(meter, "trash_session_log",
+                                      return_value={"ok": True}) as trash:
                 result = meter.request_session_delete("shared")
             self.assertEqual(result["error_code"], "ambiguous_id")
+            trash.assert_not_called()
             self.assertTrue(first.exists())
             self.assertTrue(second.exists())
+
+    def test_delete_route_forwards_the_trace_key(self):
+        source = (Path(meter.__file__).resolve().parent / "token_meter" / "app.py").read_text()
+        self.assertIn(
+            'request_session_delete(payload.get("session_id"), payload.get("trace"))', source,
+        )
 
     def test_trace_delete_keeps_the_claude_duplicate_guard(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -10813,6 +10826,7 @@ console.log(JSON.stringify({
             "const interactingLogRow=forceAllSessionRowRefresh?null:root.querySelector('.srow:hover,.srow:focus-within');",
             "if(interactingLogRow)return;",
             "function mergeAllSessionInventory(inventory,liveSessions)",
+            "const key=row=>row?.path?compareKeyFor(row):sessionRowKey(row);",
             "(liveSessions||[]).forEach(row=>rows.set(key(row),row))",
             "const liveSessionIds=new Set((xs.current_sessions||[]).map(sessionRowKey));",
             "const live=liveSessionIds.has(key)",
@@ -10856,7 +10870,7 @@ console.log(JSON.stringify({
     def test_all_sessions_keep_one_row_per_trace_file(self):
         script = "\n".join(
             self.page_function(self.page, name)
-            for name in ("sessionRowKey", "mergeAllSessionInventory")
+            for name in ("sessionRowKey", "compareKeyFor", "mergeAllSessionInventory")
         ) + """
 const inventory=[
  {id:'task-1',session:'rollout-a.jsonl',cost:0.91},
@@ -10880,6 +10894,29 @@ console.log(JSON.stringify({
         ])
         self.assertAlmostEqual(merged["cost"], 0.91 + 112.0 + 0.16)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard JavaScript")
+    def test_session_header_names_the_opened_trace_not_a_sibling(self):
+        script = "let allSessionInventory=null;\n" + "\n".join(
+            self.page_function(self.page, name)
+            for name in ("stateSessionId", "stateSessionKey", "sessionStartMessage", "sessionDisplayName")
+        ) + """
+const state={session:'rollout-child.jsonl',source:{id:'task-1'},xsession:{current_sessions:[],sessions:[
+ {id:'task-1',session:'rollout-root.jsonl',title:'Root title'},
+ {id:'task-1',session:'rollout-child.jsonl',title:'Child title'}]}};
+const sibling={...state,session:'rollout-other.jsonl'};
+// Older traces fall outside the recent rows but are in the All sessions inventory the user opened them from.
+allSessionInventory=[{id:'task-1',session:'rollout-old.jsonl',title:'Old title'}];
+const older={...state,session:'rollout-old.jsonl'};
+console.log(JSON.stringify([sessionDisplayName(state),sessionDisplayName(sibling),sessionDisplayName(older)]));
+"""
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout), ["Child title", "Session", "Old title"])
+
+    def test_all_sessions_inventory_is_declared_before_the_first_header_render(self):
+        declaration = self.page.index("let allSessionInventory=null")
+        self.assertLess(declaration, self.page.index("function showCurrentPanel("))
+        self.assertLess(declaration, self.page.index("function applyHashRoute(){"))
+
     def test_every_session_entry_point_addresses_one_trace_file(self):
         for marker in (
             "function sessionRowKey(row){return String(row?.session||row?.id||'');}",
@@ -10897,10 +10934,13 @@ console.log(JSON.stringify({
             "data-frustration-session=\"${esc(sessionRowKey(row.session))}\"",
             "href=\"${esc(sessionRoute(sessionRowKey(row)))}\"",
             "<span class=\"badge subagentTag\">Subagent</span>",
+                ".srow .subagentTag{",
+                "sessionDeleteAvailable(s,renderedAllSessionActions),s.subagent,s.client,",
         ):
             self.assertIn(marker, self.page)
         self.assertNotIn("workSessionFilter.ids.has(String(s.id))", self.page)
         self.assertNotIn("rows.set(String(row.id),row)", self.page)
+        self.assertNotIn("renderedAllSessions=new Map(all.map(row=>[String(row.id),row]));", self.page)
 
     def test_current_and_all_sessions_share_the_defined_app_badge_helper(self):
         self.assertIn("const appBadgeClass=session=>", self.page)
@@ -19108,7 +19148,7 @@ console.log(JSON.stringify({{
     def test_child_rows_navigate_without_double_firing_the_parent(self):
         self.assertIn("const childButton=event.target.closest('[data-open-session]');", self.page)
         self.assertIn("event.stopPropagation();", self.page)
-        self.assertIn("selectSession(childRow.id)", self.page)
+        self.assertIn("selectSession(sessionRowKey(childRow))", self.page)
 
     def test_measured_free_tier_zero_is_not_presented_as_unavailable(self):
         # A real free-tier price renders as $0.00, distinct from missing billing.

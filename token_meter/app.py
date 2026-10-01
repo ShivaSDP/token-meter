@@ -5907,6 +5907,12 @@ def hermes_summary(source, objs=None):
     return _hermes_native_adapter().summarize_legacy(source, objs)
 
 
+def _is_child_agent_row(row):
+    """A row is a child run only when every agent record names a parent."""
+    records = [r for r in row.get("_agent_records") or () if isinstance(r, dict)]
+    return bool(records) and all(r.get("parent_id") for r in records)
+
+
 def session_summary(source, opencode_conn=None):
     signature = source_revision_signature(source)
     with _summary_cache_lock:
@@ -5925,6 +5931,9 @@ def session_summary(source, opencode_conn=None):
     finally:
         work_turns, _WORK_TURNS.turns = getattr(_WORK_TURNS, "turns", None), None
     if isinstance(row, dict):
+        row["session"] = str(source.get("session") or row.get("id") or "")
+        if _is_child_agent_row(row):
+            row["subagent"] = True
         row["capabilities"] = with_configured_capabilities(
             row.get("capabilities") or _domain_session_capabilities(row.get("_tool_evidence")),
             source.get("provider"), source.get("project") or row.get("project") or "",
@@ -6568,7 +6577,7 @@ def request_session_delete(session_id, trace=None):
     """Apply the public read-only-provider boundary before any trash action."""
     session_id, trace = str(session_id or "").strip(), str(trace or "").strip()
     source_pool = all_session_sources()
-    candidates = []
+    candidates, error = [], None
     if session_id and len(session_id) <= 240 and len(trace) <= 240:
         source, error = _session_delete_source(session_id, trace, source_pool)
         if source:
@@ -6592,6 +6601,8 @@ def request_session_delete(session_id, trace=None):
             ),
             "error_code": "read_only_provider",
         }
+    if error:
+        return error
     return trash_session_log(session_id, sources=source_pool, trace=trace)
 
 

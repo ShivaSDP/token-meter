@@ -101,7 +101,8 @@ Session lists, routes, Spend links, Work drill-downs, and deletes address one
 trace file through its `session` key; resumed rollouts and spawned children
 that share a logical `id` remain separate rows whose adapter-corrected costs
 sum to the Spend total. A logical `id` remains a compatible route to the most
-active file, but deleting one that spans several files requires the trace key.
+active file, but deleting one that spans several files requires the trace key. All sessions therefore counts trace files, while model rollups count
+logical sessions.
 
 Subagent observability reuses each adapter's corrected accounting. Codex adds
 an agent edge only for an explicit bounded `thread_spawn` relationship, hashes
