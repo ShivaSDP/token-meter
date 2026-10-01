@@ -412,6 +412,10 @@ The public installer dispatches by host:
 
 - macOS stages under `~/Library/Application Support/Token Meter/runtime` and
   manages `com.token-meter.server` plus `com.token-meter.menubar` LaunchAgents;
+  when Work insights are turned on, `token_meter/services/work_setup.py` may add
+  a pinned, verified Ollama under `…/Token Meter/ollama` and a third
+  LaunchAgent, `com.token-meter.ollama` (loopback port 11435), which the
+  uninstaller removes;
 - Linux stages under `${XDG_DATA_HOME:-~/.local/share}/token-meter/runtime` and
   manages server/tray `systemd --user` services;
 - Windows stages under `%LOCALAPPDATA%\Token Meter\runtime` and manages the

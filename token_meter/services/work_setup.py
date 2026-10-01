@@ -7,6 +7,7 @@ runs as a per-user LaunchAgent bound to loopback.
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import plistlib
@@ -55,11 +56,15 @@ IMPORT_RESERVE_BYTES = sum(size for _path, size, _digest in JET_FILES) + 3 * 102
 CHUNK = 1 << 20
 CLI_CANDIDATES = ("/usr/local/bin/ollama", "/opt/homebrew/bin/ollama",
                   "/Applications/Ollama.app/Contents/Resources/ollama")
+# An installed Ollama that is not answering yet (for example at login) gets this long to come up.
+OWN_OLLAMA_WAIT_S = 120
 MACHO_MAGIC = {b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}
 
 IDLE, CHECKING, INSTALLING, STARTING, DOWNLOADING, IMPORTING, READY, FAILED = (
     "idle", "checking", "installing_ollama", "starting_ollama", "downloading_model", "importing", "ready", "failed")
-REASONS = ("network", "verify", "disk_space", "ollama_start", "import", "internal")
+REASONS = ("network", "verify", "disk_space", "ollama_start", "ollama_offline", "import", "cancelled", "internal")
+# Loopback probes must never go through a system or environment HTTP proxy.
+_LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 class SetupError(Exception):
@@ -98,20 +103,37 @@ def parse_version(text):
 
 
 def safe_extract(archive, destination):
-    """Extract regular files, directories, and in-tree symlinks only."""
+    """Extract regular files, directories, and same-folder symlinks; nothing may land outside ``destination``."""
     root = os.path.realpath(destination)
+
+    def inside(path):
+        return path == root or path.startswith(root + os.sep)
+
     with tarfile.open(archive, "r:gz") as bundle:
         for member in bundle.getmembers():
-            target = os.path.realpath(os.path.join(root, member.name))
-            if not (target == root or target.startswith(root + os.sep)):
+            name = os.path.normpath(member.name)
+            if os.path.isabs(name) or name == ".." or name.startswith(".." + os.sep):
                 raise SetupError("verify")
-            if member.issym():
-                link = os.path.realpath(os.path.join(os.path.dirname(target), member.linkname))
-                if not link.startswith(root + os.sep):
+            target = os.path.join(root, name)
+            parent = os.path.realpath(os.path.dirname(target))
+            if not inside(parent) or os.path.islink(target):
+                raise SetupError("verify")
+            if member.isdir():
+                os.makedirs(target, mode=0o755, exist_ok=True)
+            elif member.issym():
+                # Library aliases point at a sibling file; anything else could chain out of the folder.
+                if os.sep in member.linkname or member.linkname in ("", ".", ".."):
                     raise SetupError("verify")
-            elif not (member.isfile() or member.isdir()):
+                os.symlink(member.linkname, target)
+            elif member.isfile():
+                os.makedirs(os.path.dirname(target), mode=0o755, exist_ok=True)
+                source = bundle.extractfile(member)
+                descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                     member.mode & 0o755)
+                with os.fdopen(descriptor, "wb") as handle, source:
+                    shutil.copyfileobj(source, handle, CHUNK)
+            else:
                 raise SetupError("verify")
-        bundle.extractall(root)
 
 
 class WorkSetup:
@@ -127,6 +149,7 @@ class WorkSetup:
         self.set_ollama_url = set_ollama_url
         self.on_ready = on_ready
         self.opener = opener or urllib.request.urlopen
+        self.loopback_opener = opener or _LOOPBACK_OPENER.open
         self.runner = runner
         self.uid = os.getuid() if uid is None else uid
         self.sleep = sleep
@@ -134,6 +157,7 @@ class WorkSetup:
         self.log = log or (lambda message: None)
         self._lock = threading.Lock()
         self._thread = None
+        self._cancel = threading.Event()
         self._state = {"state": IDLE, "reason": "", "done_bytes": 0, "total_bytes": 0, "needed_bytes": 0}
 
     @property
@@ -164,15 +188,31 @@ class WorkSetup:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return False
+            self._cancel.clear()
+            self._state = {"state": CHECKING, "reason": "", "done_bytes": 0, "total_bytes": 0, "needed_bytes": 0}
             self._thread = threading.Thread(target=self._run_safely, name="work-setup", daemon=True)
             self._thread.start()
             return True
+
+    def cancel(self, wait_s=10.0):
+        """Stop a running setup at its next checkpoint, waiting briefly for it to finish."""
+        self._cancel.set()
+        thread = self._thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(wait_s)
+
+    def _checkpoint(self):
+        if self._cancel.is_set():
+            raise SetupError("cancelled")
 
     def _run_safely(self):
         try:
             self.run()
         except SetupError as error:
-            self._set(FAILED, reason=error.reason, needed_bytes=error.needed_bytes)
+            if error.reason == "cancelled":
+                self._set(IDLE)
+            else:
+                self._set(FAILED, reason=error.reason, needed_bytes=error.needed_bytes)
         except Exception:
             self._set(FAILED, reason="internal")
 
@@ -180,8 +220,12 @@ class WorkSetup:
         settings = self.get_settings()
         self._set(CHECKING)
         url, cli = self._ollama(settings["ollama_url"])
-        if not self._has_model(url, settings["model"]):
+        has_model = self._has_model(url, settings["model"])
+        if has_model is None:
+            raise SetupError("ollama_start")
+        if not has_model:
             folder = self._download_model()
+            self._checkpoint()
             self._set(IMPORTING)
             self._import(cli, url, settings["model"], folder)
             shutil.rmtree(folder, ignore_errors=True)
@@ -192,9 +236,9 @@ class WorkSetup:
 
     def _get_json(self, url, timeout=3):
         try:
-            with self.opener(urllib.request.Request(url), timeout=timeout) as response:
+            with self.loopback_opener(urllib.request.Request(url), timeout=timeout) as response:
                 return json.loads(response.read(65536).decode("utf-8"))
-        except (OSError, ValueError, urllib.error.URLError):
+        except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException):
             return None
 
     def _version(self, url):
@@ -202,24 +246,43 @@ class WorkSetup:
         return parse_version(payload.get("version")) if isinstance(payload, dict) else None
 
     def _has_model(self, url, model):
-        payload = self._get_json(url + "/api/tags", timeout=5) or {}
+        """True or False from Ollama's model list; None when Ollama did not answer."""
+        payload = self._get_json(url + "/api/tags", timeout=20)
+        if not isinstance(payload, dict):
+            return None
         names = {str(item.get("name") or "") for item in payload.get("models") or [] if isinstance(item, dict)}
         return model in names or f"{model}:latest" in names
 
     def _ollama(self, configured):
         version = self._version(configured)
+        if configured != MANAGED_URL and version is None and self._find_cli():
+            # The user's own Ollama is installed but not answering yet; wait for it rather than replace it.
+            for _attempt in range(int(OWN_OLLAMA_WAIT_S / 2)):
+                self._checkpoint()
+                self.sleep(2)
+                version = self._version(configured)
+                if version is not None:
+                    break
+            else:
+                raise SetupError("ollama_offline")
         if configured != MANAGED_URL and version and version >= MIN_OLLAMA_VERSION:
             return configured, self._find_cli() or self._install_ollama()
         binary = self._install_ollama()
+        self._checkpoint()
         if not self._version(MANAGED_URL):
             self._set(STARTING)
             self.start_agent(binary)
             for _attempt in range(60):
                 if self._version(MANAGED_URL):
                     break
+                if self._cancel.is_set():
+                    self.stop_agent()
+                    raise SetupError("cancelled")
                 self.sleep(0.5)
             else:
+                self.stop_agent()
                 raise SetupError("ollama_start")
+        self._checkpoint()
         if configured != MANAGED_URL:
             self.set_ollama_url(MANAGED_URL)
         return MANAGED_URL, binary
@@ -240,14 +303,15 @@ class WorkSetup:
         return check.returncode == 0 and f"TeamIdentifier={OLLAMA_TEAM_ID}" in (detail.stderr or "")
 
     def _verify_bundle(self, folder):
-        for name in os.listdir(folder):
-            path = os.path.join(folder, name)
-            if os.path.islink(path) or not os.path.isfile(path):
-                continue
-            with open(path, "rb") as handle:
-                magic = handle.read(4)
-            if magic in MACHO_MAGIC and not self._signed_by_ollama(path):
-                raise SetupError("verify")
+        for directory, _dirs, files in os.walk(folder):
+            for name in files:
+                path = os.path.join(directory, name)
+                if os.path.islink(path) or not os.path.isfile(path):
+                    continue
+                with open(path, "rb") as handle:
+                    magic = handle.read(4)
+                if magic in MACHO_MAGIC and not self._signed_by_ollama(path):
+                    raise SetupError("verify")
 
     def _install_ollama(self):
         final = os.path.dirname(self.binary)
@@ -263,12 +327,10 @@ class WorkSetup:
         try:
             safe_extract(archive, partial)
             self._verify_bundle(partial)
-        except (tarfile.TarError, OSError):
+        except (tarfile.TarError, OSError, SetupError):
             shutil.rmtree(partial, ignore_errors=True)
+            os.remove(archive)  # A retry downloads it again rather than repeating the same failure.
             raise SetupError("verify") from None
-        except SetupError:
-            shutil.rmtree(partial, ignore_errors=True)
-            raise
         shutil.rmtree(final, ignore_errors=True)
         os.replace(partial, final)
         os.remove(archive)
@@ -300,10 +362,15 @@ class WorkSetup:
         os.replace(temporary, self.plist_path)
         domain = f"gui/{self.uid}"
         self.runner(["/bin/launchctl", "bootout", f"{domain}/{AGENT_LABEL}"], capture_output=True, timeout=30)
-        result = self.runner(["/bin/launchctl", "bootstrap", domain, self.plist_path],
-                             capture_output=True, timeout=30)
-        if result.returncode != 0:
-            raise SetupError("ollama_start")
+        for attempt in range(3):
+            # launchd unloads asynchronously, so a bootstrap right after bootout can briefly fail.
+            result = self.runner(["/bin/launchctl", "bootstrap", domain, self.plist_path],
+                                 capture_output=True, timeout=30)
+            if result.returncode == 0:
+                return
+            self.sleep(1.0 + attempt)
+        self.stop_agent()
+        raise SetupError("ollama_start")
 
     def stop_agent(self):
         """Stop the managed Ollama and keep it from starting at login; the model stays for next time."""
@@ -335,12 +402,13 @@ class WorkSetup:
                 with open(destination, "ab" if have else "wb") as handle:
                     done = have
                     for chunk in iter(lambda: response.read(CHUNK), b""):
+                        self._checkpoint()
                         handle.write(chunk)
                         done += len(chunk)
                         if done > size:
                             break
                         self._progress(offset + done)
-        except (OSError, urllib.error.URLError):
+        except (OSError, urllib.error.URLError, http.client.HTTPException):
             raise SetupError("network") from None
         if not verified(destination, size, digest):
             os.remove(destination)
@@ -358,6 +426,7 @@ class WorkSetup:
         self._set(DOWNLOADING, total_bytes=total)
         offset = 0
         for path, size, digest in JET_FILES:
+            self._checkpoint()
             self._download(f"{JET_BASE_URL}/{path}", os.path.join(folder, path), size, digest, offset)
             offset += size
         with open(os.path.join(folder, "Modelfile"), "w", encoding="utf-8") as handle:

@@ -177,11 +177,9 @@ def build_work_insights(rows, labels, key_for, areas, output_price, months=6,
     sessions, runtime_options, project_options = _prepare_sessions(
         rows, labels, key_for, area_names, tiers, runtime, project, pending_keys, grain)
     buckets = _window(sessions, grain, count, today)
-    # The comparison period is the same number of calendar buckets just before the current window.
-    previous = {_shift(buckets[0], -step, grain) for step in range(1, count + 1)} if count and buckets else set()
     segments = area_names + [UNCLEAR, PENDING]
     return _aggregate(sessions, buckets, set(buckets), segments, area_names, tiers, tier_prices,
-                      runtime_options, project_options, today, corrections_for, previous, grain)
+                      runtime_options, project_options, today, corrections_for, grain)
 
 
 def _root_agent_id(row):
@@ -279,8 +277,7 @@ def _attach_sequences(sessions, corrections_for):
 
 
 def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tier_prices,
-               runtime_options, project_options, today, corrections_for, previous_months=frozenset(),
-               grain="month"):
+               runtime_options, project_options, today, corrections_for, grain="month"):
     allocation = []
     for month in all_months:
         bucket = {"month": month, "partial": bool(today and _bucket(today, grain) == month),
@@ -315,8 +312,6 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
             bucket["outcomes"][outcome] += 1
             bucket.setdefault("outcome_spend", {}).setdefault(outcome, 0.0)
             bucket["outcome_spend"][outcome] = round(bucket["outcome_spend"][outcome] + _cost(s), 6)
-    earlier = [s for s in sessions if s["start"] in previous_months]
-    _attach_sequences(earlier, corrections_for)
     economics = []
     by_type = collections.defaultdict(list)
     for s in in_window:
@@ -395,8 +390,6 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
 
     effort = _effort(in_window)
     flagged = _flagged_spend(in_window, cells, effort, tiers)
-    kpis = {"current": _kpis(in_window), "previous": _kpis(earlier) if earlier else None,
-            "previous_months": sorted(previous_months)}
     model_fit = _model_fit(in_window)
     scorecard = _model_scorecard(in_window, tiers)
     opportunities = _opportunities(cells, effort, tier_prices)
@@ -414,7 +407,6 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
         "economics": economics,
         "rework": rework,
         "right_sizing": {"cells": cells, "tiers_known": bool(tiers), "effort": effort, "flagged": flagged},
-        "kpis": kpis,
         "model_fit": model_fit,
         "model_scorecard": scorecard,
         "opportunities": opportunities,
@@ -446,30 +438,6 @@ def _week_start(day):
 
 def _cost(s):
     return float(s["row"].get("cost") or 0)
-
-
-def _kpis(group):
-    """Period KPIs: resolved share, pushback rate, cost per resolved session, spend after first pushback."""
-    counts = collections.Counter()
-    spend = collections.Counter()
-    for s in group:
-        outcome = _outcome(s)
-        counts[outcome] += 1
-        spend[outcome] += _cost(s)
-    judged = counts["accepted"] + counts["recovered"] + counts["ended_on_pushback"]
-    resolved = counts["accepted"] + counts["recovered"]
-    total = sum(spend.values())
-    return {
-        "sessions": len(group),
-        "judged_sessions": judged,
-        "resolved_rate": resolved / judged if judged else None,
-        "pushback": _rate(sum(s["corrections"] for s in group), sum(s["correction_labels"] for s in group)),
-        "cost_per_resolved": (spend["accepted"] + spend["recovered"]) / resolved if resolved else None,
-        "ended_spend": round(spend["ended_on_pushback"], 6),
-        "ended_share": spend["ended_on_pushback"] / total if total else None,
-        "spend": round(total, 6),
-        "few_samples": judged < MIN_RATE_SAMPLES,
-    }
 
 
 def _model_fit(in_window):
@@ -691,15 +659,20 @@ MIN_RECOMMENDATION_SESSIONS = 3
 
 
 def _switch_recommendations(in_window):
-    """Per kind of work: a model that resolves about as often as the usual one for much less per resolved session."""
+    """Per kind of work and complexity: a model that resolves about as often for much less per resolved session.
+
+    Comparing within one complexity level keeps a cheaper model that only saw easier requests from looking better.
+    """
+    complexity_of = {member: name for name, members in COMPLEXITY_GROUPS for member in members}
     groups = collections.defaultdict(lambda: collections.defaultdict(list))
     for s in in_window:
-        if s["work_type"] and s["work_type"] != "unclear" and s["model"]:
-            groups[s["work_type"]][(s["model"], s["row"].get("runtime") or "")].append(s)
+        level = complexity_of.get(s["complexity"])
+        if s["work_type"] and s["work_type"] != "unclear" and s["model"] and level:
+            groups[(s["work_type"], level)][(s["model"], s["row"].get("runtime") or "")].append(s)
     out = []
-    for work_type in WORK_TYPE_ORDER:
+    for work_type, level in ((w, c) for w in WORK_TYPE_ORDER for c, _members in COMPLEXITY_GROUPS):
         stats = []
-        for (model, runtime), group in groups.get(work_type, {}).items():
+        for (model, runtime), group in groups.get((work_type, level), {}).items():
             outcomes = [_outcome(s) for s in group]
             judged = sum(o in ("accepted", "recovered", "ended_on_pushback") for o in outcomes)
             resolved = [s for s, o in zip(group, outcomes) if o in ("accepted", "recovered")]
@@ -716,7 +689,7 @@ def _switch_recommendations(in_window):
         if not better:
             continue
         alt = min(better, key=lambda x: x["cost"])
-        out.append({"kind": "switch_model", "work_type": work_type,
+        out.append({"kind": "switch_model", "work_type": work_type, "complexity": level,
                     "model": usual["model"], "runtime": usual["runtime"],
                     "to_model": alt["model"], "to_runtime": alt["runtime"],
                     "from_cost": usual["cost"], "to_cost": alt["cost"],
@@ -731,6 +704,7 @@ def _long_thread_recommendation(in_window):
     priced = [s for s in in_window if _cost(s) > 0 and s["turns"] > 0]
     long = [s for s in priced if s["turns"] >= LONG_THREAD_TURNS]
     short = [s for s in priced if s["turns"] <= SHORT_THREAD_TURNS]
+    tagged = sum(1 for s in in_window if s["turns"] >= LONG_THREAD_TURNS)
     if len(long) < MIN_THREAD_SESSIONS or len(short) < MIN_THREAD_SESSIONS:
         return None
     long_turns, short_turns = sum(s["turns"] for s in long), sum(s["turns"] for s in short)
@@ -739,7 +713,7 @@ def _long_thread_recommendation(in_window):
     if short_rate <= 0 or long_rate < LONG_THREAD_RATIO * short_rate:
         return None
     spend = sum(_cost(s) for s in long)
-    return {"kind": "long_threads", "threshold_turns": LONG_THREAD_TURNS, "sessions": len(long),
+    return {"kind": "long_threads", "threshold_turns": LONG_THREAD_TURNS, "sessions": tagged,
             "spend": round(spend, 6), "ratio": long_rate / short_rate,
             "long_cost_per_turn": long_rate, "short_cost_per_turn": short_rate,
             "saving": round(max(0.0, spend - long_turns * short_rate), 6)}

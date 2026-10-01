@@ -17,9 +17,9 @@ and quality evidence.
 | Topic | Decision |
 | --- | --- |
 | Placement | New top-level **Work** page between Efficiency and Git. Order becomes `Sessions → Spend → Models → Subagents → Efficiency → Work → Git → Learn → Tools → Settings`. |
-| Taxonomy | Two axes. A fixed **work type** (debug, feature, refactor, docs, explore, review, ops, other) owned by Token Meter, plus user-editable **areas** (2–8, name and one-line description) in Settings. Eight is the validated categorical palette limit. |
+| Taxonomy | Two axes. A fixed **work type** (see iteration 9 for the current ten) owned by Token Meter, plus user-editable **areas** (2–8, name and one-line description) in Settings. Eight is the validated categorical palette limit. |
 | Model | Jet v6.2 (Apache-2.0, Qwen3.5-4B decision model) served by the user's local Ollama. Model name and loopback URL are configurable. |
-| Provisioning | Off by default. `scripts/setup-work-classifier` downloads Jet from Hugging Face with curl, verifies sizes, and runs `ollama create -q int4`. |
+| Provisioning | Off by default. Turning it on runs `token_meter/services/work_setup.py` (iteration 8), which reuses or installs a pinned Ollama and imports the pinned Jet model; `scripts/setup-work-classifier` runs the same module. |
 | Scope v1 | Classifier infrastructure, Work page, session tags, Settings controls, menu-bar pause, setup script. |
 | Scope v2 | Session outcome joined with Git delivery, prompt-clarity coaching, live menu-bar nudge, MCP exposure, "spend rising while value is flat" alert. |
 
@@ -425,3 +425,18 @@ sent to the classifier.
   wording 96% (79/82). Area: 82% (67/82), 84% at confidence ≥ 0.5; most misses
   are genuinely two-area requests. The set was written alongside the new
   wording, so these figures are optimistic.
+
+### Review fixes (iteration 9)
+
+- Turning Work insights off cancels a running setup at its next checkpoint and
+  stops the managed Ollama; an `ollama_start` failure unloads the agent.
+- Loopback probes bypass HTTP proxies. An installed but not yet running Ollama
+  is waited for (two minutes, then `ollama_offline`) instead of replaced; an
+  unanswered model list fails setup rather than starting a download.
+- Extraction writes regular files with `O_EXCL|O_NOFOLLOW`, masks modes to
+  0755, allows only same-folder symlinks, and signature checks walk subfolders.
+- Area labels from any prompt version count when their taxonomy hash still
+  matches. Settings carry `areas_version` so a deliberate save of the old
+  default names is kept. Settings writes are serialized.
+- Model-switch suggestions compare models within one complexity level and name
+  the app when it differs. The unused KPI payload was removed.

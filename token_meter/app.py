@@ -2130,8 +2130,16 @@ def _pause_until(choice, now=None):
     return tomorrow.timestamp()
 
 
+_work_settings_write_lock = threading.Lock()
+
+
 def set_work_insights_settings(values, path=None):
     """Validate and persist work-insight settings atomically. Unknown fields are rejected."""
+    with _work_settings_write_lock:  # The setup thread writes too; serialize read-modify-write.
+        return _set_work_insights_settings(values, path)
+
+
+def _set_work_insights_settings(values, path=None):
     path = path or TOKEN_METER_SETTINGS
     if not isinstance(values, dict):
         return {"ok": False, "error": "Work insight settings must be an object."}
@@ -8034,6 +8042,7 @@ def stop_managed_ollama():
     if not work_insights_supported():
         return
     try:
+        work_setup().cancel()
         work_setup().stop_agent()
     except (OSError, subprocess.SubprocessError):
         pass

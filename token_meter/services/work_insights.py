@@ -100,6 +100,7 @@ DEFAULT_AREAS = (
     {"name": "Docs & writing", "description": "documentation, blog posts, slides, reports, and messages"},
     {"name": "Non-code", "description": "personal, financial, or general questions unrelated to software"},
 )
+AREAS_VERSION = 3  # Saved with the areas; an earlier default set without it moves to the current defaults.
 # Area sets that earlier versions shipped as defaults; settings still holding one move to the current defaults.
 PREVIOUS_DEFAULT_AREA_NAMES = (
     ("Product engineering", "Agents and tools", "Writing and publishing", "Research and evaluation",
@@ -278,6 +279,7 @@ def default_settings():
         "model": DEFAULT_MODEL,
         "ollama_url": DEFAULT_URL,
         "areas": [dict(area) for area in DEFAULT_AREAS],
+        "areas_version": AREAS_VERSION,
     }
 
 
@@ -310,7 +312,8 @@ def normalize_settings(raw):
         areas = normalize_areas(raw.get("areas"))
     except ValueError:
         areas = None
-    if areas and tuple(a["name"] for a in areas) not in PREVIOUS_DEFAULT_AREA_NAMES:
+    if areas and (raw.get("areas_version") == AREAS_VERSION
+                  or tuple(a["name"] for a in areas) not in PREVIOUS_DEFAULT_AREA_NAMES):
         settings["areas"] = areas
     return settings
 
@@ -1278,8 +1281,8 @@ class WorkInsightsService:
 
         def usable(row):
             if row["question"] == "area":
-                # Current tag, or a pre-versioning label for the same areas.
-                return row["taxonomy"] in (tags["area"], area_hash)
+                # Any prompt version for the same areas counts; older versions show until relabeled.
+                return str(row["taxonomy"] or "").split(":")[-1] == area_hash
             return True
 
         # A recorded opener replaces other turns' labels only once it has its own outcome, so a

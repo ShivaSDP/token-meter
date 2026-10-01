@@ -190,6 +190,145 @@ class WorkSetupTests(unittest.TestCase):
         self.assertEqual((status["state"], status["reason"]), ("failed", "internal"))
         self.assertNotIn("secret", json.dumps(status))
 
+    def test_turning_off_mid_download_cancels_without_starting_anything(self):
+        self.ollama["http://127.0.0.1:11434"] = {"version": "0.34.4", "models": []}
+        with self.small_model(), mock.patch.object(S, "CLI_CANDIDATES", (self.runner_path(),)):
+            setup = self.make()
+            original = setup._download
+
+            def download(*args):
+                setup._cancel.set()
+                return original(*args)
+            setup._download = download
+            setup._run_safely()
+        self.assertEqual(setup.status()["state"], "idle")
+        self.assertFalse(any(len(c) > 1 and c[1] == "create" for c in self.commands))
+
+    def test_cancel_before_the_agent_starts_writes_no_login_item(self):
+        with self.ollama_archive(), mock.patch.object(S, "CLI_CANDIDATES", ()):
+            setup = self.make()
+            original = setup._install_ollama
+
+            def install():
+                path = original()
+                setup._cancel.set()
+                return path
+            setup._install_ollama = install
+            setup._run_safely()
+        self.assertFalse(os.path.exists(setup.plist_path))
+        self.assertFalse(any(c[:2] == ["/bin/launchctl", "bootstrap"] for c in self.commands))
+
+    def test_installed_but_stopped_ollama_is_waited_for_not_replaced(self):
+        cli = self.runner_path()
+        calls = {"n": 0}
+
+        def sleep(_seconds):
+            calls["n"] += 1
+            if calls["n"] == 3:
+                self.ollama["http://127.0.0.1:11434"] = {"version": "0.34.4", "models": ["token-meter-jet:latest"]}
+        with mock.patch.object(S, "CLI_CANDIDATES", (cli,)):
+            setup = self.make()
+            setup.sleep = sleep
+            setup.run()
+        self.assertEqual(self.settings["ollama_url"], "http://127.0.0.1:11434")
+        self.assertFalse(any("github" in u for u in self.urls))
+
+    def test_installed_ollama_that_never_starts_reports_offline(self):
+        with mock.patch.object(S, "CLI_CANDIDATES", (self.runner_path(),)):
+            setup = self.make()
+            setup._run_safely()
+        self.assertEqual((setup.status()["state"], setup.status()["reason"]), ("failed", "ollama_offline"))
+        self.assertEqual(self.settings["ollama_url"], "http://127.0.0.1:11434")
+
+    def test_unanswered_model_list_does_not_start_a_download(self):
+        self.ollama["http://127.0.0.1:11434"] = {"version": "0.34.4", "models": []}
+        opener = self.opener
+
+        def flaky(request, timeout=0):
+            if request.full_url.endswith("/api/tags"):
+                raise OSError("timed out")
+            return opener(request, timeout)
+        with self.small_model(), mock.patch.object(S, "CLI_CANDIDATES", (self.runner_path(),)):
+            setup = self.make()
+            setup.opener = setup.loopback_opener = flaky
+            setup._run_safely()
+        self.assertEqual(setup.status()["reason"], "ollama_start")
+        self.assertFalse(any("huggingface" in u for u in self.urls))
+
+    def test_port_conflict_unloads_the_agent(self):
+        def runner(command, **kwargs):
+            if command[:2] == ["/bin/launchctl", "bootstrap"]:
+                return Run()  # Loaded, but something else holds the port and Ollama never answers.
+            return self.runner(command, **kwargs)
+        with self.ollama_archive(), mock.patch.object(S, "CLI_CANDIDATES", ()):
+            setup = self.make()
+            setup.runner = runner
+            setup._run_safely()
+        self.assertEqual(setup.status()["reason"], "ollama_start")
+        self.assertFalse(os.path.exists(setup.plist_path))
+
+    def test_start_reports_checking_immediately(self):
+        setup = self.make()
+        release = __import__("threading").Event()
+        setup.run = lambda: release.wait(5)
+        self.assertTrue(setup.start())
+        self.assertEqual(setup.status()["state"], "checking")
+        self.assertFalse(setup.start())
+        release.set()
+
+    def test_loopback_probes_ignore_http_proxies(self):
+        with mock.patch.dict(os.environ, {"http_proxy": "http://proxy.example:3128"}):
+            self.assertTrue(S.urllib.request.getproxies().get("http"))
+            self.assertFalse(any(isinstance(h, S.urllib.request.ProxyHandler) and h.proxies
+                                 for h in S._LOOPBACK_OPENER.handlers))
+            self.assertTrue(any(isinstance(h, S.urllib.request.ProxyHandler) and h.proxies
+                                for h in S.urllib.request.build_opener().handlers))
+
+    def test_extraction_refuses_chained_or_outside_symlinks_and_masks_modes(self):
+        for entries in ([("link", "sym", "../outside")], [("a", "sym", "b"), ("b", "sym", "x/../.."), ],
+                        [("dir/link", "sym", "../../x")], [("dev", "chr", "")], [("hard", "lnk", "ollama")]):
+            buffer = io.BytesIO()
+            with tarfile.open(fileobj=buffer, mode="w:gz") as bundle:
+                for name, kind, target in entries:
+                    info = tarfile.TarInfo(name)
+                    info.type = {"sym": tarfile.SYMTYPE, "chr": tarfile.CHRTYPE, "lnk": tarfile.LNKTYPE}[kind]
+                    info.linkname = target
+                    bundle.addfile(info)
+            archive = os.path.join(self.tmp.name, "bad.tgz")
+            with open(archive, "wb") as handle:
+                handle.write(buffer.getvalue())
+            out = tempfile.mkdtemp(dir=self.tmp.name)
+            with self.assertRaises(S.SetupError, msg=entries):
+                S.safe_extract(archive, out)
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as bundle:
+            info = tarfile.TarInfo("bin/tool")
+            info.size, info.mode = 3, 0o4755
+            bundle.addfile(info, io.BytesIO(b"abc"))
+            alias = tarfile.TarInfo("bin/alias")
+            alias.type, alias.linkname = tarfile.SYMTYPE, "tool"
+            bundle.addfile(alias)
+        archive = os.path.join(self.tmp.name, "ok.tgz")
+        with open(archive, "wb") as handle:
+            handle.write(buffer.getvalue())
+        out = tempfile.mkdtemp(dir=self.tmp.name)
+        S.safe_extract(archive, out)
+        self.assertEqual(os.stat(os.path.join(out, "bin", "tool")).st_mode & 0o7777, 0o755)
+        self.assertEqual(os.readlink(os.path.join(out, "bin", "alias")), "tool")
+
+    def test_nested_unsigned_library_is_rejected(self):
+        def runner(command, **kwargs):
+            if command[0] == "/usr/bin/codesign" and command[-1].endswith("nested.dylib"):
+                return Run(0, "TeamIdentifier=OTHER\n")
+            return self.runner(command, **kwargs)
+        with self.ollama_archive(extra=[("lib/nested.dylib", b"\xcf\xfa\xed\xfe" + b"y" * 8)]), \
+                mock.patch.object(S, "CLI_CANDIDATES", ()):
+            setup = self.make()
+            setup.runner = runner
+            with self.assertRaises(S.SetupError):
+                setup.run()
+        self.assertFalse(os.path.exists(setup.binary))
+
     def test_pinned_sources_and_versions(self):
         self.assertTrue(S.OLLAMA_ARCHIVE_URL.startswith("https://github.com/ollama/ollama/releases/download/v0.34.4/"))
         self.assertTrue(S.JET_BASE_URL.endswith("/resolve/" + S.JET_COMMIT))

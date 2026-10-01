@@ -938,7 +938,7 @@ class OutcomeInsightTests(unittest.TestCase):
         self.assertNotIn("rework_by_position", out)
         self.assertNotIn("choices", out)
         self.assertNotIn("outcomes", out)
-        self.assertEqual(out["kpis"]["current"]["ended_spend"], 0.0)
+        self.assertNotIn("kpis", out)
 
     def test_model_fit_marks_best_only_with_enough_samples(self):
         rows = [row(f"x{i}", model="gpt-5.6") for i in range(3)] + [row(f"y{i}", model="mid") for i in range(3)]
@@ -961,7 +961,7 @@ class OperatingRhythmTests(unittest.TestCase):
         return domain.build_work_insights(rows, labels, lambda ident: ident.split("\0")[0], self.AREAS, lambda m, p: prices.get(m),
                                           today="2026-09-30", corrections_for=lambda ident, n: sequences.get(ident.split("\0")[0], []))
 
-    def test_ledger_outcomes_and_period_kpis(self):
+    def test_ledger_outcomes_by_start_month(self):
         rows, labels, sequences = [], {}, {}
         for i in range(8):
             day = "2026-08-10" if i < 4 else "2026-09-10"
@@ -973,11 +973,6 @@ class OperatingRhythmTests(unittest.TestCase):
         september = out["allocation"][-1]
         self.assertEqual(september["outcomes"], {"accepted": 2, "ended_on_pushback": 2})
         self.assertEqual(september["outcome_spend"]["accepted"], 4.0)
-        kpis = out["kpis"]
-        self.assertEqual(kpis["previous_months"], ["2026-08"])
-        self.assertEqual((kpis["current"]["judged_sessions"], kpis["current"]["resolved_rate"]), (4, 0.5))
-        self.assertEqual(kpis["previous"]["judged_sessions"], 4)
-        self.assertEqual(kpis["current"]["cost_per_resolved"], 2.0)
 
     def test_effort_grid_flags_high_effort_routine_work(self):
         a, b = row("a", cost=8.0), row("b", cost=1.0)
@@ -1423,24 +1418,6 @@ class ReviewRegressionTests(unittest.TestCase):
                                      corrections_for=lambda ident, n: [], pending_keys={"queued"})
         self.assertEqual([s["id"] for s in found["sessions"]], ["hi"])
 
-    def test_previous_kpi_window_is_the_calendar_months_before(self):
-        rows, labels, sequences = [], {}, {}
-        for i, day in enumerate(["2026-07-10", "2026-07-11", "2026-09-10", "2026-09-11"]):
-            rows.append(row(f"k{i}", day=day, turns_=3))
-            labels[f"k{i}"] = {"work_type": "debug", "correction_labels": 2}
-            sequences[f"k{i}"] = [(1, False), (2, False)]
-        kpis = self.build(rows, labels, sequences, months=1)["kpis"]
-        self.assertEqual(kpis["previous_months"], ["2026-08"])
-        self.assertIsNone(kpis["previous"])
-        kpis = self.build(rows, labels, sequences, months=3)["kpis"]
-        self.assertEqual(kpis["previous_months"], ["2026-04", "2026-05", "2026-06"])
-        kpis = self.build(rows, labels, sequences, months=0)["kpis"]
-        self.assertEqual((kpis["previous_months"], kpis["previous"]), ([], None))
-        january = [row("j", day="2026-01-05", turns_=3)]
-        kpis = domain.build_work_insights(january, {"j": {"work_type": "debug"}}, lambda ident: ident.split("\0")[0],
-                                          self.AREAS, lambda m, p: None, months=3, today="2026-01-31")["kpis"]
-        self.assertEqual(kpis["previous_months"], ["2025-08", "2025-09", "2025-10"])
-
     def test_non_latin_requests_are_classifiable(self):
         for text in ("修复登录页面的错误", "исправь ошибку в форме входа"):
             self.assertEqual(W.prepare_text(text), text)
@@ -1638,8 +1615,6 @@ class OpenerPositionAndWindowTests(unittest.TestCase):
         rows = [row("may", day="2026-05-10"), row("sep", day="2026-09-10")]
         out = self.build(rows, {}, "2026-09-30", months=3)
         self.assertEqual(out["months"], ["2026-07", "2026-08", "2026-09"])
-        self.assertEqual(out["kpis"]["previous_months"], ["2026-04", "2026-05", "2026-06"])
-        self.assertEqual(out["kpis"]["previous"]["sessions"], 1)
         self.assertEqual([b["sessions_total"] for b in out["allocation"]], [0, 0, 1])
         found = domain.find_sessions(rows, {}, lambda ident: ident.split("\0")[0], self.AREAS, lambda m, p: None,
                                      {}, months=3, today="2026-09-30")
@@ -1649,13 +1624,11 @@ class OpenerPositionAndWindowTests(unittest.TestCase):
         out = self.build([row("jun", day="2026-06-10")], {}, "2026-09-30", months=3)
         self.assertEqual(out["months"], ["2026-07", "2026-08", "2026-09"])
         self.assertEqual(out["coverage"]["sessions"], 0)
-        self.assertIsNone(out["kpis"]["current"]["resolved_rate"])
-        self.assertEqual(out["kpis"]["previous"]["sessions"], 1)
         # Without a today, the window ends at the latest data month; All history keeps data months only.
         self.assertEqual(self.build([row("jun", day="2026-06-10")], {}, "", months=3)["months"],
                          ["2026-04", "2026-05", "2026-06"])
         everything = self.build([row("a", day="2026-02-10"), row("b", day="2026-06-10")], {}, "2026-09-30", months=0)
-        self.assertEqual((everything["months"], everything["kpis"]["previous_months"]), (["2026-02", "2026-06"], []))
+        self.assertEqual(everything["months"], ["2026-02", "2026-06"])
 
     def test_labeled_session_with_never_labeled_follow_ups_is_unclear_not_single_shot(self):
         self.assertEqual(domain.session_outcome(3, [], labeled=True, follow_ups=0), "single_shot")
@@ -1706,25 +1679,23 @@ class ShortRangeTests(unittest.TestCase):
         for bad in ("2d", "14d", "5", "-1", "d", "", "7 d", None):
             self.assertIsNone(domain.parse_period(bad))
 
-    def test_week_uses_seven_daily_buckets_and_the_week_before(self):
+    def test_week_uses_seven_daily_buckets(self):
         rows = [row("today", day="2026-09-30", cost=3.0), row("monday", day="2026-09-28"),
                 row("lastweek", day="2026-09-21", cost=5.0), row("old", day="2026-08-01")]
         out = self.build(rows, {}, "7d")
         self.assertEqual(out["grain"], "day")
         self.assertEqual(out["months"], [f"2026-09-{d}" for d in range(24, 31)])
-        self.assertEqual(out["kpis"]["previous_months"], [f"2026-09-{d}" for d in range(17, 24)])
         by_day = {b["month"]: b for b in out["allocation"]}
         self.assertEqual(by_day["2026-09-30"]["spend_total"], 3.0)
         self.assertTrue(by_day["2026-09-30"]["partial"])
         self.assertEqual(by_day["2026-09-25"]["spend_total"], 0)
-        self.assertEqual(out["kpis"]["current"]["sessions"], 2)
-        self.assertEqual(out["kpis"]["previous"]["sessions"], 1)
+        self.assertEqual(out["coverage"]["sessions"], 2)
         self.assertEqual(out["rework"]["grain"], "day")
 
-    def test_one_day_is_today_against_yesterday(self):
+    def test_one_day_is_today(self):
         out = self.build([row("a", day="2026-09-30"), row("b", day="2026-09-29")], {}, "1d")
         self.assertEqual(out["months"], ["2026-09-30"])
-        self.assertEqual(out["kpis"]["previous_months"], ["2026-09-29"])
+        self.assertEqual(out["coverage"]["sessions"], 1)
 
     def test_month_range_crosses_a_month_boundary(self):
         out = self.build([], {}, "30d", today="2026-03-01")
@@ -1870,15 +1841,21 @@ class TagHighlightRhythmTests(unittest.TestCase):
             model, cost = ("gpt-5.6", 10.0) if i < 6 else ("cheap", 2.0)
             r = row(f"m{i}", model=model, cost=cost)
             rows.append(r)
-            labels[f"m{i}"] = {"work_type": "debug", "correction_labels": 2, "corrections": 0}
+            labels[f"m{i}"] = {"work_type": "debug", "complexity": "everyday", "correction_labels": 2, "corrections": 0}
             sequences[f"m{i}"] = [(1, False), (2, False)]
         rows.append(row("m12", model="gpt-5.6", cost=10.0))
-        labels["m12"] = {"work_type": "debug", "correction_labels": 2, "corrections": 0}
+        labels["m12"] = {"work_type": "debug", "complexity": "everyday", "correction_labels": 2, "corrections": 0}
         sequences["m12"] = [(1, False), (2, False)]
         recs = self.build(rows, labels, sequences)["recommendations"]
         switch = next(r for r in recs if r["kind"] == "switch_model")
-        self.assertEqual((switch["model"], switch["to_model"], switch["work_type"]), ("gpt-5.6", "cheap", "debug"))
+        self.assertEqual((switch["model"], switch["to_model"], switch["work_type"], switch["complexity"]),
+                         ("gpt-5.6", "cheap", "debug", "everyday"))
         self.assertEqual(switch["saving"], 8.0 * 7)
+        # A cheap model that only handled routine requests is not compared with complex ones.
+        for i in range(6, 12):
+            labels[f"m{i}"]["complexity"] = "routine"
+        recs = self.build(rows, labels, sequences)["recommendations"]
+        self.assertFalse(any(r["kind"] == "switch_model" for r in recs))
 
     def test_recommendations_flag_long_threads_that_cost_more_per_request(self):
         rows = [row(f"s{i}", cost=1.0, turns_=5) for i in range(5)]
@@ -1912,7 +1889,67 @@ class TaxonomyV3Tests(unittest.TestCase):
         self.assertEqual(list(W.WORK_TYPES), ["feature", "debug", "refactor", "test", "review", "plan", "explore",
                                               "ops", "docs", "other"])
         self.assertEqual(set(domain.WORK_TYPE_ORDER), set(W.WORK_TYPES) | {"unclear"})
-        page = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "page.html"),
-                    encoding="utf-8").read()
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "page.html"),
+                  encoding="utf-8") as handle:
+            page = handle.read()
         for key in W.WORK_TYPES:
             self.assertIn(f"{key}:'", page[page.index("const WORK_TYPE_LABELS="):][:400])
+
+
+class ReviewFixTests(unittest.TestCase):
+    def test_area_label_from_an_earlier_prompt_version_still_counts(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        service, values, clock = make_service(tmp.name)
+        key, turn = service.session_key("s1"), service._turn_key("s1", 0)
+        old_tag = f"p2:{W.taxonomy_hash(values['areas'])}"
+        service.ledger.record_label(turn, "area", key, "Non-code", 0.9, old_tag, "d", clock.now)
+        service.ledger.record_label(turn, "work_type", key, "review", 0.9, "p2", "d", clock.now)
+        service.labels_version += 1
+        entry = service.snapshot()[key]
+        self.assertEqual((entry["area"], entry["work_type"]), ("Non-code", "review"))
+        other = service._turn_key("s2", 0)
+        service.ledger.record_label(other, "area", service.session_key("s2"), "Non-code", 0.9, "p2:0000", "d", clock.now)
+        service.labels_version += 1
+        self.assertNotIn("area", service.snapshot().get(service.session_key("s2"), {}))
+
+    def test_a_deliberate_save_of_the_old_default_names_is_kept(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "settings.json")
+        old = [{"name": n, "description": "mine"} for n in W.PREVIOUS_DEFAULT_AREA_NAMES[0]]
+        with mock.patch.object(meter, "_work_settings_cache", {"key": None, "value": None}):
+            self.assertTrue(meter.set_work_insights_settings({"areas": old}, path)["ok"])
+            self.assertEqual(meter.work_insights_settings(path)["areas"], old)
+        with open(path, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["work_insights"]["areas_version"], W.AREAS_VERSION)
+
+    def test_settings_writes_are_serialized(self):
+        self.assertIsInstance(meter._work_settings_write_lock, type(threading.Lock()))
+        with mock.patch.object(meter, "_set_work_insights_settings", return_value={"ok": True}) as inner:
+            with meter._work_settings_write_lock:
+                worker = threading.Thread(target=meter.set_work_insights_settings, args=({},))
+                worker.start()
+                worker.join(0.2)
+                self.assertTrue(worker.is_alive())
+                inner.assert_not_called()
+            worker.join(2)
+        inner.assert_called_once()
+
+    def test_turning_off_cancels_setup_and_stops_the_managed_ollama(self):
+        setup = mock.Mock()
+        with mock.patch.object(meter, "work_setup", return_value=setup), \
+                mock.patch.object(meter, "work_insights_supported", return_value=True):
+            meter.stop_managed_ollama()
+        setup.cancel.assert_called_once()
+        setup.stop_agent.assert_called_once()
+        self.assertLess(setup.method_calls.index(mock.call.cancel()), setup.method_calls.index(mock.call.stop_agent()))
+
+    def test_long_thread_suggestion_counts_every_tagged_session(self):
+        rows = [row(f"s{i}", cost=1.0, turns_=5) for i in range(5)]
+        rows += [row(f"l{i}", cost=30.0, turns_=30) for i in range(5)] + [row("free", cost=0.0, turns_=40)]
+        out = domain.build_work_insights(rows, {}, lambda ident: ident.split("\0")[0], DomainTests.AREAS,
+                                         lambda m, p: None, today="2026-09-30")
+        long = next(r for r in out["recommendations"] if r["kind"] == "long_threads")
+        tag = next(t for t in out["tags"]["items"] if t["tag"] == "long_thread")
+        self.assertEqual(long["sessions"], tag["sessions"], 6)
