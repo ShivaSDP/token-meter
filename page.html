@@ -3856,8 +3856,9 @@ function sessionStartMessage(s){
 }
 
 function sessionDisplayName(s){
- const id=stateSessionId(s),rows=[...(s?.xsession?.current_sessions||[]),...(s?.xsession?.sessions||[])];
- const row=rows.find(item=>String(item?.id||'')===String(id||''));
+ const id=stateSessionId(s),key=stateSessionKey(s),rows=[...(s?.xsession?.current_sessions||[]),...(s?.xsession?.sessions||[])];
+ // Resumed rollouts and subagents share a logical id; only the same trace file may name the header.
+ const row=rows.find(item=>item?.session&&String(item.session)===key)||rows.find(item=>!item?.session&&String(item?.id||'')===String(id||''));
  const name=String(row?.session_name||row?.title||'').trim();
  if(name)return name;
  const start=sessionStartMessage(s);

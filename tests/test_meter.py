@@ -10768,6 +10768,21 @@ console.log(JSON.stringify({
         ])
         self.assertAlmostEqual(merged["cost"], 0.91 + 112.0 + 0.16)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard JavaScript")
+    def test_session_header_names_the_opened_trace_not_a_sibling(self):
+        script = "\n".join(
+            self.page_function(self.page, name)
+            for name in ("stateSessionId", "stateSessionKey", "sessionStartMessage", "sessionDisplayName")
+        ) + """
+const state={session:'rollout-child.jsonl',source:{id:'task-1'},xsession:{current_sessions:[],sessions:[
+ {id:'task-1',session:'rollout-root.jsonl',title:'Root title'},
+ {id:'task-1',session:'rollout-child.jsonl',title:'Child title'}]}};
+const sibling={...state,session:'rollout-other.jsonl'};
+console.log(JSON.stringify([sessionDisplayName(state),sessionDisplayName(sibling)]));
+"""
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout), ["Child title", "Session"])
+
     def test_every_session_entry_point_addresses_one_trace_file(self):
         for marker in (
             "function sessionRowKey(row){return String(row?.session||row?.id||'');}",
