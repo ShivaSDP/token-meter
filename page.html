@@ -1696,6 +1696,7 @@ const speedFmt=n=>{n=Number(n)||0;if(n<=0)return'--';if(n>=100)return n.toFixed(
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // Work page state is declared early: the initial hash route can run before later definitions.
 let WORK=null,workRequest=0,workLastLoadedAt=0,workMonths='6',workRuntime='',workProject='';
+let workSupported=null;
 let workSessionFilter=null,workFilterRequest=0;
 let WORK_SETTINGS=null,workAreasDraft=null;
 function durationShort(seconds){
@@ -8722,7 +8723,6 @@ function goToLatestSession(){followLatestSession();}
 let statePollBusy=false;
 const LIVE_STATE_POLL_MS=1000;
 const SELECTED_SESSION_POLL_MS=2000;
-let workSupported=null;
 function applyWorkSupport(supported){
  if(typeof supported!=='boolean'||supported===workSupported)return;
  workSupported=supported;

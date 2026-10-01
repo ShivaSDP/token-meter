@@ -1225,6 +1225,7 @@ class SurfaceContractTests(unittest.TestCase):
 
     def test_work_state_is_declared_before_the_initial_route_runs(self):
         declaration = self.page.index("let WORK=null,workRequest=0")
+        self.assertLess(self.page.index("let workSupported=null;"), self.page.index("function applyHashRoute(){"))
         session_filter = self.page.index("let workSessionFilter=null")
         route = self.page.index("function applyHashRoute(){")
         self.assertLess(declaration, route)
