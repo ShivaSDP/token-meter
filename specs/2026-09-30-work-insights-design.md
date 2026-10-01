@@ -372,3 +372,24 @@ smoke-level baseline, not a benchmark.
 - Model choices is a model scorecard (sessions, spend, pushback meter, resolved share, cost per resolved session, scoped by runtime) beside paired usual-versus-alternative pushback bars for each kind of work.
 - Right-sizing shows spend by complexity as 100% bars split by model tier and by reasoning effort, stripes the mismatched segments, and totals mismatched spend and the estimated saving above a compact issue table. The detailed grids stay behind "View as tables".
 - Area colours are the product's own hues stepped into the dark-chart lightness band and ordered with the dataviz validator (all checks pass; worst adjacent colour-blind ΔE 13.2). Outcomes use the status colours with labels; tiers and effort use single-hue cyan and violet ramps; the trend uses the product cyan.
+
+## Iteration 7: highlights, session tags, rhythm, area trends
+
+All additions come from cached summary rows and existing labels; nothing new is
+sent to the classifier.
+
+- `highlights`: typed facts (`priciest_session`, `best_value_model`,
+  `smoothest_work`, `roughest_work`, `busiest_day`, `streak`, `peak_time`) with
+  sample floors (5 judged sessions per model, 10 per kind of work, 10 sessions
+  for peak time). The page writes the sentences.
+- `tags`: deterministic per-session tags (`marathon`, `big_spend`, `team`,
+  `overkill`, `underpowered`, `rescued`, `stuck`, `one_shot`) with counts,
+  spend, share, and resolved rate. Relative thresholds are strictly above the
+  90th percentile of sessions started in the period, with at least 10 sessions;
+  Marathon also needs one hour of active time. Child runs are counted by
+  walking agent `parent_id` chains to the root agent. Drill filter `tag`; drill
+  rows carry `tags`.
+- `rhythm`: session starts by local weekday and hour (from `start`) and
+  pushback by time-of-day band.
+- Area rows draw a sparkline from the existing allocation buckets when the
+  period has at least three.

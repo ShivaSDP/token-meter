@@ -253,8 +253,22 @@ question it also reads the last 600 characters of the assistant reply before
 your turn. Tool output and files are never read, and cloud-proxied Ollama
 models are refused.
 
+- **Highlights** pick out facts from the period: the biggest session, the
+  model with the lowest cost per resolved session (at least five judged
+  sessions), the kinds of work with the most and least pushback (at least ten),
+  the busiest day by spend, the longest run of active days, and peak hours.
 - **Where the spend went** lists spend by area for sessions started in the
-  period. Not labeled yet and Unclear (the model was not confident) appear last.
+  period, with a small trend line across the period. Not labeled yet and
+  Unclear (the model was not confident) appear last.
+- **Session tags** are worked out from data Token Meter already has, not from
+  the model: Marathon (top 10% by active time, and at least an hour), Big
+  spender (top 10% by cost), Subagent team (three or more subagent runs),
+  Overkill (routine work on a premium model or high effort), Underpowered
+  (complex work on a light model that got pushback), Rescued, Ended on
+  pushback, and One-shot. Relative tags need at least ten sessions. A session
+  can have several tags; select one to open its sessions.
+- **When you work** shows session starts by weekday and hour in local time, and
+  the pushback rate in the morning, afternoon, evening, and night.
 - **How sessions ended** splits judged sessions into accepted, recovered after
   pushback, and ended on pushback.
 - **Pushback over time** and **Cost per resolved session** show the share of

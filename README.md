@@ -196,8 +196,15 @@ you turn on **Settings → Work insights**, a local decision model
 Ollama labels each session's area, work type, and complexity, and flags
 follow-up turns where you pushed back on the previous work. The page shows:
 
-- **Where the spend went** by area, and **how sessions ended**: accepted,
-  recovered after pushback, or ended on pushback.
+- **Highlights** for the period: your biggest session, best-value model, the
+  kinds of work with the most and least pushback, busiest day, and longest
+  streak.
+- **Where the spend went** by area, with a trend line per area, and **how
+  sessions ended**: accepted, recovered after pushback, or ended on pushback.
+- **Session tags** such as Marathon, Big spender, Subagent team, Overkill,
+  Rescued, and One-shot, each with its spend and resolved share.
+- **When you work**: session starts by weekday and hour, and pushback by time
+  of day.
 - **Pushback over time** and **cost per resolved session** by kind of work.
 - **Model choices**: a scorecard of your top models by spend.
 - **Right-sizing**: spend split by model tier and reasoning effort, with an

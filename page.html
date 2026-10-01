@@ -314,7 +314,11 @@ body.sessionRoute #view-session.sessionAll{--view-spectrum-a:rgba(0,188,235,.6);
 .workIssues{width:100%;border-collapse:collapse;font-size:12px}.workIssues th{padding:0 8px 6px;color:var(--faint);font-size:10px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;text-align:right}.workIssues th:first-child{text-align:left;padding-left:0}.workIssues td{border-top:1px solid var(--line);padding:0;text-align:right;white-space:nowrap}.workIssues td:first-child{text-align:left}.workIssues td>span{display:block;padding:8px}.workIssues .workDrillBtn{display:flex;align-items:center;gap:8px;padding:8px 8px 8px 0}.workIssues tr:hover td{background:rgba(255,255,255,.03)}.workIssueKind{color:var(--warn);font-size:11px}
 @media(max-width:1180px){.workSplit{grid-template-columns:1fr}.workSavings{grid-template-columns:repeat(3,minmax(0,1fr))}}
 #view-work .mono,#view-work .num{font-family:inherit;font-variant-numeric:tabular-nums}#view-work em.mono{font-style:normal}
-.workSpend{padding:15px 16px}.workSpend .workSplit{grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:32px}.workBarRow[data-muted=true] .workBarTrack i{background:var(--w-unclear)}.workBarRow[data-muted=true] .workBarLabel{color:var(--dim)}
+.workSpend{padding:15px 16px}.workSpend .workBarRow{grid-template-columns:160px minmax(0,1fr) 80px 64px;grid-template-areas:"label bar value spark" ". note note spark"}.workSpark{grid-area:spark;width:64px;height:24px;justify-self:end;overflow:visible}.workSpark path{fill:none;stroke:var(--spectrum-cyan);stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}.workSpark circle{fill:var(--spectrum-cyan)}.workBarRow[data-muted=true] .workSpark path{stroke:var(--w-unclear)}.workBarRow[data-muted=true] .workSpark circle{fill:var(--w-unclear)}
+.workHighlights{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:10px}.workHighlights:empty{display:none}.workHighlight{display:grid;align-content:start;gap:5px;min-width:0;padding:14px 16px 14px 19px;overflow:hidden;color:var(--fg);font:inherit;text-align:left}.workHighlight::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:3px;border-radius:0 3px 3px 0;background:var(--hl,var(--spectrum-cyan))}button.workHighlight{cursor:pointer}button.workHighlight:hover,button.workHighlight:focus-visible{border-color:var(--line2);outline:none;background:linear-gradient(180deg,rgba(26,36,47,.98),rgba(15,21,28,.98))}.workHighlightEyebrow{color:var(--dim);font-size:10.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase}.workHighlight strong{overflow:hidden;font-size:19px;font-weight:700;line-height:1.25;text-overflow:ellipsis;white-space:nowrap}.workHighlight small{color:var(--faint);font-size:11.5px;line-height:1.45}
+.workTagsCard,.workRhythm{padding:15px 16px;margin-top:10px}.workTagGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.workTagTile{display:grid;align-content:start;gap:4px;min-width:0;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.02);color:var(--fg);font:inherit;text-align:left;cursor:pointer}.workTagTile:hover,.workTagTile:focus-visible{border-color:var(--tone);background:rgba(255,255,255,.045);outline:none}.workTagName{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:700}.workTagName i{flex:0 0 auto;width:8px;height:8px;border-radius:50%;background:var(--tone)}.workTagTile strong{font-size:18px;font-weight:700}.workTagStats{color:var(--dim);font-size:11.5px}.workTagTile small{color:var(--faint);font-size:11px;line-height:1.4}
+.workRhythm .workSplit{grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:32px}.workHeat{display:grid;grid-template-columns:30px repeat(24,minmax(0,1fr));gap:3px;align-items:center}.workHeat>span{color:var(--dim);font-size:10.5px}.workHeat>span.h{grid-column:span 6;color:var(--faint);font-size:10px}.workHeat>i{display:block;height:16px;border-radius:3px;background:rgba(255,255,255,.035)}.workHeat>i[data-v]{background:color-mix(in oklab,var(--spectrum-cyan) calc(var(--v) * 100%),rgba(255,255,255,.035))}.workBandList{display:grid;gap:2px}.workBand{display:grid;grid-template-columns:118px minmax(0,1fr) 52px;grid-template-areas:"label bar value" ". note note";align-items:center;column-gap:10px;row-gap:3px;padding:7px 6px}.workBand>span:first-child{grid-area:label;font-size:12.5px}.workBand>span small{display:block;color:var(--faint);font-size:10.5px}.workBand .workBarTrack{grid-area:bar;height:10px;border-radius:4px;background:rgba(255,255,255,.04);overflow:hidden}.workBand .workBarTrack i{display:block;height:100%;border-radius:4px;background:var(--spectrum-cyan)}.workBand b{grid-area:value;text-align:right;font-size:12px}.workBand>small{grid-area:note;color:var(--faint);font-size:10.5px}.workBand[data-few=true] .workBarTrack i{opacity:.45}
+@media(max-width:1180px){.workRhythm .workSplit{grid-template-columns:1fr}}.workSpend .workSplit{grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:32px}.workBarRow[data-muted=true] .workBarTrack i{background:var(--w-unclear)}.workBarRow[data-muted=true] .workBarLabel{color:var(--dim)}
 .workEnded .workOutcomeBar{display:flex;gap:2px;height:16px;margin:2px 0 12px;border-radius:5px;overflow:hidden;background:rgba(255,255,255,.03)}.workEnded .workOutcomeBar button{min-width:3px;height:100%;padding:0;border:0;background:var(--seg);cursor:pointer}.workEnded .workOutcomeBar button:hover,.workEnded .workOutcomeBar button:focus-visible{filter:brightness(1.2);outline:none}
 .workOutcomeList{display:grid;gap:2px}.workOutcomeRow{display:grid;grid-template-columns:12px minmax(0,1fr) 48px 44px 78px;align-items:center;gap:10px;padding:7px 6px;border:0;border-radius:6px;background:none;color:var(--dim);font:inherit;font-size:12.5px;text-align:left;cursor:pointer}.workOutcomeRow:hover,.workOutcomeRow:focus-visible{background:rgba(255,255,255,.04);color:var(--fg);outline:none}.workOutcomeRow b{color:var(--fg);text-align:right;font-weight:720}.workOutcomeRow small{color:var(--faint);text-align:right;font-size:11.5px}.workFootnote{margin-top:10px;color:var(--faint);font-size:11px}
 #view-git{--view-spectrum-a:rgba(88,214,162,.5);--view-spectrum-b:rgba(0,188,235,.4);--view-spectrum-c:rgba(127,219,242,.24);--view-haze-a:rgba(88,214,162,.18);--view-haze-b:rgba(0,188,235,.14)}
@@ -1202,11 +1206,23 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 	   </div>
 	  </section>
 	  <section class=workKpis id=w-kpis aria-label="Period summary for sessions started in this period"></section>
+	  <section class=workHighlights id=w-highlights aria-label="Highlights for this period"></section>
 	  <section class="card workSpend" id=w-module-allocation>
 	   <div class=workCardHead><div><h2>Where the spend went</h2><div class=subline id=w-spend-note></div></div></div>
 	   <div class=workSplit>
 	    <div class=workBarsList id=w-areas></div>
 	    <div class=workEnded><div class=workSubhead><h3>How sessions ended</h3><span id=w-outcome-total></span></div><div class=workOutcomeBar id=w-outcome-bar></div><div class=workOutcomeList id=w-outcomes></div><div class=workFootnote id=w-outcome-note></div></div>
+	   </div>
+	  </section>
+	  <section class="card workTagsCard" id=w-module-tags>
+	   <div class=workCardHead><div><h2 class=fieldtip tabindex=0 aria-description="Tags are worked out from each session's cost, active time, subagents, labels, and how it ended. A session can have several. Select a tag to open its sessions." data-tip="Tags are worked out from each session's cost, active time, subagents, labels, and how it ended. A session can have several. Select a tag to open its sessions.">Session tags</h2><div class=subline id=w-tags-note></div></div></div>
+	   <div class=workTagGrid id=w-tags></div>
+	  </section>
+	  <section class="card workRhythm" id=w-module-rhythm>
+	   <div class=workCardHead><div><h2 class=fieldtip tabindex=0 aria-description="When sessions started in this period, in this Mac's local time, and how often follow-ups pushed back at each time of day." data-tip="When sessions started in this period, in this Mac's local time, and how often follow-ups pushed back at each time of day.">When you work</h2><div class=subline id=w-rhythm-note></div></div></div>
+	   <div class=workSplit>
+	    <div><div class=workSubhead><h3>Session starts</h3><span>local time</span></div><div class=workHeat id=w-heat role=img aria-label="Session starts by weekday and hour"></div></div>
+	    <div><div class=workSubhead><h3>Pushback by time of day</h3><span>share of follow-ups</span></div><div class=workBandList id=w-bands></div><div class=workFootnote id=w-band-note></div></div>
 	   </div>
 	  </section>
 	  <div class=workGrid>
@@ -5959,7 +5975,7 @@ function renderWorkSpend(insights){
  const rows=segments.filter(area=>spend[area]>0).sort((a,b)=>(['Unclear','Pending'].includes(a)-['Unclear','Pending'].includes(b))||spend[b]-spend[a]);
  const max=Math.max(1e-9,...rows.map(area=>spend[area]));
  $('w-spend-note').textContent=total?`${money(total)} by area`:'';
- $('w-areas').innerHTML=rows.length?rows.map(area=>{const muted=['Unclear','Pending'].includes(area);return `<button type=button class=workBarRow data-muted="${muted}" data-drill="${esc(JSON.stringify({area}))}" data-drill-label="${esc(area)}"><span class=workBarLabel>${esc(area==='Pending'?'Not labeled yet':area)}</span><span class=workBarTrack><i style="width:${(100*spend[area]/max).toFixed(1)}%"></i></span><b class=num>${money(spend[area])}</b><small>${workPercent(spend[area]/total)}${sessions[area]?` · ${sessions[area].toLocaleString()} session${sessions[area]===1?'':'s'}`:''}</small></button>`;}).join(''):'<div class=workEmpty>No spend in this period.</div>';
+ $('w-areas').innerHTML=rows.length?rows.map(area=>{const muted=['Unclear','Pending'].includes(area);return `<button type=button class=workBarRow data-muted="${muted}" data-drill="${esc(JSON.stringify({area}))}" data-drill-label="${esc(area)}"><span class=workBarLabel>${esc(area==='Pending'?'Not labeled yet':area)}</span><span class=workBarTrack><i style="width:${(100*spend[area]/max).toFixed(1)}%"></i></span><b class=num>${money(spend[area])}</b><small>${workPercent(spend[area]/total)}${sessions[area]?` · ${sessions[area].toLocaleString()} session${sessions[area]===1?'':'s'}`:''}</small>${workSpark(allocation.map(bucket=>(bucket.spend||{})[area]||0))}</button>`;}).join(''):'<div class=workEmpty>No spend in this period.</div>';
  const counts=Object.fromEntries(OUTCOMES_SHOWN.map(key=>[key,allocation.reduce((sum,bucket)=>sum+((bucket.outcomes||{})[key]||0),0)]));
  const outcomeSpend=Object.fromEntries(OUTCOMES_SHOWN.map(key=>[key,allocation.reduce((sum,bucket)=>sum+((bucket.outcome_spend||{})[key]||0),0)]));
  const judged=OUTCOMES_SHOWN.reduce((sum,key)=>sum+counts[key],0);
@@ -6098,16 +6114,87 @@ function renderWorkFit(insights){
  table.innerHTML=`<thead><tr><th>Work type</th>${models.map(model=>`<th class=num title="${esc(model.runtime)} · ${model.sessions} sessions">${esc(model.model)}<br><small class=workMuted>${esc(model.runtime)}</small></th>`).join('')}</tr></thead><tbody>${fit.work_types.map(work=>`<tr><td>${esc(WORK_TYPE_LABELS[work]||work)}</td>${models.map(model=>{const item=cell(work,model);if(!item||!item.sessions)return '<td class="num workMuted">--</td>';return `<td class="num mono workFitCell"><button type=button class=workDrillBtn data-drill="${esc(JSON.stringify({work_type:work,model:model.model,model_runtime:model.runtime}))}" data-drill-label="${esc(`${WORK_TYPE_LABELS[work]||work} · ${model.model}`)}">${workRateText(item.rework)}${item.best?'<span class=workFitBest>Best</span>':''}<small>${item.sessions} · ${money(item.cost_per_session)}/session</small></button></td>`;}).join('')}</tr>`).join('')}</tbody>`;
 }
 $('view-work').addEventListener('click',event=>{
+ const single=event.target.closest('[data-open-work-session]');
+ if(single){selectSession(single.dataset.openWorkSession,{returnScope:'all'});return;}
  const target=event.target.closest('[data-drill]');if(!target)return;
  let filters={};try{filters=JSON.parse(target.dataset.drill);}catch(error){return;}
  openWorkSessions(filters,target.dataset.drillLabel);
 });
 let workResizeTimer=0;
 window.addEventListener('resize',()=>{clearTimeout(workResizeTimer);workResizeTimer=setTimeout(()=>{if(WORK&&$('view-work').classList.contains('on'))renderWorkRework(WORK.insights);},150);});
+function workSpark(values){
+ if(values.length<3||!values.some(value=>value>0))return '';
+ const W=64,H=24,max=Math.max(...values),x=index=>(W*index/(values.length-1)).toFixed(1),y=value=>(H-2-(H-4)*value/max).toFixed(1);
+ const half=Math.floor(values.length/2),first=values.slice(0,half).reduce((a,b)=>a+b,0),last=values.slice(-half).reduce((a,b)=>a+b,0);
+ const trend=first?`${last>=first?'Up':'Down'} ${Math.abs(Math.round(100*(last/first-1)))}% in the second half of the period`:'New in the second half of the period';
+ return `<svg class=workSpark viewBox="0 0 ${W} ${H}" role=img aria-label="${esc(trend)}"><title>${esc(trend)}</title><path d="${values.map((value,index)=>`${index?'L':'M'}${x(index)},${y(value)}`).join('')}"></path><circle cx="${x(values.length-1)}" cy="${y(values[values.length-1])}" r=2></circle></svg>`;
+}
+function workShortDay(day){const date=new Date(`${day}T12:00:00`);return Number.isNaN(date.getTime())?day:date.toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'});}
+function workHours(seconds){const minutes=Math.round((seconds||0)/60);return minutes>=90?`${(minutes/60).toFixed(minutes%60?1:0)} h`:`${minutes} min`;}
+const WORK_BANDS={night:['Night','midnight–6 am'],morning:['Morning','6 am–noon'],afternoon:['Afternoon','noon–6 pm'],evening:['Evening','6 pm–midnight']};
+function renderWorkHighlights(insights){
+ const host=$('w-highlights'),grain=insights?.grain,items=insights?.highlights||[];
+ const order=['priciest_session','best_value_model','roughest_work','smoothest_work','busiest_day','streak','peak_time'];
+ const cards=order.map(kind=>items.find(item=>item.kind===kind)).filter(Boolean).slice(0,6).map(item=>{
+  const work=WORK_TYPE_LABELS[item.work_type]||'';
+  const spec={
+   priciest_session:()=>({eyebrow:'Biggest session',value:money(item.cost),detail:[item.title?`“${item.title}”`:'Untitled session',work,item.share!=null?`${workPercent(item.share)} of spend`:''].filter(Boolean).join(' · '),tone:'var(--w2)',open:item.session}),
+   best_value_model:()=>({eyebrow:'Best value model',value:item.model,detail:`${money(item.cost_per_resolved)} per resolved session · ${item.ratio>=1.95?`${item.ratio.toFixed(1)}× less than`:'vs'} ${item.compare_model}`,tone:'var(--good)',drill:{model:item.model,model_runtime:item.runtime},label:`${item.model} · ${item.runtime}`}),
+   roughest_work:()=>({eyebrow:'Most pushback',value:work,detail:`${workPercent(item.resolved_rate)} resolved, the lowest of any kind of work`,tone:'var(--warn)',drill:{work_type:item.work_type},label:work}),
+   smoothest_work:()=>({eyebrow:'Smoothest work',value:work,detail:`${workPercent(item.resolved_rate)} resolved across ${item.sessions.toLocaleString()} sessions`,tone:'var(--good)',drill:{work_type:item.work_type},label:work}),
+   busiest_day:()=>({eyebrow:'Busiest day',value:workShortDay(item.day),detail:`${money(item.spend)} spent${item.sessions?` · ${item.sessions} session${item.sessions===1?'':'s'} started`:''}`,tone:'var(--w5)',drill:grain==='day'?{start_month:item.day}:null,label:workShortDay(item.day)}),
+   streak:()=>({eyebrow:'Longest streak',value:`${item.days} day${item.days===1?'':'s'} in a row`,detail:`${workShortDay(item.start)} to ${workShortDay(item.end)} · active on ${item.active_days} days`,tone:'var(--w7)'}),
+   peak_time:()=>({eyebrow:'Peak hours',value:`${WORK_BANDS[item.band]?.[0]||item.band}s`,detail:`${workPercent(item.share)} of sessions start ${WORK_BANDS[item.band]?.[1]||''}`,tone:'var(--w3)'}),
+  }[item.kind]();
+  const body=`<span class=workHighlightEyebrow>${esc(spec.eyebrow)}</span><strong title="${esc(spec.value)}">${esc(spec.value)}</strong><small>${esc(spec.detail)}</small>`;
+  if(spec.open)return `<button type=button class="card workHighlight" style="--hl:${spec.tone}" data-open-work-session="${esc(spec.open)}">${body}</button>`;
+  if(spec.drill)return `<button type=button class="card workHighlight" style="--hl:${spec.tone}" data-drill="${esc(JSON.stringify(spec.drill))}" data-drill-label="${esc(spec.label)}">${body}</button>`;
+  return `<div class="card workHighlight" style="--hl:${spec.tone}">${body}</div>`;
+ });
+ host.innerHTML=cards.join('');
+}
+const WORK_TAG_INFO={
+ marathon:['Marathon',t=>`More than ${workHours(t.marathon_s)} of active time`,'var(--w5)'],
+ big_spend:['Big spender',t=>`Top 10% by cost, over ${money(t.big_spend)}`,'var(--w2)'],
+ team:['Subagent team',t=>`${t.team_children} or more subagent runs`,'var(--w7)'],
+ overkill:['Overkill',()=>'Routine work on a premium model or high effort','var(--warn)'],
+ underpowered:['Underpowered',()=>'Complex work on a light model that got pushback','var(--warn)'],
+ rescued:['Rescued',()=>'Back on track after a pushback','var(--w-recovered)'],
+ stuck:['Ended on pushback',()=>'The last follow-up was a pushback','var(--bad)'],
+ one_shot:['One-shot',()=>'Done in a single request','var(--good)'],
+};
+function renderWorkTagCards(insights){
+ const tags=insights?.tags||{},items=tags.items||[],thresholds=tags.thresholds||{},host=$('w-tags');
+ const sessions=insights?.coverage?.sessions||0;
+ $('w-tags-note').textContent=items.length?`${sessions.toLocaleString()} sessions started in this period · a session can have several tags`:'';
+ host.innerHTML=items.length?items.map(item=>{
+  const [name,describe,tone]=WORK_TAG_INFO[item.tag]||[item.tag,()=>'','var(--w-unclear)'];
+  const stats=[money(item.spend),item.share!=null?`${workPercent(item.share)} of spend`:'',item.resolved_rate!=null&&item.judged_sessions>=5?`${workPercent(item.resolved_rate)} resolved`:''].filter(Boolean).join(' · ');
+  return `<button type=button class=workTagTile style="--tone:${tone}" data-drill="${esc(JSON.stringify({tag:item.tag}))}" data-drill-label="${esc(name)}"><span class=workTagName><i aria-hidden=true></i>${esc(name)}</span><strong class=num>${item.sessions.toLocaleString()}</strong><span class=workTagStats>${esc(stats)}</span><small>${esc(describe(thresholds))}</small></button>`;
+ }).join(''):'<div class=workEmpty>No sessions in this period yet.</div>';
+}
+function renderWorkRhythm(insights){
+ const rhythm=insights?.rhythm||{},cells=rhythm.cells||[],heat=$('w-heat'),bands=rhythm.bands||[];
+ const days=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'],max=Math.max(1,...cells.map(cell=>cell.sessions));
+ const lookup=new Map(cells.map(cell=>[`${cell.weekday}:${cell.hour}`,cell]));
+ const busiest=cells.length?cells.reduce((a,b)=>b.sessions>a.sessions?b:a):null;
+ const hourText=hour=>new Date(2000,0,1,hour).toLocaleTimeString([],{hour:'numeric'});
+ $('w-rhythm-note').textContent=busiest?`${(rhythm.sessions||0).toLocaleString()} sessions · most start on ${days[busiest.weekday]} around ${new Date(2000,0,1,busiest.hour).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}`:'';
+ heat.innerHTML=cells.length?days.map((day,weekday)=>`<span>${day}</span>${Array.from({length:24},(_,hour)=>{const cell=lookup.get(`${weekday}:${hour}`);return cell?`<i data-v style="--v:${(0.2+0.8*cell.sessions/max).toFixed(2)}" title="${esc(`${day} ${hourText(hour)} · ${cell.sessions} session${cell.sessions===1?'':'s'} · ${money(cell.spend)}`)}"></i>`:'<i></i>';}).join('')}`).join('')+`<span></span>${[0,6,12,18].map(hour=>`<span class=h>${esc(hourText(hour))}</span>`).join('')}`:'<div class=workEmpty style="grid-column:1/-1">No session start times in this period.</div>';
+ const total=bands.reduce((sum,band)=>sum+band.sessions,0),maxRate=Math.max(.05,...bands.map(band=>band.pushback?.rate||0));
+ $('w-bands').innerHTML=total?bands.filter(band=>band.sessions).map(band=>{const [name,range]=WORK_BANDS[band.band]||[band.band,''];const few=!band.pushback||band.pushback.few_samples;return `<div class=workBand data-few="${few}"><span>${esc(name)}<small>${esc(range)}</small></span><span class=workBarTrack><i style="width:${band.pushback?(100*band.pushback.rate/maxRate).toFixed(1):0}%"></i></span><b class=num>${band.pushback?workPercent(band.pushback.rate):'--'}</b><small>${band.sessions.toLocaleString()} session${band.sessions===1?'':'s'} · ${money(band.spend)}${few&&band.pushback?' · few follow-ups':''}</small></div>`;}).join(''):'';
+ const solid=bands.filter(band=>band.pushback&&!band.pushback.few_samples);
+ let note='';
+ if(solid.length>=2){
+  const high=solid.reduce((a,b)=>b.pushback.rate>a.pushback.rate?b:a),low=solid.reduce((a,b)=>b.pushback.rate<a.pushback.rate?b:a);
+  note=low.pushback.rate>0&&high.pushback.rate/low.pushback.rate>=1.3?`Pushback is ${(high.pushback.rate/low.pushback.rate).toFixed(1)}× higher in the ${WORK_BANDS[high.band][0].toLowerCase()} than in the ${WORK_BANDS[low.band][0].toLowerCase()}.`:'Pushback is about the same at every time of day.';
+ }else if(total)note='Needs at least 20 labeled follow-ups in two parts of the day to compare.';
+ $('w-band-note').textContent=note;
+}
 function renderWork(payload){
  WORK=payload;renderWorkStatus(payload);
  const insights=payload?.insights,areas=(payload?.settings?.areas||[]).map(area=>area.name);
- renderWorkFilters(insights);renderWorkKpis(insights);renderWorkSpend(insights);
+ renderWorkFilters(insights);renderWorkKpis(insights);renderWorkHighlights(insights);renderWorkSpend(insights);renderWorkTagCards(insights);renderWorkRhythm(insights);
  renderWorkRework(insights);renderWorkEconomics(insights);
  renderWorkScorecard(insights);renderWorkFit(insights);renderWorkMix(insights);renderWorkOpportunities(insights);renderWorkSizing(insights);renderWorkEffort(insights);
 }
@@ -6203,7 +6290,7 @@ $('work-clear').addEventListener('click',async()=>{
 });
 async function applyWorkSessionFilter(params){
  const query=new URLSearchParams();
- ['months','runtime','project','month','start_month','area','work_type','complexity','tier','effort','outcome','model','model_runtime'].forEach(key=>{if(params.get(key))query.set(key,params.get(key));});
+ ['months','runtime','project','month','start_month','area','work_type','complexity','tier','effort','outcome','model','model_runtime','tag'].forEach(key=>{if(params.get(key))query.set(key,params.get(key));});
  query.set('ids','1');
  const label=params.get('label')||'Work',request=++workFilterRequest;
  if(history.replaceState)history.replaceState(null,'','/#sessions-all');

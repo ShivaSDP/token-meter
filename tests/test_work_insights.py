@@ -1001,7 +1001,7 @@ class OperatingRhythmTests(unittest.TestCase):
         self.assertEqual(out["spend"], 14.0)
         self.assertEqual(set(out["sessions"][0]), {
             "id", "session", "title", "runtime", "project", "start", "last", "cost", "turns", "model", "area",
-            "work_type", "complexity", "outcome", "corrections", "labeled_turns"})
+            "work_type", "complexity", "outcome", "corrections", "labeled_turns", "tags"})
 
     def test_outcome_model_and_limit_filters(self):
         rows = [row(f"s{i}", cost=float(i), model="mid" if i % 2 else "gpt-5.6", turns_=3) for i in range(6)]
@@ -1786,3 +1786,87 @@ class FlaggedSpendTests(unittest.TestCase):
     def test_no_complexity_labels_reports_no_share(self):
         flagged = self.build([row("a")], {"a": {"area": "Personal"}}, {"gpt-5.6": 10.0})["right_sizing"]["flagged"]
         self.assertEqual((flagged["sessions"], flagged["spend"], flagged["share"]), (0, 0, None))
+
+
+class TagHighlightRhythmTests(unittest.TestCase):
+    AREAS = DomainTests.AREAS
+    PRICES = {"gpt-5.6": 10.0, "cheap": 1.0, "mid": 4.0}
+
+    def build(self, rows, labels, sequences=None, **kwargs):
+        return domain.build_work_insights(
+            rows, labels, lambda ident: ident.split("\0")[0], self.AREAS, lambda m, p: self.PRICES.get(m),
+            today="2026-09-30", corrections_for=lambda ident, n: (sequences or {}).get(ident.split("\0")[0], []),
+            **kwargs)
+
+    def find(self, rows, labels, filters, sequences=None):
+        return domain.find_sessions(
+            rows, labels, lambda ident: ident.split("\0")[0], self.AREAS, lambda m, p: self.PRICES.get(m), filters,
+            corrections_for=lambda ident, n: (sequences or {}).get(ident.split("\0")[0], []), today="2026-09-30")
+
+    def population(self):
+        rows = []
+        for i in range(10):
+            r = row(f"s{i}", cost=float(i + 1), day=f"2026-09-{i + 1:02d}")
+            r["duration_s"], r["duration_available"] = 600 * (i + 1), True
+            rows.append(r)
+        rows[9]["duration_s"] = 4 * 3600
+        return rows
+
+    def test_relative_tags_use_period_thresholds(self):
+        rows = self.population()
+        out = self.build(rows, {})
+        tags = {t["tag"]: t for t in out["tags"]["items"]}
+        self.assertEqual(tags["big_spend"]["sessions"], 1)
+        self.assertEqual(tags["big_spend"]["spend"], 10.0)
+        self.assertEqual(tags["marathon"]["sessions"], 1)
+        self.assertEqual((out["tags"]["thresholds"]["marathon_s"], out["tags"]["thresholds"]["big_spend"]), (5400, 9.0))
+        few = self.build(rows[:3], {})
+        self.assertNotIn("big_spend", {t["tag"] for t in few["tags"]["items"]})
+
+    def test_fit_outcome_and_team_tags(self):
+        routine, complex_light, parent = row("r", model="gpt-5.6"), row("c", model="cheap"), row("p", model="mid")
+        parent["_agent_records"] = [{"id": "root", "parent_id": None}, {"id": "k0", "parent_id": "root"}]
+        children = []
+        for n in (1, 2):
+            child = row(f"child{n}", model="mid")
+            child["_agent_records"] = [{"id": f"k{n}", "parent_id": "root" if n == 1 else "k1"}]
+            children.append(child)
+        labels = {"r": {"complexity": "routine", "correction_labels": 2, "corrections": 0},
+                  "c": {"complexity": "complex", "correction_labels": 2, "corrections": 1}}
+        sequences = {"r": [(1, False), (2, False)], "c": [(1, True), (2, False)]}
+        out = self.find([routine, complex_light, parent, *children], labels, {}, sequences)
+        tags = {s["id"]: s["tags"] for s in out["sessions"]}
+        self.assertEqual(set(tags), {"r", "c", "p"})
+        self.assertIn("overkill", tags["r"])
+        self.assertEqual(tags["c"], ["underpowered", "rescued"])
+        self.assertIn("team", tags["p"])
+        only = self.find([routine, complex_light, parent, *children], labels, {"tag": "team"}, sequences)
+        self.assertEqual([s["id"] for s in only["sessions"]], ["p"])
+
+    def test_rhythm_counts_starts_by_weekday_hour_and_band(self):
+        a, b = row("a", day="2026-09-28"), row("b", day="2026-09-28", cost=3.0)
+        a["start"], b["start"] = "2026-09-28 09:15", "2026-09-28 23:40"
+        rhythm = self.build([a, b], {"b": {"corrections": 1, "correction_labels": 2}})["rhythm"]
+        self.assertEqual(rhythm["sessions"], 2)
+        self.assertEqual([(c["weekday"], c["hour"], c["sessions"]) for c in rhythm["cells"]], [(0, 9, 1), (0, 23, 1)])
+        bands = {b["band"]: b for b in rhythm["bands"]}
+        self.assertEqual(bands["evening"]["spend"], 3.0)
+        self.assertEqual(bands["evening"]["pushback"]["rate"], 0.5)
+        self.assertIsNone(bands["night"]["pushback"])
+
+    def test_highlights_are_typed_and_content_free(self):
+        rows = self.population()
+        rows[3]["session"], rows[3]["session_name"] = "trace-3.jsonl", "fix login"
+        rows[3]["cost"], rows[3]["_day_cost"] = 50.0, {"2026-09-04": 50.0}
+        out = self.build(rows, {})
+        kinds = {h["kind"]: h for h in out["highlights"]}
+        self.assertEqual(kinds["priciest_session"]["session"], "trace-3.jsonl")
+        self.assertEqual(kinds["busiest_day"]["day"], "2026-09-04")
+        self.assertEqual((kinds["streak"]["days"], kinds["streak"]["start"]), (10, "2026-09-01"))
+        self.assertEqual(kinds["peak_time"]["band"], "morning")
+        for item in out["highlights"]:
+            self.assertFalse(any("/" in str(v) for v in item.values()))
+
+    def test_tag_filter_is_validated_by_the_endpoint(self):
+        self.assertIn("tag", domain.DRILL_FILTERS)
+        self.assertEqual(set(meter.WORK_DRILL_ENUMS["tag"]), set(domain.TAG_ORDER))

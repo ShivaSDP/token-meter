@@ -129,6 +129,7 @@ from token_meter.domain.work import is_child_row as _work_is_child_row
 from token_meter.domain.work import work_identity as _work_identity
 from token_meter.domain.work import find_sessions as _domain_find_sessions
 from token_meter.domain.work import DRILL_FILTERS as _domain_drill_filters
+from token_meter.domain.work import TAG_ORDER as _domain_work_tags
 from token_meter.domain.work import parse_period as _domain_parse_period
 from token_meter.models.catalog import (
     ANTHROPIC_PRICE as CLAUDE_PRICE,
@@ -8141,6 +8142,7 @@ WORK_DRILL_ENUMS = {
     "tier": {"light", "standard", "premium"},
     "effort": {"low", "medium", "high", "xhigh", "max", "ultra"},
     "outcome": {"single_shot", "accepted", "recovered", "ended_on_pushback", "unclear", "pending"},
+    "tag": set(_domain_work_tags),
 }
 
 

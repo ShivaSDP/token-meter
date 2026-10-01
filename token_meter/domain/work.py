@@ -183,8 +183,35 @@ def build_work_insights(rows, labels, key_for, areas, output_price, months=6,
                       runtime_options, project_options, today, corrections_for, previous, grain)
 
 
+def _root_agent_id(row):
+    for record in row.get("_agent_records") or ():
+        if isinstance(record, dict) and not record.get("parent_id") and record.get("id"):
+            return str(record["id"])
+    return ""
+
+
+def _child_counts(rows):
+    """Child runs under each root agent, whether recorded in the parent trace or in their own files."""
+    parent_of = {}
+    for row in rows:
+        for record in row.get("_agent_records") or ():
+            if isinstance(record, dict) and record.get("id"):
+                parent_of[str(record["id"])] = str(record.get("parent_id") or "")
+    counts = collections.Counter()
+    for agent, parent in parent_of.items():
+        if not parent:
+            continue
+        node, seen = parent, {agent}
+        while parent_of.get(node) and node not in seen:
+            seen.add(node)
+            node = parent_of[node]
+        counts[node] += 1
+    return counts
+
+
 def _prepare_sessions(rows, labels, key_for, area_names, tiers, runtime, project, pending_keys, grain="month"):
     sessions = []
+    child_counts = _child_counts(rows)
     runtime_options, project_options = set(), collections.Counter()
     for row in rows:
         if is_child_row(row):
@@ -214,6 +241,8 @@ def _prepare_sessions(rows, labels, key_for, area_names, tiers, runtime, project
             "tier": tiers.get((row.get("runtime") or "", primary_model(row))),
             "model": primary_model(row),
             "effort": str(row.get("reasoning_effort") or "").lower(),
+            "duration": int(row.get("duration_s") or 0) if row.get("duration_available") else 0,
+            "children": child_counts.get(_root_agent_id(row), 0),
             "sequence": [],
             "pending": bool(pending_keys) and key_for(work_identity(row)) in pending_keys,
         })
@@ -370,6 +399,8 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
     model_fit = _model_fit(in_window)
     scorecard = _model_scorecard(in_window, tiers)
     opportunities = _opportunities(cells, effort, tier_prices)
+    tag_context = _tag_context(in_window)
+    rhythm = _rhythm(in_window)
 
     labeled_sessions = sum(1 for s in in_window if s["area"] != PENDING)
     labeled_turns = sum(s["correction_labels"] for s in in_window)
@@ -386,6 +417,9 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
         "model_fit": model_fit,
         "model_scorecard": scorecard,
         "opportunities": opportunities,
+        "tags": _tag_summary(in_window, tag_context),
+        "rhythm": rhythm,
+        "highlights": _highlights(sessions, in_window, month_set, grain, scorecard, economics, rhythm),
         "coverage": {
             "sessions": len(in_window), "labeled_sessions": labeled_sessions,
             "turns": later_turns, "labeled_turns": min(labeled_turns, later_turns),
@@ -544,10 +578,180 @@ def _opportunities(cells, effort, tier_prices):
     return sorted(rows, key=lambda row: -row["spend"])
 
 
+TAG_ORDER = ("marathon", "big_spend", "team", "overkill", "underpowered", "rescued", "stuck", "one_shot")
+MIN_TAG_POPULATION = 10
+MARATHON_FLOOR_S = 3_600
+TEAM_MIN_CHILDREN = 3
+
+
+def _top_decile_floor(values):
+    """Value the top 10% must exceed; None below the minimum population."""
+    if len(values) < MIN_TAG_POPULATION:
+        return None
+    ordered = sorted(values)
+    return ordered[int(0.9 * len(ordered)) - 1]
+
+
+def _tag_context(in_window):
+    """Thresholds for relative tags, computed over the sessions started in the selected period."""
+    costs = [_cost(s) for s in in_window if _cost(s) > 0]
+    durations = [s["duration"] for s in in_window if s["duration"]]
+    return {"marathon_s": max(MARATHON_FLOOR_S, _top_decile_floor(durations) or 0),
+            "long_run": _top_decile_floor(durations),
+            "big_spend": _top_decile_floor(costs),
+            "team_children": TEAM_MIN_CHILDREN}
+
+
+def session_tags(s, context, outcome):
+    tags = []
+    long_run = context["long_run"]
+    if s["duration"] >= MARATHON_FLOOR_S and (long_run is None or s["duration"] > long_run):
+        tags.append("marathon")
+    if context["big_spend"] is not None and _cost(s) > context["big_spend"] > 0:
+        tags.append("big_spend")
+    if s["children"] >= context["team_children"]:
+        tags.append("team")
+    if s["complexity"] == "routine" and (s["tier"] == "premium" or s["effort"] in HIGH_EFFORTS):
+        tags.append("overkill")
+    if s["complexity"] in ("complex", "high_impact") and s["tier"] == "light" and s["corrections"] > 0:
+        tags.append("underpowered")
+    tags.extend({"recovered": ["rescued"], "ended_on_pushback": ["stuck"], "single_shot": ["one_shot"]}.get(outcome, []))
+    return tags
+
+
+def _tag_summary(in_window, context):
+    stats = {tag: {"sessions": 0, "spend": 0.0, "judged": 0, "resolved": 0} for tag in TAG_ORDER}
+    total = sum(_cost(s) for s in in_window)
+    for s in in_window:
+        outcome = _outcome(s)
+        for tag in session_tags(s, context, outcome):
+            item = stats[tag]
+            item["sessions"] += 1
+            item["spend"] += _cost(s)
+            item["judged"] += outcome in ("accepted", "recovered", "ended_on_pushback")
+            item["resolved"] += outcome in ("accepted", "recovered")
+    return {
+        "items": [{"tag": tag, "sessions": v["sessions"], "spend": round(v["spend"], 6),
+                   "share": v["spend"] / total if total else None,
+                   "resolved_rate": v["resolved"] / v["judged"] if v["judged"] else None,
+                   "judged_sessions": v["judged"]}
+                  for tag, v in stats.items() if v["sessions"]],
+        "thresholds": context,
+    }
+
+
+DAY_BANDS = (("night", 0, 6), ("morning", 6, 12), ("afternoon", 12, 18), ("evening", 18, 24))
+
+
+def _start_time(s):
+    try:
+        return datetime.datetime.strptime(str(s["row"].get("start") or "")[:16], "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
+
+
+def _rhythm(in_window):
+    """Session starts by local weekday and hour, and pushback by time of day."""
+    cells = collections.defaultdict(lambda: [0, 0.0])
+    bands = {name: [0, 0.0, 0, 0] for name, _lo, _hi in DAY_BANDS}
+    for s in in_window:
+        started = _start_time(s)
+        if started is None:
+            continue
+        cell = cells[(started.weekday(), started.hour)]
+        cell[0] += 1
+        cell[1] += _cost(s)
+        band = next(name for name, lo, hi in DAY_BANDS if lo <= started.hour < hi)
+        bands[band][0] += 1
+        bands[band][1] += _cost(s)
+        bands[band][2] += s["corrections"]
+        bands[band][3] += s["correction_labels"]
+    return {
+        "sessions": sum(v[0] for v in cells.values()),
+        "cells": [{"weekday": d, "hour": h, "sessions": n, "spend": round(sp, 6)}
+                  for (d, h), (n, sp) in sorted(cells.items())],
+        "bands": [{"band": name, "sessions": n, "spend": round(sp, 6), "pushback": _rate(c, labeled)}
+                  for name, (n, sp, c, labeled) in bands.items()],
+    }
+
+
+MIN_HIGHLIGHT_JUDGED = 5
+MIN_HIGHLIGHT_KIND = 10
+
+
+def _longest_streak(days):
+    best, run, previous = (0, "", ""), 0, None
+    start = ""
+    for day in sorted(days):
+        current = datetime.date.fromisoformat(day)
+        if previous is not None and current - previous == datetime.timedelta(days=1):
+            run += 1
+        else:
+            run, start = 1, day
+        if run > best[0]:
+            best = (run, start, day)
+        previous = current
+    return best
+
+
+def _highlights(sessions, in_window, month_set, grain, scorecard, economics, rhythm):
+    """Typed, content-free facts for the period; the page writes the sentences."""
+    out = []
+    total = sum(_cost(s) for s in in_window)
+    priced = [s for s in in_window if _cost(s) > 0]
+    if priced:
+        top = max(priced, key=_cost)
+        out.append({"kind": "priciest_session", "session": _trace_key(top["row"]),
+                    "title": str(top["row"].get("session_name") or top["row"].get("title") or "")[:90],
+                    "cost": round(_cost(top), 6), "share": _cost(top) / total if total else None,
+                    "work_type": top["work_type"], "model": top["model"], "outcome": _outcome(top)})
+    ranked = sorted((m for m in scorecard if m["cost_per_resolved"] is not None
+                     and m["judged_sessions"] >= MIN_HIGHLIGHT_JUDGED), key=lambda m: m["cost_per_resolved"])
+    if len(ranked) >= 2 and ranked[0]["cost_per_resolved"] > 0:
+        best, worst = ranked[0], ranked[-1]
+        out.append({"kind": "best_value_model", "model": best["model"], "runtime": best["runtime"],
+                    "cost_per_resolved": best["cost_per_resolved"], "compare_model": worst["model"],
+                    "compare_runtime": worst["runtime"], "compare_cost": worst["cost_per_resolved"],
+                    "ratio": worst["cost_per_resolved"] / best["cost_per_resolved"]})
+    kinds = [e for e in economics if e["work_type"] != "unclear" and e["resolved_rate"] is not None
+             and e["judged_sessions"] >= MIN_HIGHLIGHT_KIND]
+    if len(kinds) >= 2:
+        smooth = max(kinds, key=lambda e: (e["resolved_rate"], -e["sessions"]))
+        rough = min(kinds, key=lambda e: (e["resolved_rate"], -e["sessions"]))
+        if smooth["resolved_rate"] > rough["resolved_rate"]:
+            out.append({"kind": "smoothest_work", "work_type": smooth["work_type"],
+                        "resolved_rate": smooth["resolved_rate"], "sessions": smooth["judged_sessions"]})
+            out.append({"kind": "roughest_work", "work_type": rough["work_type"],
+                        "resolved_rate": rough["resolved_rate"], "sessions": rough["judged_sessions"]})
+    day_spend, active = collections.Counter(), set()
+    for s in sessions:
+        for day, cost in (s["row"].get("_day_cost") or {}).items():
+            day = str(day)[:10]
+            if _bucket(day, grain) in month_set:
+                day_spend[day] += float(cost or 0)
+                active.add(day)
+        active.update(d[:10] for d in s["days"] if _bucket(d, grain) in month_set)
+    active = {d for d in active if len(d) == 10 and d[4] == "-"}
+    if day_spend:
+        day, spend = max(day_spend.items(), key=lambda item: (item[1], item[0]))
+        if spend > 0:
+            out.append({"kind": "busiest_day", "day": day, "spend": round(spend, 6),
+                        "sessions": sum(1 for s in in_window if (s["row"].get("start") or "")[:10] == day)})
+    if len(active) >= 2:
+        length, first, last = _longest_streak(active)
+        out.append({"kind": "streak", "days": length, "start": first, "end": last, "active_days": len(active)})
+    busy = [b for b in rhythm["bands"] if b["sessions"]]
+    if rhythm["sessions"] >= MIN_TAG_POPULATION and busy:
+        peak = max(busy, key=lambda b: b["sessions"])
+        out.append({"kind": "peak_time", "band": peak["band"], "sessions": peak["sessions"],
+                    "share": peak["sessions"] / rhythm["sessions"]})
+    return out
+
+
 MAX_DRILL_SESSIONS = 50
 MAX_DRILL_IDS = 2000
 DRILL_FILTERS = ("month", "start_month", "area", "work_type", "complexity", "tier", "effort", "outcome",
-                 "model", "model_runtime")
+                 "model", "model_runtime", "tag")
 
 
 def find_sessions(rows, labels, key_for, areas, output_price, filters, months=6, runtime="", project="",
@@ -564,6 +768,8 @@ def find_sessions(rows, labels, key_for, areas, output_price, filters, months=6,
     sessions, _runtimes, _projects = _prepare_sessions(
         rows, labels, key_for, area_names, tiers, runtime, project, pending_keys, grain)
     all_months = _window(sessions, grain, count, today)
+    window = set(all_months)
+    tag_context = _tag_context([s for s in sessions if s["start"] in window])
     month = filters.get("month") or ""
     start_month = filters.get("start_month") or ""
     if start_month:
@@ -571,7 +777,6 @@ def find_sessions(rows, labels, key_for, areas, output_price, filters, months=6,
     elif month:
         candidates = [s for s in sessions if month in all_months and month in _session_buckets(s, grain)]
     else:
-        window = set(all_months)
         candidates = [s for s in sessions if s["start"] in window]
     groups = dict(COMPLEXITY_GROUPS)
     matched = []
@@ -594,6 +799,10 @@ def find_sessions(rows, labels, key_for, areas, output_price, filters, months=6,
     if filters.get("outcome"):
         matched = [s for s in matched
                    if _outcome(s) == filters["outcome"]]
+    for s in matched:
+        s["tags"] = session_tags(s, tag_context, _outcome(s))
+    if filters.get("tag"):
+        matched = [s for s in matched if filters["tag"] in s["tags"]]
     matched.sort(key=lambda s: (-_cost(s), s["row"].get("last") or ""))
     if ids_only:
         return {"total": len(matched), "spend": round(sum(_cost(s) for s in matched), 6),
@@ -620,5 +829,6 @@ def find_sessions(rows, labels, key_for, areas, output_price, filters, months=6,
             "outcome": _outcome(s),
             "corrections": s["corrections"],
             "labeled_turns": s["correction_labels"],
+            "tags": s["tags"],
         } for s in matched[:limit]],
     }
