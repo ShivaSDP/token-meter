@@ -3378,16 +3378,44 @@ def find_session(sid, sources=None):
     return max(matches, key=selection_rank)
 
 
-def trash_session_log(session_id, sources=None, trash_dir=None, mover=None):
-    """Move one exact, currently discovered session log to Trash."""
-    session_id = str(session_id or "").strip()
-    if not session_id or len(session_id) > 240:
-        return {"ok": False, "error": "A valid session ID is required.", "error_code": "invalid_id"}
-    source_pool = list(sources) if sources is not None else all_session_sources()
+def _session_delete_source(session_id, trace, source_pool):
+    """Resolve the one trace file a delete request names, or a public error."""
+    not_found = {"ok": False, "error": "Session is not in the discovered log inventory.",
+                 "error_code": "not_found"}
+    if trace:
+        traced = [
+            candidate for candidate in canonical_aggregation_sources(source_pool)
+            if str(candidate.get("session") or "") == trace
+            and str(candidate.get("id") or "") == session_id
+        ]
+        return (traced[0], None) if len(traced) == 1 else (None, not_found)
     source = find_session(session_id, sources=source_pool)
     if not source or str(source.get("id") or "") != session_id:
-        return {"ok": False, "error": "Session is not in the discovered log inventory.",
-                "error_code": "not_found"}
+        return None, not_found
+    logical_paths = {
+        str(candidate.get("path") or "")
+        for candidate in canonical_aggregation_sources(source_pool)
+        if str(candidate.get("id") or "") == session_id
+    }
+    if len(logical_paths) > 1:
+        return None, {
+            "ok": False,
+            "error": "This session has multiple trace files; choose one trace to delete.",
+            "error_code": "ambiguous_id",
+        }
+    return source, None
+
+
+def trash_session_log(session_id, sources=None, trash_dir=None, mover=None, trace=None):
+    """Move one exact, currently discovered session log to Trash."""
+    session_id = str(session_id or "").strip()
+    trace = str(trace or "").strip()
+    if not session_id or len(session_id) > 240 or len(trace) > 240:
+        return {"ok": False, "error": "A valid session ID is required.", "error_code": "invalid_id"}
+    source_pool = list(sources) if sources is not None else all_session_sources()
+    source, error = _session_delete_source(session_id, trace, source_pool)
+    if error:
+        return error
     duplicate_paths = {
         str(path) for path in (source.get("_duplicate_paths") or ()) if path
     }
@@ -5728,6 +5756,12 @@ def hermes_summary(source, objs=None):
     return _hermes_native_adapter().summarize_legacy(source, objs)
 
 
+def _is_child_agent_row(row):
+    """A row is a child run only when every agent record names a parent."""
+    records = [r for r in row.get("_agent_records") or () if isinstance(r, dict)]
+    return bool(records) and all(r.get("parent_id") for r in records)
+
+
 def session_summary(source, opencode_conn=None):
     signature = source_revision_signature(source)
     with _summary_cache_lock:
@@ -5742,6 +5776,9 @@ def session_summary(source, opencode_conn=None):
         row = summary_row(source, source.get("title"), 0.0, 0, 0, set(), None, None,
                           {}, {}, {}, False, availability=metric_availability("unknown"))
     if isinstance(row, dict):
+        row["session"] = str(source.get("session") or row.get("id") or "")
+        if _is_child_agent_row(row):
+            row["subagent"] = True
         row["capabilities"] = with_configured_capabilities(
             row.get("capabilities") or _domain_session_capabilities(row.get("_tool_evidence")),
             source.get("provider"), source.get("project") or row.get("project") or "",
@@ -6369,15 +6406,27 @@ def session_action_capability():
     }
 
 
-def request_session_delete(session_id):
+def request_session_delete(session_id, trace=None):
     """Apply the public read-only-provider boundary before any trash action."""
-    source = find_session(session_id) if session_id else None
-    provider = str((source or {}).get("provider") or "").strip().lower()
+    session_id, trace = str(session_id or "").strip(), str(trace or "").strip()
+    source_pool = all_session_sources()
+    candidates, error = [], None
+    if session_id and len(session_id) <= 240 and len(trace) <= 240:
+        source, error = _session_delete_source(session_id, trace, source_pool)
+        if source:
+            candidates = [source]
+        elif (error or {}).get("error_code") == "ambiguous_id":
+            candidates = [
+                candidate for candidate in canonical_aggregation_sources(source_pool)
+                if str(candidate.get("id") or "") == session_id
+            ]
     read_only = {
         str(value).strip().lower()
         for value in session_action_capability().get("read_only_providers") or ()
     }
-    if source and provider in read_only:
+    providers = {str(candidate.get("provider") or "").strip().lower() for candidate in candidates}
+    if providers and providers <= read_only:
+        provider = next(iter(sorted(providers)))
         return {
             "ok": False,
             "error": "{} sessions are read-only in Token Meter.".format(
@@ -6385,7 +6434,9 @@ def request_session_delete(session_id):
             ),
             "error_code": "read_only_provider",
         }
-    return trash_session_log(session_id)
+    if error:
+        return error
+    return trash_session_log(session_id, sources=source_pool, trace=trace)
 
 
 def agent_access_launcher():
@@ -10518,7 +10569,7 @@ class H(BaseHTTPRequestHandler):
             self._send(json.dumps(result), "application/json", status=status)
             return
         if req_path == "/session/delete":
-            result = request_session_delete(payload.get("session_id"))
+            result = request_session_delete(payload.get("session_id"), payload.get("trace"))
             if result.get("ok"):
                 result["next_session_id"] = publish_after_session_delete()
             status = 200 if result.get("ok") else (404 if result.get("error_code") == "not_found" else
