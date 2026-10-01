@@ -17,7 +17,8 @@ COMPLEXITY_GROUPS = (
     ("complex", ("complex", "high_impact")),
 )
 TIERS = ("light", "standard", "premium")
-WORK_TYPE_ORDER = ("debug", "feature", "refactor", "docs", "explore", "review", "ops", "other", "unclear")
+WORK_TYPE_ORDER = ("feature", "debug", "refactor", "test", "review", "plan", "explore", "ops", "docs", "other",
+                   "unclear")
 
 
 def work_identity(row):

@@ -406,3 +406,22 @@ sent to the classifier.
   checks free space first, imports with `-q int4`, and deletes the download.
   Status exposes only a state, a reason code, and byte counts.
   `scripts/setup-work-classifier` runs the same module.
+
+## Iteration 9: developer taxonomy (work type and area prompt v3)
+
+- Work types: feature, debug (bug fixing), refactor, test, review (code
+  review), plan (planning and design), explore (questions and research), ops
+  (DevOps and setup, including install and dependency errors), docs, other.
+- Default areas follow the software stack: Frontend & UI, Backend & APIs,
+  Data & ML, Infrastructure & DevOps, Developer tooling & agents, Docs &
+  writing, Non-code. Settings that still hold the previous default area names
+  move to these; custom areas are kept.
+- Labels carry per-question versions (`QUESTION_VERSIONS`). Work type and
+  area moved to `p3`, so only those are relabeled; complexity and pushback
+  labels stay valid. Stale labels keep showing until replaced.
+- Evaluation, 2026-10-01, Jet v6.2 int4 in Ollama 0.34.4: 82 synthetic
+  developer requests written for this purpose (no user text). Work type: the
+  previous wording 87% (71/82, scored against the old classes) and the new
+  wording 96% (79/82). Area: 82% (67/82), 84% at confidence ≥ 0.5; most misses
+  are genuinely two-area requests. The set was written alongside the new
+  wording, so these figures are optimistic.

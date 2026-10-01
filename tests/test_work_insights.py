@@ -152,7 +152,7 @@ class TextPreparationTests(unittest.TestCase):
         tags = W.question_tags(values)
         turn = service._turn_key("s1", 0)
         service.ledger.record_label(turn, "work_type", key, "debug", 0.4, tags["work_type"], "d", clock.now)
-        service.ledger.record_label(turn, "area", key, "Personal", 0.4, tags["area"], "d", clock.now)
+        service.ledger.record_label(turn, "area", key, "Non-code", 0.4, tags["area"], "d", clock.now)
         service.labels_version += 1
         entry = service.snapshot()[key]
         self.assertEqual((entry["work_type"], entry["area"]), ("debug", "Unclear"))
@@ -209,23 +209,25 @@ class PromptAndReadoutTests(unittest.TestCase):
     def test_choice_prompt_uses_jet_format(self):
         prompt, labels, keys = W.render_prompt("User's message:\nhi", W.question_for("work_type", W.default_settings()))
         self.assertTrue(prompt.startswith("<state>\nUser's message:\nhi\n</state>"))
-        self.assertIn("A: debug:", prompt)
-        self.assertEqual(keys[0], "debug")
+        self.assertIn("A: feature:", prompt)
+        self.assertIn("D: test:", prompt)
+        self.assertEqual(keys[0], "feature")
         self.assertEqual(labels[:2], ["A", "B"])
 
     def test_readout_softmaxes_label_tokens_only(self):
         _, labels, keys = W.render_prompt("s", W.question_for("work_type", W.default_settings()))
         distribution = W.read_distribution(
             jet_response("A", -0.1, [("B", -2.5), ("Hello", -0.01)]), labels, keys, 1.0)
-        self.assertEqual(set(distribution), {"debug", "feature"})
-        self.assertGreater(distribution["debug"], 0.8)
+        self.assertEqual(set(distribution), {"feature", "debug"})
+        self.assertGreater(distribution["feature"], 0.8)
 
     def test_choice_answers_average_both_option_orders(self):
         question = W.question_for("work_type", W.default_settings())
         forward, backward = W.render_prompt("s", question), W.render_prompt("s", question, reverse=True)
         self.assertEqual(backward[2][0], "other")
         value, confidence = W.read_answer(
-            [jet_response("A", -0.1, [("B", -1.0)]), jet_response(letter_for(backward[0], "feature"), -0.1,
+            [jet_response(letter_for(forward[0], "debug"), -0.1, [(letter_for(forward[0], "feature"), -1.0)]),
+             jet_response(letter_for(backward[0], "feature"), -0.1,
                                                                      [(letter_for(backward[0], "debug"), -3.0)])],
             question, [(forward[1], forward[2]), (backward[1], backward[2])])
         self.assertEqual(value, "feature")
@@ -262,7 +264,7 @@ class ServiceTests(unittest.TestCase):
     def test_labels_are_stored_without_text(self):
         service, _, _ = make_service(self.tmp.name)
         service.observe("s1", turns(SECRET_TEXT, "no that's wrong, still broken"))
-        answers = {"What kind of work": "refactor", "Which area": "Product engineering", "Scale": "1",
+        answers = {"What kind of work": "refactor", "Which part of the software stack": "Backend & APIs", "Scale": "1",
                    "previous work was wrong": "yes"}
 
         def respond(prompt):
@@ -274,7 +276,7 @@ class ServiceTests(unittest.TestCase):
         turn_prompt = next(p for p in FakeClient.prompts if "previous work was wrong" in p)
         snapshot = service.snapshot()[service.session_key("s1")]
         self.assertEqual(snapshot["work_type"], "refactor")
-        self.assertEqual(snapshot["area"], "Product engineering")
+        self.assertEqual(snapshot["area"], "Backend & APIs")
         self.assertEqual(snapshot["complexity"], "everyday")
         self.assertEqual(snapshot["corrections"], 1)
         self.assertIn("Assistant's previous message (end):\nDone: I changed the chart.", turn_prompt)
@@ -465,7 +467,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(service.ledger.next_backlog(5, clock.now + 3_600), [key])
         clock.now += W.ITEM_RETRY_DELAYS_S[0] + 1
         FakeClient.responder = lambda prompt: jet_response(letter_for(prompt, "debug")) \
-            if "What kind of work" in prompt else jet_response("A") if "Which area" in prompt \
+            if "What kind of work" in prompt else jet_response("A") if "Which part of the software stack" in prompt \
             else jet_response("1") if "Scale" in prompt else jet_response("no")
         drain(service)
         entry = service.snapshot()[key]
@@ -1452,7 +1454,7 @@ class ReviewRegressionTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         service, values, clock = make_service(tmp.name)
-        answers = {"What kind of work": "debug", "Which area": "Product engineering", "Scale": "0",
+        answers = {"What kind of work": "debug", "Which part of the software stack": "Backend & APIs", "Scale": "0",
                    "previous work was wrong": "no"}
 
         def respond(prompt):
@@ -1464,13 +1466,13 @@ class ReviewRegressionTests(unittest.TestCase):
         drain(service)
         key = service.session_key("s1")
         self.assertEqual(service.snapshot()[key]["work_type"], "debug")
-        answers.update({"What kind of work": "feature", "Which area": "Agents and tools", "Scale": "2"})
+        answers.update({"What kind of work": "feature", "Which part of the software stack": "Developer tooling & agents", "Scale": "2"})
         clock.now += 60
         service.observe("s1", turns("fix it", "ok", "please build a new agent tool for the release flow"))
         drain(service)
         entry = service.snapshot()[key]
         self.assertEqual((entry["work_type"], entry["area"], entry["complexity"]),
-                         ("feature", "Agents and tools", "complex"))
+                         ("feature", "Developer tooling & agents", "complex"))
 
     def test_a_turn_that_became_the_opener_is_not_a_correction(self):
         tmp = tempfile.TemporaryDirectory()
@@ -1533,8 +1535,8 @@ class OpenerPositionAndWindowTests(unittest.TestCase):
             real = self.RELEASE in prompt
             if "What kind of work" in prompt:
                 return jet_response(letter_for(prompt, "feature" if real else "ops"))
-            if "Which area" in prompt:
-                return jet_response(letter_for(prompt, "Agents and tools" if real else "Personal"))
+            if "Which part of the software stack" in prompt:
+                return jet_response(letter_for(prompt, "Developer tooling & agents" if real else "Non-code"))
             if "Scale" in prompt:
                 return jet_response("2" if real else "0")
             return jet_response("no")
@@ -1545,7 +1547,7 @@ class OpenerPositionAndWindowTests(unittest.TestCase):
     def assert_real_opener(self, service):
         entry = service.snapshot()[service.session_key("s1")]
         self.assertEqual((entry["work_type"], entry["area"], entry["complexity"]),
-                         ("feature", "Agents and tools", "complex"))
+                         ("feature", "Developer tooling & agents", "complex"))
 
     def test_fallback_opener_queued_before_the_real_opener_does_not_win(self):
         service, clock = self.service()
@@ -1561,7 +1563,7 @@ class OpenerPositionAndWindowTests(unittest.TestCase):
         drain(service)
         key, fallback = service.session_key("s1"), service._turn_key("s1", 0)
         for offset in (0, 60):  # An equal whole-second write, then a later one (an in-flight stale item).
-            for question, value in (("work_type", "ops"), ("area", "Personal"), ("complexity", "routine")):
+            for question, value in (("work_type", "ops"), ("area", "Non-code"), ("complexity", "routine")):
                 service.ledger.record_label(fallback, question, key, value, 0.9,
                                             W.question_tags(service.settings_provider())[question], "d",
                                             clock.now + offset)
@@ -1612,7 +1614,7 @@ class OpenerPositionAndWindowTests(unittest.TestCase):
         self.assertEqual(service.observe("s1", turns("hi", self.RELEASE)), 0)
         self.assertEqual(service._openers[service.session_key("s1")][0], service._turn_key("s1", 1))
         entry = service.snapshot()[service.session_key("s1")]
-        self.assertEqual((entry["work_type"], entry["area"]), ("ops", "Personal"))
+        self.assertEqual((entry["work_type"], entry["area"]), ("ops", "Non-code"))
 
     def test_a_permanently_failed_opener_reads_unclear_not_the_fallback(self):
         service, clock = self.service()
@@ -1892,3 +1894,25 @@ class TagHighlightRhythmTests(unittest.TestCase):
     def test_tag_filter_is_validated_by_the_endpoint(self):
         self.assertIn("tag", domain.DRILL_FILTERS)
         self.assertEqual(set(meter.WORK_DRILL_ENUMS["tag"]), set(domain.TAG_ORDER))
+
+
+class TaxonomyV3Tests(unittest.TestCase):
+    def test_previous_default_areas_move_to_the_developer_defaults(self):
+        old = [{"name": n, "description": "old"} for n in W.PREVIOUS_DEFAULT_AREA_NAMES[0]]
+        self.assertEqual(W.normalize_settings({"areas": old})["areas"], [dict(a) for a in W.DEFAULT_AREAS])
+        custom = [{"name": "Mobile", "description": "iOS app"}, {"name": "Web", "description": "site"}]
+        self.assertEqual(W.normalize_settings({"areas": custom})["areas"], custom)
+
+    def test_only_work_type_and_area_are_relabeled(self):
+        tags = W.question_tags(W.default_settings())
+        self.assertEqual((tags["work_type"], tags["complexity"], tags["correction"]), ("p3", "p2", "p2"))
+        self.assertTrue(tags["area"].startswith("p3:"))
+
+    def test_developer_work_types(self):
+        self.assertEqual(list(W.WORK_TYPES), ["feature", "debug", "refactor", "test", "review", "plan", "explore",
+                                              "ops", "docs", "other"])
+        self.assertEqual(set(domain.WORK_TYPE_ORDER), set(W.WORK_TYPES) | {"unclear"})
+        page = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "page.html"),
+                    encoding="utf-8").read()
+        for key in W.WORK_TYPES:
+            self.assertIn(f"{key}:'", page[page.index("const WORK_TYPE_LABELS="):][:400])

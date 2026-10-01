@@ -45,6 +45,9 @@ UNCLEAR_CONFIDENCE = 0.5
 UNCLEAR_BY_QUESTION = {"work_type": 0.35, "area": 0.5, "correction": 0.5}
 # Bump when prompt wording, options, or turn selection changes; stale labels are shown until relabeled.
 PROMPT_VERSION = "p2"
+# Per-question prompt versions: bumping one relabels only that question.
+QUESTION_VERSIONS = {"work_type": "p3", "area": "p3", "complexity": PROMPT_VERSION,
+                     "correction": PROMPT_VERSION, "turn": PROMPT_VERSION}
 MIN_OPENER_WORDS = 3
 MIN_GAP_S = 0.25
 NUM_CTX = 4_096
@@ -61,14 +64,16 @@ MIN_AREAS, MAX_AREAS = 2, 8
 MAX_AREA_NAME, MAX_AREA_DESCRIPTION = 40, 160
 
 WORK_TYPES = {
-    "debug": "diagnosing or fixing a failure, bug, install or setup error, or unexpected behavior",
-    "feature": "building new functionality or changing product behavior or design",
-    "refactor": "restructuring, cleanup, or renaming without changing behavior",
-    "docs": "writing or editing documentation, posts, slides, messages, or other prose",
-    "explore": "understanding, explaining, researching, or planning without making changes",
-    "review": "reviewing, testing, evaluating, or verifying existing work",
-    "ops": "running git, release, or install commands, or machine upkeep, without changing code",
-    "other": "a non-software request, such as personal, financial, or general questions",
+    "feature": "building new functionality, an endpoint, a screen, or a change to how the product behaves",
+    "debug": "fixing something broken: a bug, crash, error, wrong output, or unexpected behavior in code",
+    "refactor": "restructuring, cleaning up, renaming, or speeding up code without changing what it does",
+    "test": "writing, fixing, or running tests, or checking that a change actually works",
+    "review": "reviewing a diff, pull request, or existing code and giving feedback without changing it",
+    "plan": "designing an approach, architecture, schema, or task breakdown before writing code",
+    "explore": "explaining code or concepts, finding where something is, or researching options without changing code",
+    "ops": "git, CI/CD, releases, deployment, infrastructure, dependencies, or setting up tools and environments",
+    "docs": "writing documentation, READMEs, comments, release notes, posts, slides, or messages",
+    "other": "a request unrelated to software, such as cooking, travel, money, or personal messages",
 }
 TURN_TYPES = {
     "correction": "says the previous work is wrong, broken, incomplete, not good enough, "
@@ -86,12 +91,19 @@ COMPLEXITY_LEVELS = (
 )
 COMPLEXITY_KEYS = ("routine", "everyday", "complex", "high_impact")
 DEFAULT_AREAS = (
-    {"name": "Product engineering", "description": "building, fixing, and shipping the main product or codebase"},
-    {"name": "Agents and tools", "description": "agent workflows, skills, plugins, automation, and developer tooling"},
-    {"name": "Writing and publishing", "description": "blogs, posts, slides, reports, documentation, and media"},
-    {"name": "Research and evaluation", "description": "experiments, benchmarks, papers, and model evaluation"},
-    {"name": "Operations and setup", "description": "machine and environment upkeep not tied to a product codebase"},
-    {"name": "Personal", "description": "personal, financial, family, or non-work questions"},
+    {"name": "Frontend & UI", "description": "web or app interfaces, styling, components, and client-side code"},
+    {"name": "Backend & APIs", "description": "servers, APIs, databases, business logic, and integrations"},
+    {"name": "Data & ML", "description": "data pipelines, analytics, SQL, machine learning, and model training or evaluation"},
+    {"name": "Infrastructure & DevOps", "description": "CI/CD, cloud, containers, deployment, and build systems"},
+    {"name": "Developer tooling & agents",
+     "description": "git, scripts, CLIs, local setup, editor and shell config, agent workflows, and automation"},
+    {"name": "Docs & writing", "description": "documentation, blog posts, slides, reports, and messages"},
+    {"name": "Non-code", "description": "personal, financial, or general questions unrelated to software"},
+)
+# Area sets that earlier versions shipped as defaults; settings still holding one move to the current defaults.
+PREVIOUS_DEFAULT_AREA_NAMES = (
+    ("Product engineering", "Agents and tools", "Writing and publishing", "Research and evaluation",
+     "Operations and setup", "Personal"),
 )
 
 JET_SYSTEM = ("You are Jet, a decision model. Read the state and the question, then answer "
@@ -204,8 +216,8 @@ def is_substantive(text):
 
 def question_tags(settings):
     """Expected stored tag per question: prompt version, plus the area taxonomy for areas."""
-    tags = {name: PROMPT_VERSION for name in ("work_type", "complexity", "correction", "turn")}
-    tags["area"] = f"{PROMPT_VERSION}:{taxonomy_hash(settings['areas'])}"
+    tags = {name: QUESTION_VERSIONS[name] for name in ("work_type", "complexity", "correction", "turn")}
+    tags["area"] = f"{QUESTION_VERSIONS['area']}:{taxonomy_hash(settings['areas'])}"
     return tags
 
 
@@ -295,9 +307,11 @@ def normalize_settings(raw):
     except ValueError:
         pass
     try:
-        settings["areas"] = normalize_areas(raw.get("areas"))
+        areas = normalize_areas(raw.get("areas"))
     except ValueError:
-        pass
+        areas = None
+    if areas and tuple(a["name"] for a in areas) not in PREVIOUS_DEFAULT_AREA_NAMES:
+        settings["areas"] = areas
     return settings
 
 
@@ -319,9 +333,11 @@ def _choice(instructions, options):
 
 def question_for(name, settings):
     if name == "work_type":
-        return _choice("What kind of work is the user asking for?", WORK_TYPES)
+        return _choice("What kind of work is the user asking the coding agent to do? "
+                       "Pick the main goal of the request.", WORK_TYPES)
     if name == "area":
-        return _choice("Which area of the user's work does this request belong to?",
+        return _choice("Which part of the software stack, or which kind of non-code work, "
+                       "does this request belong to?",
                        {a["name"]: a["description"] for a in settings["areas"]})
     if name == "complexity":
         return {"type": "score", "instructions": "How complex and high-stakes is this task for a coding agent?",

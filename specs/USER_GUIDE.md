@@ -247,7 +247,10 @@ disable recommendations.
 Work is available on macOS only. It is off until you turn on **Settings → Work
 insights**, which also sets up Ollama and the model in the background (see the
 README). A local Jet decision model then labels each session's opening request with an
-area (editable, up to eight), a work type, and a complexity level, and asks of
+area (editable, up to eight; the defaults follow the software stack, such as
+Frontend & UI or Backend & APIs), a work type (feature, bug fixing, refactoring,
+testing, code review, planning, questions, DevOps and setup, docs, or
+non-software), and a complexity level, and asks of
 each follow-up turn whether you pushed back on the previous work. For that
 question it also reads the last 600 characters of the assistant reply before
 your turn. Tool output and files are never read, and cloud-proxied Ollama

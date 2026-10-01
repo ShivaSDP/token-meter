@@ -5882,7 +5882,7 @@ function renderWorkTags(tags){
  if(tags.labeled_turns)chips.push(`<span class="workTag${tags.corrections?' pushback':''}" title="Follow-up turns that pushed back on the previous work">${tags.corrections} pushback${tags.corrections===1?'':'s'} / ${tags.labeled_turns}</span>`);
  host.innerHTML=chips.join('');host.hidden=!chips.length;
 }
-const WORK_TYPE_LABELS={debug:'Debugging',feature:'Feature work',refactor:'Refactoring',docs:'Writing & docs',explore:'Exploration',review:'Review & testing',ops:'Ops & setup',other:'Other',unclear:'Unclear'};
+const WORK_TYPE_LABELS={feature:'Feature work',debug:'Bug fixing',refactor:'Refactoring',test:'Testing',review:'Code review',plan:'Planning & design',explore:'Questions & research',ops:'DevOps & setup',docs:'Docs & writing',other:'Non-software',unclear:'Unclear'};
 const WORK_COMPLEXITY_LABELS={routine:'Routine',everyday:'Everyday',complex:'Complex',high_impact:'High impact'};
 const WORK_TIER_LABELS={light:'Light models',standard:'Standard models',premium:'Premium models'};
 function workAreaColor(area,areas){
