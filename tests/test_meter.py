@@ -10770,7 +10770,7 @@ console.log(JSON.stringify({
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard JavaScript")
     def test_session_header_names_the_opened_trace_not_a_sibling(self):
-        script = "\n".join(
+        script = "let allSessionInventory=null;\n" + "\n".join(
             self.page_function(self.page, name)
             for name in ("stateSessionId", "stateSessionKey", "sessionStartMessage", "sessionDisplayName")
         ) + """
@@ -10779,12 +10779,17 @@ const state={session:'rollout-child.jsonl',source:{id:'task-1'},xsession:{curren
  {id:'task-1',session:'rollout-child.jsonl',title:'Child title'}]}};
 const sibling={...state,session:'rollout-other.jsonl'};
 // Older traces fall outside the recent rows but are in the All sessions inventory the user opened them from.
-var allSessionInventory=[{id:'task-1',session:'rollout-old.jsonl',title:'Old title'}];
+allSessionInventory=[{id:'task-1',session:'rollout-old.jsonl',title:'Old title'}];
 const older={...state,session:'rollout-old.jsonl'};
 console.log(JSON.stringify([sessionDisplayName(state),sessionDisplayName(sibling),sessionDisplayName(older)]));
 """
         result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
         self.assertEqual(json.loads(result.stdout), ["Child title", "Session", "Old title"])
+
+    def test_all_sessions_inventory_is_declared_before_the_first_header_render(self):
+        declaration = self.page.index("let allSessionInventory=null")
+        self.assertLess(declaration, self.page.index("function showCurrentPanel("))
+        self.assertLess(declaration, self.page.index("function applyHashRoute(){"))
 
     def test_every_session_entry_point_addresses_one_trace_file(self):
         for marker in (
