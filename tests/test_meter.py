@@ -10,6 +10,66 @@ from unittest import mock
 import meter
 
 
+class TimestampPerformanceTests(unittest.TestCase):
+    def test_utc_seconds_and_legacy_leap_seconds_are_preserved(self):
+        self.assertEqual(meter.parse_iso("1970-01-01T00:00:00.123Z"), 0)
+        self.assertEqual(meter.parse_iso("2026-10-01T00:00:00.999Z"), 1790812800)
+        self.assertEqual(meter.parse_iso("2016-12-31T23:59:60.000Z"), 1483228800)
+        self.assertIsNone(meter.parse_iso("bad timestamp"))
+        self.assertIsNone(meter.parse_iso({}))
+
+    def test_fractional_updates_reuse_the_same_second(self):
+        meter._parse_iso_second.cache_clear()
+        first = meter.parse_iso("2026-10-01T12:34:56.123Z")
+        with mock.patch.object(meter.datetime, "datetime") as converter:
+            self.assertEqual(meter.parse_iso("2026-10-01T12:34:56.999Z"), first)
+            converter.fromisoformat.assert_not_called()
+        self.assertEqual(meter._parse_iso_second.cache_info().hits, 1)
+
+
+class PaceComparisonPerformanceTests(unittest.TestCase):
+    def setUp(self):
+        meter._cached_matched_pace_comparison.cache_clear()
+        self.samples = [{
+            "duration_s": 10, "ts": index, "input_tokens": 10000,
+            "peak_input_tokens": 10000, "cache_read_tokens": 0,
+            "output_tokens": 1000, "model_calls": 1, "tool_calls": 0,
+        } for index in range(24)]
+
+    def test_comparison_is_reused_but_changed_duration_recomputes(self):
+        right = [dict(sample, duration_s=20) for sample in self.samples]
+        with mock.patch.object(meter, "_compute_matched_pace_comparison",
+                               wraps=meter._compute_matched_pace_comparison) as compute:
+            first = meter.matched_pace_comparison("a", self.samples, "b", right)
+            self.assertEqual(first["pace_ratio"], 2)
+            first["pace_ratio"] = 999
+            self.samples[0]["unused_trace_content"] = "not a comparison input"
+            reused = meter.matched_pace_comparison("a", self.samples, "b", right)
+            self.assertEqual(reused["pace_ratio"], 2)
+            self.assertEqual(compute.call_count, 1)
+            for sample in right:
+                sample["duration_s"] = 30
+            changed = meter.matched_pace_comparison("a", self.samples, "b", right)
+            self.assertEqual(changed["pace_ratio"], 3)
+            self.assertEqual(compute.call_count, 2)
+
+    def test_changed_workload_invalidates_comparison(self):
+        right = [dict(sample) for sample in self.samples]
+        self.assertTrue(meter.matched_pace_comparison("a", self.samples, "b", right)["available"])
+        for sample in right:
+            sample["peak_input_tokens"] = 1000000
+        result = meter.matched_pace_comparison("a", self.samples, "b", right)
+        self.assertEqual(result["matched_pairs"], 0)
+        self.assertFalse(result["available"])
+
+    def test_ineligible_context_stops_before_other_distance_calculations(self):
+        left = self.samples[0]
+        right = dict(left, peak_input_tokens=1000000)
+        with mock.patch.object(meter, "_pace_log_distance", wraps=meter._pace_log_distance) as distance:
+            self.assertIsNone(meter.pace_match_distance(left, right))
+        self.assertEqual(distance.call_count, 1)
+
+
 class PlatformPathTests(unittest.TestCase):
     def test_application_support_root_uses_roaming_app_data_on_windows(self):
         root = meter.application_support_root("nt", {"APPDATA": r"C:\Users\test\AppData\Roaming"})

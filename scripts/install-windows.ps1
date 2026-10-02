@@ -134,7 +134,7 @@ if ($ReadinessTimeoutSeconds -le 0) {
     $ReadinessTimeoutSeconds = if ($ConfiguredTimeout -gt 0) { $ConfiguredTimeout } else { 600 }
 }
 
-$Git = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue
+$Git = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $Git) {
     Fail "Git is required but was not found."
 }
@@ -144,8 +144,7 @@ if ($env:TOKEN_METER_PYTHON) {
     $PythonCandidates.Add($env:TOKEN_METER_PYTHON)
 }
 foreach ($Name in @("python3.exe", "python.exe")) {
-    $Command = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue
-    if ($Command) {
+    foreach ($Command in @(Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue)) {
         $PythonCandidates.Add($Command.Source)
     }
 }

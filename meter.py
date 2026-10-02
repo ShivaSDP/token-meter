@@ -18,6 +18,7 @@ import calendar
 import base64
 import copy
 import datetime
+import functools
 import glob
 import hashlib
 import html
@@ -240,9 +241,26 @@ AGENT_CURRENT_MAX_AGE_S = 6 * 60 * 60
 def parse_iso(ts):
     # Logs are UTC (trailing Z). calendar.timegm treats the struct as UTC, so
     # idle/elapsed line up with time.time().
+    if not isinstance(ts, str):
+        return None
+    return _parse_iso_second(ts.split(".")[0])
+
+
+@functools.lru_cache(maxsize=4096)
+def _parse_iso_second(ts):
     try:
-        return calendar.timegm(time.strptime((ts or "").split(".")[0], "%Y-%m-%dT%H:%M:%S"))
-    except Exception:
+        if (len(ts) == 19 and ts[4] == "-" and ts[7] == "-"
+                and ts[10] == "T" and ts[13] == ":" and ts[16] == ":"):
+            return int(datetime.datetime.fromisoformat(ts).replace(
+                tzinfo=datetime.timezone.utc).timestamp())
+        return calendar.timegm(time.strptime(ts, "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        # strptime also accepts leap seconds and a few non-padded legacy dates.
+        try:
+            return calendar.timegm(time.strptime(ts, "%Y-%m-%dT%H:%M:%S"))
+        except (ValueError, OverflowError):
+            return None
+    except OverflowError:
         return None
 
 
@@ -7350,19 +7368,25 @@ def pace_match_distance(left, right):
     right_tools = int(right.get("tool_calls") or 0)
     if bool(left_tools) != bool(right_tools):
         return None
-    dimensions = [
-        (_pace_log_distance(
+    dimensions = []
+    for left_value, right_value, limit, weight in [
+        (
             left.get("peak_input_tokens") or left.get("input_tokens"),
-            right.get("peak_input_tokens") or right.get("input_tokens"), 2.0,
-        ), 0.28),
-        (_pace_log_distance(left.get("input_tokens"), right.get("input_tokens"), 3.0), 0.17),
-        (_pace_log_distance(left.get("output_tokens"), right.get("output_tokens"), 2.0), 0.22),
-        (_pace_log_distance(left.get("model_calls") or 1, right.get("model_calls") or 1, 2.0), 0.16),
-    ]
+            right.get("peak_input_tokens") or right.get("input_tokens"), 2.0, 0.28,
+        ),
+        (left.get("input_tokens"), right.get("input_tokens"), 3.0, 0.17),
+        (left.get("output_tokens"), right.get("output_tokens"), 2.0, 0.22),
+        (left.get("model_calls") or 1, right.get("model_calls") or 1, 2.0, 0.16),
+    ]:
+        distance = _pace_log_distance(left_value, right_value, limit)
+        if distance is None:
+            return None
+        dimensions.append((distance, weight))
     if left_tools:
-        dimensions.append((_pace_log_distance(left_tools, right_tools, 2.0), 0.12))
-    if any(distance is None for distance, _ in dimensions):
-        return None
+        distance = _pace_log_distance(left_tools, right_tools, 2.0)
+        if distance is None:
+            return None
+        dimensions.append((distance, 0.12))
     left_input = max(1, int(left.get("input_tokens") or 0))
     right_input = max(1, int(right.get("input_tokens") or 0))
     left_cache = min(1.0, float(left.get("cache_read_tokens") or 0) / left_input)
@@ -7397,7 +7421,41 @@ def _bootstrap_median_interval(values, seed_key, repetitions=400):
     return _percentile(medians, 0.025), _percentile(medians, 0.975)
 
 
+_PACE_SAMPLE_FIELDS = (
+    "duration_s", "ts", "input_tokens", "peak_input_tokens", "cache_read_tokens",
+    "output_tokens", "tool_calls", "model_calls",
+)
+
+
+def _pace_sample_keys(samples):
+    # Retain numeric comparison inputs only, never messages or trace objects.
+    return tuple(
+        (
+            float(sample.get("duration_s") or 0), float(sample.get("ts") or 0),
+            int(sample.get("input_tokens") or 0), float(sample.get("peak_input_tokens") or 0),
+            float(sample.get("cache_read_tokens") or 0), int(sample.get("output_tokens") or 0),
+            int(sample.get("tool_calls") or 0), float(sample.get("model_calls") or 0),
+        )
+        for sample in (samples or [])
+        if float(sample.get("duration_s") or 0) > 0
+        and int(sample.get("input_tokens") or 0) > 0
+        and int(sample.get("output_tokens") or 0) > 0
+    )
+
+
 def matched_pace_comparison(a_id, a_samples, b_id, b_samples):
+    return dict(_cached_matched_pace_comparison(
+        a_id, _pace_sample_keys(a_samples), b_id, _pace_sample_keys(b_samples)))
+
+
+@functools.lru_cache(maxsize=256)
+def _cached_matched_pace_comparison(a_id, a_keys, b_id, b_keys):
+    return _compute_matched_pace_comparison(
+        a_id, [dict(zip(_PACE_SAMPLE_FIELDS, values)) for values in a_keys],
+        b_id, [dict(zip(_PACE_SAMPLE_FIELDS, values)) for values in b_keys])
+
+
+def _compute_matched_pace_comparison(a_id, a_samples, b_id, b_samples):
     """Compare two model-runtime histories using deterministic workload matching."""
     def usable(sample):
         return (
