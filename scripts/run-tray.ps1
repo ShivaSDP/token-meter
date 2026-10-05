@@ -810,6 +810,7 @@ $script:TogglePanelItem.add_Click({
             Show-UsagePanel
             $script:TogglePanelItem.Text = "Hide usage panel"
         } else {
+            $script:PanelHovering = $false
             $script:UsagePanel.Hide()
             $script:TogglePanelItem.Text = "Show usage panel"
         }
