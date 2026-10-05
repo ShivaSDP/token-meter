@@ -404,7 +404,7 @@ function Set-PanelText([string]$Text) {
 function Refresh-PanelText {
     $Base = if ($script:CurrentPanelText) { $script:CurrentPanelText } else { "Token Meter - waiting for server" }
     if ($script:PanelHovering) {
-        Set-PanelText "$Base | Right-click for options"
+        Set-PanelText "Token Meter | $Base | Right-click for options"
     } else {
         Set-PanelText $Base
     }
