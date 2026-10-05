@@ -774,6 +774,8 @@ $Menu.Items.Add($Quit) | Out-Null
 
 Set-TrayMenuTheme $Menu | Out-Null
 $script:NotifyIcon.ContextMenuStrip = $Menu
+$script:UsagePanel.ContextMenuStrip = $Menu
+$script:PanelLabel.ContextMenuStrip = $Menu
 $script:NotifyIcon.add_MouseClick({ Invoke-TrayMouseClick $_ })
 $Menu.add_Opening({
     Invoke-TrayRefresh

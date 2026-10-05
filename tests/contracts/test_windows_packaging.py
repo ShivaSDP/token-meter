@@ -402,6 +402,8 @@ class WindowsPackagingContracts(unittest.TestCase):
             "$script:UsagePanelDragActive",
             "UsagePanel.Capture",
             "add_LocationChanged",
+            "UsagePanel.ContextMenuStrip",
+            "PanelLabel.ContextMenuStrip",
             "add_FormClosing",
             "add_VisibleChanged",
             "TrayExiting",
