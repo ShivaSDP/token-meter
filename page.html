@@ -5885,9 +5885,12 @@ function renderWorkTags(tags){
 const WORK_TYPE_LABELS={feature:'Feature work',debug:'Bug fixing',refactor:'Refactoring',test:'Testing',review:'Code review',plan:'Planning & design',explore:'Questions & research',ops:'DevOps & setup',docs:'Docs & writing',other:'Non-software',unclear:'Unclear'};
 const WORK_COMPLEXITY_LABELS={routine:'Routine',everyday:'Everyday',complex:'Complex',high_impact:'High impact'};
 const WORK_TIER_LABELS={light:'Light models',standard:'Standard models',premium:'Premium models'};
+const WORK_UNLABELED_AREAS=['No request text','Outside history','Pending'],WORK_MUTED_AREAS=['Unclear',...WORK_UNLABELED_AREAS];
+const WORK_AREA_NAMES={Pending:'Not labeled yet','Outside history':'Outside labeling history'};
+const WORK_AREA_TIPS={Unclear:'The local model was not confident about the area.','No request text':'These traces have no typed request the local model could read, for example runs started by another tool.','Outside history':'Older than the labeling history in Settings → Work insights. Raise it to label these.',Pending:'Waiting for the local model.'};
 function workAreaColor(area,areas){
  if(area==='Unclear')return'var(--w-unclear)';
- if(area==='Pending')return'var(--w-pending)';
+ if(WORK_UNLABELED_AREAS.includes(area))return'var(--w-pending)';
  const index=(areas||[]).indexOf(area);
  return index>=0&&index<8?`var(--w${index+1})`:'var(--w-unclear)';
 }
@@ -5935,8 +5938,9 @@ async function refreshWorkStatus(){
 function renderWorkStatus(payload){
  const status=payload?.status||{},settings=payload?.settings||{},coverage=payload?.insights?.coverage||{};
  const state=status.reason==='delete_pending'?'storage_error':settings.enabled?status.state||'idle':'disabled';
- const share=coverage.sessions?Math.round(100*coverage.labeled_sessions/coverage.sessions):0;
- const progress=`Labeled ${share}% of sessions in this period${status.pending?` · ${status.pending.toLocaleString()} pending`:''}${status.eta_s&&state==='running'?` · ${workDuration(status.eta_s)}`:''}`;
+ const labelable=Math.max(0,(coverage.sessions||0)-(coverage.no_text_sessions||0)-(coverage.outside_sessions||0));
+ const share=labelable?Math.round(100*coverage.labeled_sessions/labelable):0;
+ const progress=`Labeled ${share}% of labelable sessions in this period${status.pending?` · ${status.pending.toLocaleString()} pending`:''}${status.eta_s&&state==='running'?` · ${workDuration(status.eta_s)}`:''}`;
  const copy={
   disabled:['Off','Work insights are off','Turn on local classification in Settings to label sessions.'],
   setup_needed:['Setup',status.reason==='remote_model'?'Cloud model refused':'Classifier model not found',status.reason==='model_missing'?`Looking for “${settings.model||'token-meter-jet'}”. Select Retry setup to install it.`:status.reason==='remote_model'?'That Ollama model runs on another host. Choose a local model in Settings.':'Start Ollama on this machine, then Token Meter retries automatically.'],
@@ -5978,10 +5982,10 @@ function renderWorkSpend(insights){
  const spend=Object.fromEntries(segments.map(area=>[area,allocation.reduce((sum,bucket)=>sum+((bucket.spend||{})[area]||0),0)]));
  const sessions=Object.fromEntries(segments.map(area=>[area,allocation.reduce((sum,bucket)=>sum+((bucket.sessions||{})[area]||0),0)]));
  const total=Object.values(spend).reduce((a,b)=>a+b,0);
- const rows=segments.filter(area=>spend[area]>0).sort((a,b)=>(['Unclear','Pending'].includes(a)-['Unclear','Pending'].includes(b))||spend[b]-spend[a]);
+ const rows=segments.filter(area=>spend[area]>0).sort((a,b)=>(WORK_MUTED_AREAS.indexOf(a)-WORK_MUTED_AREAS.indexOf(b))||spend[b]-spend[a]);
  const max=Math.max(1e-9,...rows.map(area=>spend[area]));
  $('w-spend-note').textContent=total?`${money(total)} by area`:'';
- $('w-areas').innerHTML=rows.length?rows.map(area=>{const muted=['Unclear','Pending'].includes(area);return `<button type=button class=workBarRow data-muted="${muted}" data-drill="${esc(JSON.stringify({area}))}" data-drill-label="${esc(area)}"><span class=workBarLabel>${esc(area==='Pending'?'Not labeled yet':area)}</span><span class=workBarTrack><i style="width:${(100*spend[area]/max).toFixed(1)}%"></i></span><b class=num>${money(spend[area])}</b><small>${workPercent(spend[area]/total)}${sessions[area]?` · ${sessions[area].toLocaleString()} session${sessions[area]===1?'':'s'}`:''}</small>${workSpark(allocation.map(bucket=>(bucket.spend||{})[area]||0))}</button>`;}).join(''):'<div class=workEmpty>No spend in this period.</div>';
+ $('w-areas').innerHTML=rows.length?rows.map(area=>{const muted=WORK_MUTED_AREAS.includes(area),name=WORK_AREA_NAMES[area]||area;return `<button type=button class=workBarRow data-muted="${muted}" data-drill="${esc(JSON.stringify({area}))}" data-drill-label="${esc(name)}"${WORK_AREA_TIPS[area]?` title="${esc(WORK_AREA_TIPS[area])}"`:''}><span class=workBarLabel>${esc(name)}</span><span class=workBarTrack><i style="width:${(100*spend[area]/max).toFixed(1)}%"></i></span><b class=num>${money(spend[area])}</b><small>${workPercent(spend[area]/total)}${sessions[area]?` · ${sessions[area].toLocaleString()} session${sessions[area]===1?'':'s'}`:''}</small>${workSpark(allocation.map(bucket=>(bucket.spend||{})[area]||0))}</button>`;}).join(''):'<div class=workEmpty>No spend in this period.</div>';
  const counts=Object.fromEntries(OUTCOMES_SHOWN.map(key=>[key,allocation.reduce((sum,bucket)=>sum+((bucket.outcomes||{})[key]||0),0)]));
  const outcomeSpend=Object.fromEntries(OUTCOMES_SHOWN.map(key=>[key,allocation.reduce((sum,bucket)=>sum+((bucket.outcome_spend||{})[key]||0),0)]));
  const judged=OUTCOMES_SHOWN.reduce((sum,key)=>sum+counts[key],0);
@@ -6103,7 +6107,7 @@ function workSuggestion(item){
   case 'light_complex':return{title:'Use a stronger model for complex work',detail:`Complex work on light models got pushback on ${workPercent(item.rework?.rate)} of follow-ups.`,drill:{complexity:item.complexity,tier:item.tier}};
   case 'switch_model':{
    const level={routine:'routine',everyday:'everyday',complex:'complex'}[item.complexity]||'',app=item.to_runtime&&item.to_runtime!==item.runtime?` in ${item.to_runtime}`:'';
-   return{title:`Try ${item.to_model}${app} for ${level} ${item.work_type==='other'?'non-software requests':work.toLowerCase()}`,detail:`On ${level} requests: ${workPercent(item.to_rate)} resolved at ${money(item.to_cost)} per resolved session, vs ${workPercent(item.from_rate)} at ${money(item.from_cost)} on ${item.model} (${item.runtime}).`,drill:{work_type:item.work_type,complexity:item.complexity,model:item.model,model_runtime:item.runtime}};
+   return{title:`Try ${item.to_model}${app} for ${level} ${item.work_type==='other'?'non-software requests':work.toLowerCase()}`,detail:`On ${level} requests: ${workPercent(item.to_rate)} resolved at ${money(item.to_cost)} per resolved session, vs ${workPercent(item.from_rate)} at ${money(item.from_cost)} on ${item.model} (${item.runtime})${item.to_pushback!=null&&item.from_pushback!=null?`; pushback ${workPercent(item.to_pushback)} vs ${workPercent(item.from_pushback)}`:''}.${item.to_untested_harder?` Keep ${item.model} for harder work: ${item.to_model} hasn’t been used on it yet.`:''}`,drill:{work_type:item.work_type,complexity:item.complexity,model:item.model,model_runtime:item.runtime}};
   }
   case 'long_threads':return{title:'Start a fresh session sooner',detail:`Sessions with ${item.threshold_turns}+ requests cost ${item.ratio.toFixed(1)}× more per request than short ones, because each request re-sends the growing context.`,drill:{tag:'long_thread'}};
   default:return{title:item.kind,detail:'',drill:null};
@@ -8125,6 +8129,7 @@ function renderAllSessions(xs){
  };
  sessions=sessions.slice().sort(sorters[globalSort]||sorters.recent);
  if(workSessionFilter?.loading)setLogText($('g-count'),'Loading the sessions behind this Work filter…');
+ else if(workSessionFilter?.failed)setLogText($('g-count'),'The sessions behind this Work filter could not be loaded. Clear the filter or try again.');
  else setLogText($('g-count'),allSessionsCountText(view));
  const maxCost=Math.max(.001,...sessions.map(s=>s.cost||0));
  reconcileLogRows(sessions,maxCost,liveSessionIds);

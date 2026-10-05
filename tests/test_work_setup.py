@@ -387,6 +387,16 @@ class WorkSetupTests(unittest.TestCase):
         setup._thread.join(5)
         self.assertEqual(len(runs), 1)
 
+    def test_start_after_the_old_run_passed_its_restart_check_starts_a_new_run(self):
+        setup, ran = self.make(), []
+        old = mock.Mock(is_alive=lambda: True)
+        setup._thread, setup._winding_down = old, True
+        setup.run = lambda: ran.append(1)
+        self.assertTrue(setup.start())
+        self.assertIsNot(setup._thread, old)
+        setup._thread.join(5)
+        self.assertEqual(ran, [1])
+
     def test_ollama_in_the_users_applications_folder_is_found(self):
         home = os.path.join(self.tmp.name, "home")
         app = os.path.join(home, "Applications", "Ollama.app", "Contents", "Resources")

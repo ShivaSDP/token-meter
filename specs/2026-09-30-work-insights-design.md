@@ -464,3 +464,15 @@ sent to the classifier.
   insights are still on. A Work filter in All sessions says it is loading
   instead of showing zero sessions. `specs/WORK_INSIGHTS.md` is now the current
   logic reference, with an infographic in `specs/images/`.
+
+### Unlabeled reasons and safer switches (2026-10-05)
+
+- Unlabeled sessions split into No request text, Outside history (older than
+  the labeling history), and Pending; only Pending is backlog.
+- Area Unclear cutoff 0.5 → 0.4 (synthetic set: 98% labeled at 81% vs 90% at
+  84%); applied at read time, so no relabel.
+- `switch_model` also requires pushback within 5 points of the current model,
+  and flags `to_untested_harder` when the alternative has no sessions at a
+  harder complexity level; the copy then says to keep the current model there.
+- Setup: a `start()` after the old thread passed its restart check starts a
+  new run (`_winding_down`).

@@ -281,8 +281,10 @@ models are refused.
   Savings can overlap. Below them, spend is split by model tier and reasoning
   effort; striped segments are the mismatches.
 - **Where the spend went** lists spend by area for sessions started in the
-  period, with a small trend line across the period. Not labeled yet and
-  Unclear (the model was not confident) appear last.
+  period, with a small trend line across the period. Unclear (the model was
+  not confident), No request text (nothing typed to read), Outside labeling
+  history (older than the history setting), and Not labeled yet (still in the
+  queue) appear last.
 - **Session tags** are worked out from data Token Meter already has, not from
   the model: Marathon (top 10% by active time, and at least an hour), Long thread (30 or
   more requests), Big

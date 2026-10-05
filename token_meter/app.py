@@ -131,6 +131,8 @@ from token_meter.domain.work import work_identity as _work_identity
 from token_meter.domain.work import find_sessions as _domain_find_sessions
 from token_meter.domain.work import DRILL_FILTERS as _domain_drill_filters
 from token_meter.domain.work import TAG_ORDER as _domain_work_tags
+from token_meter.domain.work import UNCLEAR as _work_domain_unclear
+from token_meter.domain.work import UNLABELED as _work_domain_unlabeled
 from token_meter.domain.work import parse_period as _domain_parse_period
 from token_meter.models.catalog import (
     ANTHROPIC_PRICE as CLAUDE_PRICE,
@@ -8208,6 +8210,12 @@ def _work_bucket_valid(value, grain):
     return bool(re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", value))
 
 
+def _work_label_since(settings):
+    """First day the classifier labels, from the history setting; empty when it labels all history."""
+    days = settings.get("backfill_days") or 0
+    return (datetime.date.today() - datetime.timedelta(days=days)).isoformat() if days else ""
+
+
 def work_sessions_state(query):
     """Bounded list of sessions behind one Work module cell (allowlisted fields only)."""
     if not work_insights_supported():
@@ -8234,7 +8242,7 @@ def work_sessions_state(query):
         if name in filters and not _work_bucket_valid(filters[name], period[0]):
             return {"ok": False, "error": "Choose a valid month or day."}, 400
     if "area" in filters and filters["area"] not in (
-            [a["name"] for a in settings["areas"]] + ["Unclear", "Pending"]):
+            [a["name"] for a in settings["areas"]] + [_work_domain_unclear, *_work_domain_unlabeled]):
         return {"ok": False, "error": "Area was not found."}, 404
     for name, allowed in WORK_DRILL_ENUMS.items():
         if name in filters and filters[name] not in allowed:
@@ -8253,7 +8261,7 @@ def work_sessions_state(query):
         runtime=runtime[:40], project=project,
         corrections_for=service.session_corrections if service else None,
         pending_keys=service.pending_session_keys() if service else None,
-        ids_only=ids_only, today=time.strftime("%Y-%m-%d"),
+        ids_only=ids_only, today=time.strftime("%Y-%m-%d"), label_since=_work_label_since(settings),
     )
     return {"ok": True, "filters": filters, **result}, 200
 
@@ -8277,6 +8285,7 @@ def work_insights_state(months="6", runtime="", project=""):
         today=time.strftime("%Y-%m-%d"),
         corrections_for=service.session_corrections if service else None,
         pending_keys=service.pending_session_keys() if service else None,
+        label_since=_work_label_since(settings),
     )
     runtimes = insights["filters"]["runtimes"]
     if runtime and runtime not in runtimes:

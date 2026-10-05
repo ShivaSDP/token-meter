@@ -18,13 +18,13 @@ background; it also runs at server start while enabled.
 1. **Find Ollama.** If the configured URL (default `http://127.0.0.1:11434`)
    answers with Ollama 0.34 or newer, it is reused. If an Ollama is installed
    (`CLI_CANDIDATES`, including `~/Applications`) but not answering, setup
-   waits two minutes, then stops with `ollama_offline`; it never replaces the
-   user's own Ollama.
+   waits two minutes, then stops with `ollama_offline` rather than replacing
+   it. An Ollama older than 0.34 is bypassed in favor of the managed runtime.
 2. **Otherwise install the pinned runtime.** Ollama 0.34.4 `ollama-darwin.tgz`
    from GitHub, checked against its pinned size and SHA-256, extracted with
    path checks (regular files with `O_EXCL|O_NOFOLLOW`, modes masked to 0755,
-   same-folder symlinks only), and every Mach-O file must be signed by Apple
-   team `3MU9H2V9Y9`. It lives in
+   same-folder symlinks only), and every Mach-O file must pass
+   `codesign --verify --strict` with Ollama's Developer ID team `3MU9H2V9Y9`. It lives in
    `~/Library/Application Support/Token Meter/ollama/0.34.4` and runs as
    LaunchAgent `com.token-meter.ollama` on `127.0.0.1:11435` with logs sent to
    `/dev/null`. The settings URL then points there.
@@ -37,7 +37,8 @@ background; it also runs at server start while enabled.
 Loopback probes never use an HTTP proxy. Turning Work insights off cancels a
 running setup at its next checkpoint and stops the managed Ollama; turning it
 back on while the old run winds down restarts setup only if it is still on.
-Status exposes a state, a reason code, and byte counts only. Uninstall removes
+Status exposes a state, a reason code, byte counts, whether the Ollama is
+managed, and the pinned version; no paths or error text. Uninstall removes
 the managed Ollama, its model, and leftover setup downloads.
 
 ## 2. Classification
@@ -52,7 +53,7 @@ versions, taxonomy hashes, and the model digest are stored.
 | Question | Asked of | Answer | Unclear below |
 | --- | --- | --- | --- |
 | Work type | first substantive request (3+ words) | feature, debug (bug fixing), refactor, test, review (code review), plan, explore (questions and research), ops (DevOps and setup), docs, other (non-software) | 0.35 |
-| Area | first substantive request | one of 2-8 editable areas; defaults follow the stack: Frontend & UI, Backend & APIs, Data & ML, Infrastructure & DevOps, Developer tooling & agents, Docs & writing, Non-code | 0.5 |
+| Area | first substantive request | one of 2-8 editable areas; defaults follow the stack: Frontend & UI, Backend & APIs, Data & ML, Infrastructure & DevOps, Developer tooling & agents, Docs & writing, Non-code | 0.4 |
 | Complexity | first substantive request | routine, everyday, complex, high-impact (probability-weighted level) | — |
 | Pushback | every follow-up turn | yes/no: did the user say the previous work was wrong, broken, or not what they asked for? | 0.5 |
 
@@ -60,7 +61,16 @@ Choice questions are asked in both option orders and averaged to cancel
 position bias. Labels carry a per-question prompt version
 (`QUESTION_VERSIONS`: work type and area `p3`, complexity and pushback `p2`);
 changing one relabels only that question. Area labels count whenever their
-taxonomy hash matches, so older labels show until replaced.
+taxonomy hash matches, so older labels show until replaced. Cutoffs apply when
+labels are read, so changing one needs no relabeling. (The 0.4 area cutoff
+labels 98% of a synthetic set at 81% accuracy, against 90% at 84% for 0.5.)
+
+Sessions without a label fall in one of three groups, shown muted after the
+areas: **No request text** (the trace has no typed request to read, for
+example runs started by another tool), **Outside labeling history** (older
+than the history setting), and **Not labeled yet** (waiting in the queue).
+Only the last is real backlog; labeling progress counts only labelable
+sessions.
 
 The worker paces requests (default 5 a minute; 5-60), pauses on battery, waits
 when load exceeds 0.75 per CPU or the model slows 3x, and backs off when Ollama
@@ -104,16 +114,15 @@ spreads turns and spend across the days they happened.
 
    | Tag | Rule |
    | --- | --- |
-   | Marathon | active time at least 1 hour and in the top 10% of the period |
+   | Marathon | active time at least 1 hour, and in the top 10% when 10 or more sessions have a duration |
    | Long thread | 30 or more requests |
-   | Big spender | cost in the top 10% of the period |
+   | Big spender | cost in the top 10%; needs 10 or more priced sessions |
    | Subagent team | 3 or more child runs (agent `parent_id` chains) |
    | Overkill | routine work on a premium model or xhigh/max/ultra effort |
    | Underpowered | complex work on a light model that got pushback |
    | Rescued / Ended on pushback / One-shot | the outcome above |
 
-   "Top 10%" means strictly above the 90th-percentile value, and needs at
-   least 10 sessions in the period.
+   "Top 10%" means strictly above the 90th-percentile value of the period.
 4. **When you work**: session starts by local weekday and hour, and pushback
    rate by time of day (night, morning, afternoon, evening). The comparison
    line needs two bands with 20 or more labeled follow-ups.
@@ -123,17 +132,19 @@ spreads turns and spend across the days they happened.
    and cost per resolved session; the lowest is marked when at least two models
    have five or more judged sessions.
 
-Every bar, tile, tag, and suggestion opens the sessions behind it
-(`/work/sessions`, the same filters and windowing as the aggregate).
+Bars, outcome rows, tags, table rows, and suggestions open the sessions behind
+them (`/work/sessions`, the same filters and windowing as the aggregate); the
+rhythm heatmap and time-of-day bands do not.
 
 ## 5. Suggestions
 
-Each needs at least 3 sessions; they are ranked by estimated saving, then
+Right-sizing cells need at least 3 sessions, and the model suggestions have
+the higher floors below. Suggestions are ranked by estimated saving, then
 spend, and capped at 8. Savings are estimates and can overlap.
 
 | Suggestion | When | Estimated saving |
 | --- | --- | --- |
-| **Try a cheaper model** for one kind of work at one complexity level | The alternative is cheaper per token, resolves within 5 points as often, and costs at most 70% per resolved session; the current model has 10+ judged sessions there, the alternative 5+; routine work is never pointed at a premium model | (current − alternative cost per resolved) × current resolved sessions |
+| **Try a cheaper model** for one kind of work at one complexity level | Compared with the most-used model in that cell (Unclear work types skipped). The alternative is cheaper per token, resolves within 5 points as often, gets no more than 5 points more pushback, and costs at most 70% per resolved session; the current model has 10+ judged sessions there, the alternative 5+; routine work is never pointed at a premium model. If the alternative has never been used on harder work, the suggestion says to keep the current model for it | (current − alternative cost per resolved) × current resolved sessions |
 | **Use a newer version of the same model** | Same app and family, strictly newer version, cheaper per token, resolves within 5 points as often overall; 10+ judged sessions on the current model, 5+ on the newer | current spend × (1 − new price ÷ current price) |
 | **Try a mid-priced model for routine work** | Routine sessions ran on premium models; names them and, per app, the most-used standard model there | spend × (1 − median standard price ÷ median premium price) |
 | **Lower reasoning effort on routine work** | Routine sessions used xhigh, max, or ultra effort | none (no counterfactual cost) |

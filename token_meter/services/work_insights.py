@@ -42,7 +42,7 @@ LATENCY_WINDOW = 10
 ACTIVE_WINDOW_S = 600
 UNCLEAR_CONFIDENCE = 0.5
 # Per-question Unclear cutoffs, from the live-label audit (work type is right far more often than 0.5 implies).
-UNCLEAR_BY_QUESTION = {"work_type": 0.35, "area": 0.5, "correction": 0.5}
+UNCLEAR_BY_QUESTION = {"work_type": 0.35, "area": 0.4, "correction": 0.5}
 # Bump when prompt wording, options, or turn selection changes; stale labels are shown until relabeled.
 PROMPT_VERSION = "p2"
 # Per-question prompt versions: bumping one relabels only that question.

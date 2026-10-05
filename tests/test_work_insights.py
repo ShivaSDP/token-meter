@@ -152,7 +152,7 @@ class TextPreparationTests(unittest.TestCase):
         tags = W.question_tags(values)
         turn = service._turn_key("s1", 0)
         service.ledger.record_label(turn, "work_type", key, "debug", 0.4, tags["work_type"], "d", clock.now)
-        service.ledger.record_label(turn, "area", key, "Non-code", 0.4, tags["area"], "d", clock.now)
+        service.ledger.record_label(turn, "area", key, "Non-code", 0.35, tags["area"], "d", clock.now)
         service.labels_version += 1
         entry = service.snapshot()[key]
         self.assertEqual((entry["work_type"], entry["area"]), ("debug", "Unclear"))
@@ -865,7 +865,7 @@ class DomainTests(unittest.TestCase):
         self.assertTrue(september["partial"])
         august = next(b for b in out["allocation"] if b["month"] == "2026-08")
         self.assertEqual(august["sessions"], {"Pending": 1})
-        self.assertEqual(out["areas"][-2:], ["Unclear", "Pending"])
+        self.assertEqual(out["areas"][-4:], ["Unclear", "No request text", "Outside history", "Pending"])
 
     def test_child_rows_are_excluded_but_parents_with_children_are_kept(self):
         child = row("kid")
@@ -2026,3 +2026,56 @@ class ReviewFixTests(unittest.TestCase):
         long = next(r for r in out["recommendations"] if r["kind"] == "long_threads")
         tag = next(t for t in out["tags"]["items"] if t["tag"] == "long_thread")
         self.assertEqual((long["sessions"], tag["sessions"]), (6, 6))
+
+
+class UnlabeledReasonTests(unittest.TestCase):
+    def build(self, rows, labels, **kwargs):
+        return domain.build_work_insights(rows, labels, lambda ident: ident.split("\0")[0], DomainTests.AREAS,
+                                          lambda m, p: None, today="2026-09-30", **kwargs)
+
+    def test_sessions_without_text_or_outside_history_are_not_pending(self):
+        silent = row("silent", day="2026-09-20", turns_=0)
+        old = row("old", day="2026-07-01")
+        waiting = row("waiting", day="2026-09-25")
+        out = self.build([silent, old, waiting], {}, label_since="2026-07-02")
+        sessions = {}
+        for bucket in out["allocation"]:
+            for area, count in bucket["sessions"].items():
+                sessions[area] = sessions.get(area, 0) + count
+        self.assertEqual(sessions, {"No request text": 1, "Outside history": 1, "Pending": 1})
+        self.assertEqual((out["coverage"]["no_text_sessions"], out["coverage"]["outside_sessions"]), (1, 1))
+        found = domain.find_sessions([silent, old, waiting], {}, lambda ident: ident.split("\0")[0], DomainTests.AREAS,
+                                     lambda m, p: None, {"area": "Outside history"}, today="2026-09-30",
+                                     label_since="2026-07-02")
+        self.assertEqual([s["id"] for s in found["sessions"]], ["old"])
+
+    def test_all_history_setting_keeps_old_sessions_pending(self):
+        out = self.build([row("old", day="2026-07-01")], {}, label_since="")
+        self.assertEqual(out["allocation"][-3]["sessions"], {"Pending": 1})
+
+    def test_new_area_names_are_valid_drill_filters(self):
+        for name in domain.UNLABELED:
+            self.assertIn(name, ("No request text", "Outside history", "Pending"))
+        self.assertEqual(meter._work_label_since({"backfill_days": 0}), "")
+        self.assertEqual(len(meter._work_label_since({"backfill_days": 90})), 10)
+
+
+class SwitchGuardTests(unittest.TestCase):
+    AREAS, PRICES = TagHighlightRhythmTests.AREAS, TagHighlightRhythmTests.PRICES
+    build, sessions, combine = (TagHighlightRhythmTests.build, TagHighlightRhythmTests.sessions,
+                                TagHighlightRhythmTests.combine)
+
+    def test_a_cheaper_model_with_more_pushback_is_not_suggested(self):
+        rows, labels, sequences = self.combine(self.sessions("gpt-5.6", 12, 10.0), self.sessions("cheap", 10, 2.0))
+        for key in labels:
+            if key.startswith("cheap"):
+                labels[key]["corrections"] = 1
+        self.assertFalse(any(r["kind"] == "switch_model" for r in self.build(rows, labels, sequences)["recommendations"]))
+
+    def test_suggestion_says_when_the_cheaper_model_has_not_seen_harder_work(self):
+        parts = self.combine(self.sessions("gpt-5.6", 12, 10.0), self.sessions("cheap", 10, 2.0))
+        switch = next(r for r in self.build(*parts)["recommendations"] if r["kind"] == "switch_model")
+        self.assertTrue(switch["to_untested_harder"])
+        harder = self.combine(parts, self.sessions("cheap", 1, 2.0, "complex", prefix="hard"))
+        switch = next(r for r in self.build(*harder)["recommendations"] if r["kind"] == "switch_model")
+        self.assertFalse(switch["to_untested_harder"])

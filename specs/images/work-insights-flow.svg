@@ -85,7 +85,7 @@
     <text class="h3" x="1296" y="224">Work page</text>
     <text class="t" x="1296" y="250">Outcomes, tags, rhythm, and</text>
     <text class="t" x="1296" y="270">model-efficiency suggestions.</text>
-    <text class="s" x="1296" y="302">Every number opens its sessions</text>
+    <text class="s" x="1296" y="302">Select a bar or tag to see sessions</text>
 
     <path class="line" d="M326 256H360" marker-end="url(#arrow)"/>
     <path class="line" d="M630 256H664" marker-end="url(#arrow)"/>
@@ -177,7 +177,7 @@
     <rect x="260" y="36" width="92" height="26" rx="13" fill="rgba(102,217,144,.14)" stroke="#66d990"/><text x="306" y="53" text-anchor="middle">One-shot</text>
   </g>
   <text class="t" x="844" y="776">Tags are computed from cost, time, requests, subagents, tier, and outcome.</text>
-  <text class="t" x="844" y="796">Top 10% tags need at least 10 sessions; a session can have several.</text>
+  <text class="t" x="844" y="796">Top-10% tags need enough sessions to compare; a session can have several.</text>
 
   <!-- Section: page order -->
   <text class="eye" x="60" y="872">THE PAGE, TOP TO BOTTOM</text>
@@ -204,7 +204,7 @@
     <rect x="60" y="1012" width="4" height="60" rx="2" fill="#5f8adf"/>
     <text class="h3" x="84" y="1028">When you work</text>
     <text class="t" x="84" y="1052">Session starts by weekday and hour, and</text>
-    <text class="t" x="84" y="1071">pushback in the morning, afternoon, evening.</text>
+    <text class="t" x="84" y="1071">pushback by time of day, night to evening.</text>
 
     <rect class="card" x="560" y="996" width="480" height="92" rx="12"/>
     <rect x="560" y="1012" width="4" height="60" rx="2" fill="#c36b95"/>
@@ -226,14 +226,14 @@
     <rect class="card" x="60" y="1158" width="480" height="112" rx="12"/>
     <text class="h4" x="84" y="1188">Try a cheaper model</text>
     <text class="t" x="84" y="1210">Same kind of work and complexity. Cheaper per token,</text>
-    <text class="t" x="84" y="1229">resolves within 5 points, ≤ 70% cost per resolved.</text>
+    <text class="t" x="84" y="1229">as often, no more pushback, ≤ 70% cost per resolved.</text>
     <text class="num" x="84" y="1254">Saving = cost difference × resolved sessions</text>
 
     <rect class="card" x="560" y="1158" width="480" height="112" rx="12"/>
     <text class="h4" x="584" y="1188">Use a newer version of the same model</text>
     <text class="t" x="584" y="1210">Same app and family, newer, cheaper per token,</text>
     <text class="t" x="584" y="1229">resolves about as often (e.g. Opus 4.8 → Opus 5.5).</text>
-    <text class="num" x="584" y="1254">Saving = spend × price difference</text>
+    <text class="num" x="584" y="1254">Saving = spend × (1 − new ÷ current price)</text>
 
     <rect class="card" x="1060" y="1158" width="480" height="112" rx="12"/>
     <text class="h4" x="1084" y="1188">Try a mid-priced model for routine work</text>
@@ -269,7 +269,7 @@
 
     <path d="M356 1462h276l22 40-22 40H356l22-40z" fill="url(#panel)" stroke="rgba(255,255,255,.12)"/>
     <text class="h4" x="392" y="1494">Use your Ollama, or install</text>
-    <text class="s" x="392" y="1514">pinned 0.34.4 · SHA-256 + Apple signature</text>
+    <text class="s" x="392" y="1514">pinned 0.34.4 · SHA-256 + code signature</text>
 
     <path d="M660 1462h276l22 40-22 40H660l22-40z" fill="url(#panel)" stroke="rgba(255,255,255,.12)"/>
     <text class="h4" x="696" y="1494">Download the Jet model</text>

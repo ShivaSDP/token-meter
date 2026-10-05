@@ -160,6 +160,7 @@ class WorkSetup:
         self._thread = None
         self._cancel = threading.Event()
         self._restart = False
+        self._winding_down = False  # the running thread has passed its restart check and will exit
         self._state = {"state": IDLE, "reason": "", "done_bytes": 0, "total_bytes": 0, "needed_bytes": 0}
 
     @property
@@ -188,12 +189,13 @@ class WorkSetup:
     def start(self):
         """Run setup in the background unless it is already running; returns True when started."""
         with self._lock:
-            if self._thread is not None and self._thread.is_alive():
+            if self._thread is not None and self._thread.is_alive() and not self._winding_down:
                 if self._cancel.is_set():
                     self._restart = True  # Turned off and on again before the old run reached a checkpoint.
                     return True
                 return False
             self._restart = False
+            self._winding_down = False
             self._cancel.clear()
             self._state = {"state": CHECKING, "reason": "", "done_bytes": 0, "total_bytes": 0, "needed_bytes": 0}
             self._thread = threading.Thread(target=self._run_safely, name="work-setup", daemon=True)
@@ -220,6 +222,7 @@ class WorkSetup:
             with self._lock:
                 restart, self._restart = self._restart, False
                 restart = restart and self.get_settings().get("enabled", True)
+                self._winding_down = not restart
                 if restart:
                     self._cancel.clear()
                     self._state = {"state": CHECKING, "reason": "", "done_bytes": 0, "total_bytes": 0,

@@ -10,6 +10,9 @@ import statistics
 
 UNCLEAR = "Unclear"
 PENDING = "Pending"
+NO_TEXT = "No request text"  # the trace has no typed request the classifier could read
+OUTSIDE = "Outside history"  # unlabeled and older than the labeling history setting
+UNLABELED = (NO_TEXT, OUTSIDE, PENDING)
 MIN_RATE_SAMPLES = 20
 MAX_MONTHS = 24
 COMPLEXITY_GROUPS = (
@@ -18,6 +21,7 @@ COMPLEXITY_GROUPS = (
     ("complex", ("complex", "high_impact")),
 )
 TIERS = ("light", "standard", "premium")
+COMPLEXITY_ORDER = ("routine", "everyday", "complex")
 WORK_TYPE_ORDER = ("feature", "debug", "refactor", "test", "review", "plan", "explore", "ops", "docs", "other",
                    "unclear")
 
@@ -170,15 +174,16 @@ def _month_shift(month, delta):
 
 
 def build_work_insights(rows, labels, key_for, areas, output_price, months=6,
-                        runtime="", project="", today="", corrections_for=None, pending_keys=None):
+                        runtime="", project="", today="", corrections_for=None, pending_keys=None,
+                        label_since=""):
     """Aggregate labeled sessions. ``months`` is a History choice (see ``parse_period``); 0 is all history."""
     grain, count = _period(months)
     area_names = [a["name"] for a in areas]
     tiers, tier_prices, model_prices = price_tiers(rows, output_price, with_prices=True)
     sessions, runtime_options, project_options = _prepare_sessions(
-        rows, labels, key_for, area_names, tiers, runtime, project, pending_keys, grain)
+        rows, labels, key_for, area_names, tiers, runtime, project, pending_keys, grain, label_since)
     buckets = _window(sessions, grain, count, today)
-    segments = area_names + [UNCLEAR, PENDING]
+    segments = area_names + [UNCLEAR, *UNLABELED]
     return _aggregate(sessions, buckets, set(buckets), segments, area_names, tiers, tier_prices,
                       runtime_options, project_options, today, corrections_for, grain, model_prices)
 
@@ -209,7 +214,8 @@ def _child_counts(rows):
     return counts
 
 
-def _prepare_sessions(rows, labels, key_for, area_names, tiers, runtime, project, pending_keys, grain="month"):
+def _prepare_sessions(rows, labels, key_for, area_names, tiers, runtime, project, pending_keys, grain="month",
+                      label_since=""):
     sessions = []
     child_counts = _child_counts(rows)
     runtime_options, project_options = set(), collections.Counter()
@@ -225,11 +231,16 @@ def _prepare_sessions(rows, labels, key_for, area_names, tiers, runtime, project
         if project and (row.get("project") or "") != project:
             continue
         entry = labels.get(key_for(work_identity(row))) or {}
+        days = [d for d in turn_days(row) if d]
+        start_day = (row.get("start") or "")[:10]
         area = entry.get("area") or PENDING
         if area not in area_names and area not in (UNCLEAR, PENDING):
             area = PENDING
-        days = [d for d in turn_days(row) if d]
-        start_day = (row.get("start") or "")[:10]
+        if area == PENDING:
+            if not days:
+                area = NO_TEXT
+            elif label_since and (start_day or days[0]) < label_since:
+                area = OUTSIDE
         sessions.append({
             "row": row, "entry": entry, "area": area,
             "work_type": entry.get("work_type") or "",
@@ -397,7 +408,7 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
     tag_context = _tag_context(in_window)
     rhythm = _rhythm(in_window)
 
-    labeled_sessions = sum(1 for s in in_window if s["area"] != PENDING)
+    labeled_sessions = sum(1 for s in in_window if s["area"] not in UNLABELED)
     labeled_turns = sum(s["correction_labels"] for s in in_window)
     later_turns = sum(max(0, s["turns"] - 1) for s in in_window)
     return {
@@ -416,6 +427,8 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
         "recommendations": _recommendations(in_window, opportunities, tiers, model_prices or {}),
         "coverage": {
             "sessions": len(in_window), "labeled_sessions": labeled_sessions,
+            "no_text_sessions": sum(1 for s in in_window if s["area"] == NO_TEXT),
+            "outside_sessions": sum(1 for s in in_window if s["area"] == OUTSIDE),
             "turns": later_turns, "labeled_turns": min(labeled_turns, later_turns),
         },
         "filters": {
@@ -662,6 +675,13 @@ MAX_RECOMMENDATIONS = 8
 MIN_RECOMMENDATION_SESSIONS = 3
 
 
+def _pushback_not_worse(candidate, current):
+    """Pushback within five points of the current model's, when both have labeled follow-ups."""
+    if not candidate or not current:
+        return candidate is None or current is None
+    return candidate["rate"] <= current["rate"] + SWITCH_RATE_SLACK
+
+
 def _switch_recommendations(in_window, tiers, prices):
     """Per kind of work and complexity: a model that resolves about as often for much less per resolved session.
 
@@ -683,6 +703,8 @@ def _switch_recommendations(in_window, tiers, prices):
             if judged < MIN_SWITCH_JUDGED or not resolved:
                 continue
             stats.append({"model": model, "runtime": runtime, "sessions": len(group), "judged": judged,
+                          "pushback": _rate(sum(s["corrections"] for s in group),
+                                            sum(s["correction_labels"] for s in group)),
                           "spend": sum(_cost(s) for s in group), "rate": len(resolved) / judged,
                           "resolved": len(resolved), "cost": sum(_cost(s) for s in resolved) / len(resolved)})
         if len(stats) < 2:
@@ -698,12 +720,20 @@ def _switch_recommendations(in_window, tiers, prices):
             return (x is not usual and price is not None and usual_price is not None and price < usual_price
                     and not (level == "routine" and tiers.get((x["runtime"], x["model"])) == "premium")
                     and x["rate"] >= usual["rate"] - SWITCH_RATE_SLACK
+                    and _pushback_not_worse(x["pushback"], usual["pushback"])
                     and x["cost"] <= usual["cost"] * SWITCH_COST_RATIO)
         better = [x for x in stats if eligible(x)]
         if not better:
             continue
         alt = min(better, key=lambda x: x["cost"])
+        harder = [c for c, _members in COMPLEXITY_GROUPS
+                  if COMPLEXITY_ORDER.index(c) > COMPLEXITY_ORDER.index(level)]
+        tried_harder = any(s["model"] == alt["model"] and (s["row"].get("runtime") or "") == alt["runtime"]
+                           and complexity_of.get(s["complexity"]) in harder for s in in_window)
         out.append({"kind": "switch_model", "work_type": work_type, "complexity": level,
+                    "to_untested_harder": bool(harder) and not tried_harder,
+                    "from_pushback": usual["pushback"]["rate"] if usual["pushback"] else None,
+                    "to_pushback": alt["pushback"]["rate"] if alt["pushback"] else None,
                     "model": usual["model"], "runtime": usual["runtime"],
                     "to_model": alt["model"], "to_runtime": alt["runtime"],
                     "from_cost": usual["cost"], "to_cost": alt["cost"],
@@ -835,7 +865,8 @@ DRILL_FILTERS = ("month", "start_month", "area", "work_type", "complexity", "tie
 
 
 def find_sessions(rows, labels, key_for, areas, output_price, filters, months=6, runtime="", project="",
-                  corrections_for=None, pending_keys=None, limit=MAX_DRILL_SESSIONS, ids_only=False, today=""):
+                  corrections_for=None, pending_keys=None, limit=MAX_DRILL_SESSIONS, ids_only=False, today="",
+                  label_since=""):
     """Sessions behind one Work module cell, ranked by spend; same windowing and labels as the aggregates.
 
     ``month`` selects sessions active in that month (as the allocation counts turns and spend);
@@ -846,7 +877,7 @@ def find_sessions(rows, labels, key_for, areas, output_price, filters, months=6,
     tiers = price_tiers(rows, output_price)
     grain, count = _period(months)
     sessions, _runtimes, _projects = _prepare_sessions(
-        rows, labels, key_for, area_names, tiers, runtime, project, pending_keys, grain)
+        rows, labels, key_for, area_names, tiers, runtime, project, pending_keys, grain, label_since)
     all_months = _window(sessions, grain, count, today)
     window = set(all_months)
     tag_context = _tag_context([s for s in sessions if s["start"] in window])
