@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$SmokeTest,
-    [string]$OpenProbePath = ""
+    [string]$OpenProbePath = "",
+    [switch]$Inline
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,6 +10,21 @@ Set-StrictMode -Version Latest
 
 if ($env:OS -ne "Windows_NT") {
     throw "The Token Meter tray requires Windows."
+}
+
+if (-not $SmokeTest -and -not $Inline) {
+    $Shell = Get-Command powershell.exe -CommandType Application -ErrorAction SilentlyContinue
+    if ($Shell) {
+        Start-Process -FilePath $Shell.Source `
+            -ArgumentList @(
+                "-NoLogo", "-NoProfile", "-STA",
+                "-ExecutionPolicy", "Bypass",
+                "-File", "`"$($MyInvocation.MyCommand.Path)`"",
+                "-Inline"
+            ) `
+            -WindowStyle Hidden
+        exit 0
+    }
 }
 
 Add-Type -TypeDefinition @"
