@@ -363,37 +363,10 @@ def _agent_usage_body_projection(usage):
     }
 
 
-AGENT_COMPLETION_FIELDS = ("runs", "finished", "stopped", "running", "unknown", "no_end_evidence", "retry_runs")
-
-
-def _agent_completion_row(item, identity=()):
-    item = item if isinstance(item, Mapping) else {}
-    row = {key: str(item.get(key) or "")[:80] for key in identity}
-    row.update({key: _nonnegative_projection_int(item.get(key)) for key in AGENT_COMPLETION_FIELDS})
-    for key in ("finish_rate", "stopped_cost", "cost_per_finished"):
-        value = item.get(key)
-        row[key] = float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
-    return row
-
-
-def _agent_completion_projection(completion):
-    completion = completion if isinstance(completion, Mapping) else {}
-    return {
-        "overall": _agent_completion_row(completion.get("overall")),
-        "roles": [_agent_completion_row(item, ("id", "role", "runtime"))
-                  for item in list(completion.get("roles") or ())[:40]],
-        "models": [_agent_completion_row(item, ("id", "model", "runtime"))
-                   for item in list(completion.get("models") or ())[:40]],
-        "role_count": _nonnegative_projection_int(completion.get("role_count")),
-        "model_count": _nonnegative_projection_int(completion.get("model_count")),
-    }
-
-
 def agent_usage_projection(usage):
     """Project bounded content-free child-agent analysis for the browser."""
     usage = usage if isinstance(usage, Mapping) else {}
     result = _agent_usage_body_projection(usage)
-    result["completion"] = _agent_completion_projection(usage.get("completion"))
     scopes = []
     raw_scopes = list(usage.get("scopes") or ())
     for item in raw_scopes[:MAX_AGENT_USAGE_SCOPES]:
@@ -442,6 +415,27 @@ def agent_usage_projection(usage):
     result["role_days_truncated"] = (
         bool(usage.get("role_days_truncated"))
         or len(raw_role_days) > MAX_AGENT_ROLE_DAYS
+    )
+    raw_model_days = list(usage.get("model_days") or ())
+    model_days = []
+    for item in raw_model_days[:MAX_AGENT_ROLE_DAYS]:
+        if not isinstance(item, Mapping):
+            continue
+        model_days.append({
+            "day": str(item.get("day") or "")[:10],
+            "project": str(item.get("project") or "")[:1000],
+            "runtime": str(item.get("runtime") or "")[:40],
+            "model": str(item.get("model") or "")[:120],
+            **_agent_totals_projection(item),
+        })
+    result["model_days"] = model_days
+    result["model_day_count"] = max(
+        len(raw_model_days),
+        _nonnegative_projection_int(usage.get("model_day_count")),
+    )
+    result["model_days_truncated"] = (
+        bool(usage.get("model_days_truncated"))
+        or len(raw_model_days) > MAX_AGENT_ROLE_DAYS
     )
     raw_inventory = list(usage.get("inventory") or ())
     inventory = []

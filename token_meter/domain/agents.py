@@ -597,55 +597,6 @@ def _usage_body(entries):
     }
 
 
-MAX_COMPLETION_ROWS = 40
-
-
-def _completion_row(records, reports_end=None):
-    """``reports_end``: runtimes that record a finish; their unfinished runs are incomplete, others unknown."""
-    finished = [r for r in records if r["activity_state"] == "complete"]
-    ended_without = [r for r in records if r["activity_state"] == "incomplete"]
-    stopped = [r for r in ended_without if reports_end is None or r["runtime"] in reports_end]
-    ended = len(finished) + len(stopped)
-    finished_cost = [r["cost"] for r in finished if r["cost_available"]]
-    return {
-        "runs": len(records),
-        "finished": len(finished),
-        "stopped": len(stopped),
-        "running": sum(r["activity_state"] == "working" for r in records),
-        "unknown": sum(r["activity_state"] == "unknown" for r in records),
-        "no_end_evidence": len(ended_without) - len(stopped),
-        # Share of runs that reached their end, among runs that are no longer running.
-        "finish_rate": len(finished) / ended if ended else None,
-        "stopped_cost": round(sum(r["cost"] for r in stopped if r["cost_available"]), 6),
-        "cost_per_finished": (sum(finished_cost) / len(finished_cost)) if finished_cost else None,
-        "retry_runs": sum(1 for r in records if r["retries"] or r["failed_attempts"]),
-    }
-
-
-def _completion(records):
-    """Do child runs reach their end? Overall, by role, and by model (runtime-scoped)."""
-    children = [r for r in records if r["kind"] != "root"]
-    # Some runtimes (OpenCode today) never record that a child run finished; an ended run there is unknown.
-    reports_end = {r["runtime"] for r in children if r["activity_state"] == "complete"}
-
-    def grouped(key_fn, label_fn):
-        groups = defaultdict(list)
-        for record in children:
-            key = key_fn(record)
-            if key:
-                groups[key].append(record)
-        rows = [dict(label_fn(key), **_completion_row(members, reports_end)) for key, members in groups.items()]
-        rows.sort(key=lambda row: (-row["stopped"], -row["runs"], row["id"]))
-        return rows[:MAX_COMPLETION_ROWS], len(rows)
-
-    roles, role_count = grouped(lambda r: (r["runtime"], r["role"]) if r.get("role") else None,
-                                lambda key: {"id": f"{key[1]}::{key[0]}", "role": key[1], "runtime": key[0]})
-    models, model_count = grouped(lambda r: (r["runtime"], r["model"]) if r.get("model") else None,
-                                  lambda key: {"id": f"{key[1]}::{key[0]}", "model": key[1], "runtime": key[0]})
-    return {"overall": _completion_row(children, reports_end), "roles": roles, "role_count": role_count,
-            "models": models, "model_count": model_count}
-
-
 def _agent_activity_timestamp(record):
     for key in ("last_activity_at", "ended_at", "started_at"):
         value = record.get(key)
@@ -705,7 +656,6 @@ def aggregate_agent_usage(
             entries.append((record, group))
 
     result = _usage_body(entries)
-    result["completion"] = _completion([record for record, _group in entries])
     # Records whose parent could not be resolved are counted in totals but have
     # no group, so the rollup must disclose them rather than look complete.
     unresolved_records = [
@@ -727,9 +677,17 @@ def aggregate_agent_usage(
         if isinstance(item, dict)
     }
     role_day_groups = defaultdict(list)
+    model_day_groups = defaultdict(list)
     for record, group in entries:
         timestamp = _agent_activity_timestamp(record)
-        if not record.get("role") or timestamp is None:
+        if timestamp is None:
+            continue
+        if record.get("model"):
+            model_day_groups[(
+                time.strftime("%Y-%m-%d", time.localtime(timestamp)),
+                str(group.get("_project") or ""), record["runtime"], record["model"],
+            )].append(record)
+        if not record.get("role"):
             continue
         key = (
             time.strftime("%Y-%m-%d", time.localtime(timestamp)),
@@ -769,6 +727,14 @@ def aggregate_agent_usage(
     result["role_days"] = role_days[:max_role_days]
     result["role_day_count"] = len(role_days)
     result["role_days_truncated"] = len(role_days) > max_role_days
+    model_days = [{
+        "day": day, "project": project, "runtime": runtime, "model": model,
+        **_detailed_totals(members),
+    } for (day, project, runtime, model), members in model_day_groups.items()]
+    model_days.sort(key=lambda row: (row["day"], row["runtime"], row["model"], row["project"]), reverse=True)
+    result["model_days"] = model_days[:max_role_days]
+    result["model_day_count"] = len(model_days)
+    result["model_days_truncated"] = len(model_days) > max_role_days
     inventory = [
         _inventory_row(record, group, attention, now)
         for record, group in entries

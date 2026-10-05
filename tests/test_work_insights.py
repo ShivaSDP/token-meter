@@ -152,10 +152,14 @@ class TextPreparationTests(unittest.TestCase):
         tags = W.question_tags(values)
         turn = service._turn_key("s1", 0)
         service.ledger.record_label(turn, "work_type", key, "debug", 0.4, tags["work_type"], "d", clock.now)
-        service.ledger.record_label(turn, "area", key, "Non-code", 0.35, tags["area"], "d", clock.now)
+        service.ledger.record_label(turn, "area", key, "Non-code", 0.2, tags["area"], "d", clock.now)
         service.labels_version += 1
         entry = service.snapshot()[key]
         self.assertEqual((entry["work_type"], entry["area"]), ("debug", "Unclear"))
+        service.ledger.record_label(turn, "area", key, "Non-code", 0.33, tags["area"], "d", clock.now + 1)
+        service.labels_version += 1
+        entry = service.snapshot()[key]
+        self.assertEqual((entry["area"], entry.get("area_guess")), ("Non-code", True))
 
     def test_skips_injected_messages(self):
         for text in ("<task-notification>done</task-notification>", "# AGENTS.md instructions",
@@ -2100,31 +2104,6 @@ class SwitchGuardTests(unittest.TestCase):
         self.assertFalse(switch["to_untested_harder"])
 
 
-class SubagentCompletionTests(unittest.TestCase):
-    def record(self, ident, state, cost=1.0, role="tester", model="m", runtime="codex", retries=0):
-        return {"id": ident, "kind": "spawned", "activity_state": state, "cost": cost, "cost_available": True,
-                "retries": retries, "failed_attempts": 0, "role": role, "model": model, "runtime": runtime}
-
-    def test_finish_rate_counts_only_runs_that_ended(self):
-        from token_meter.domain import agents
-        records = [self.record("a", "complete", 2.0), self.record("b", "complete", 4.0),
-                   self.record("c", "incomplete", 5.0, retries=2), self.record("d", "working"),
-                   {**self.record("root", "complete"), "kind": "root"}]
-        out = agents._completion(records)
-        overall = out["overall"]
-        self.assertEqual((overall["runs"], overall["finished"], overall["stopped"], overall["running"]), (4, 2, 1, 1))
-        self.assertAlmostEqual(overall["finish_rate"], 2 / 3)
-        self.assertEqual((overall["stopped_cost"], overall["cost_per_finished"], overall["retry_runs"]), (5.0, 3.0, 1))
-        self.assertEqual(out["roles"][0]["role"], "tester")
-        no_end = [self.record("o1", "incomplete", 3.0, runtime="opencode"), self.record("o2", "incomplete", runtime="opencode")]
-        mixed = agents._completion(records + no_end)["overall"]
-        self.assertEqual((mixed["stopped"], mixed["no_end_evidence"], mixed["stopped_cost"]), (1, 2, 5.0))
-        self.assertAlmostEqual(mixed["finish_rate"], 2 / 3)
-        projected = __import__("token_meter.projections", fromlist=["x"])._agent_completion_projection(out)
-        self.assertEqual(set(projected), {"overall", "roles", "models", "role_count", "model_count"})
-        self.assertEqual(projected["roles"][0]["runtime"], "codex")
-
-
 class LiveHintTests(unittest.TestCase):
     PRICES = {"gpt-5.6": 10.0, "cheap": 1.0, "mid": 4.0, "claude-opus-4-8": 25.0, "claude-opus-5-5": 20.0}
 
@@ -2191,17 +2170,12 @@ class LiveHintTests(unittest.TestCase):
             page = handle.read()
         with open(os.path.join(root, "menubar", "TokenMeterMenuBar.swift"), encoding="utf-8") as handle:
             swift = handle.read()
-        for marker in ("class=currentSessionHints", "id=sa-completion", "Do subagents finish?", "id=work-live-notify",
-                       "live_notifications:event.target.checked", "renderSubagentCompletion(usage);"):
+        for marker in ("class=currentSessionHints", "id=work-live-notify", "live_notifications:event.target.checked"):
             self.assertIn(marker, page)
-        self.assertLess(page.index("let subagentCompletionDim"), page.index("function applyHashRoute(){"))
+        self.assertNotIn("Do subagents finish?", page)
         for marker in ("evaluateLiveHintNotifications", '"TokenMeterLiveHintNotificationIDs"', 'dict["live_hints"]',
                        'dict["live_hints_enabled"]', "if enabled && !liveHintsWereEnabled { liveHintsSeeded = false }"):
             self.assertIn(marker, swift)
-        # A failed outcome load waits before retrying instead of refetching on every live refresh.
-        self.assertIn("SUBAGENT_OUTCOME_RETRY_MS=60000", page)
-        self.assertNotIn("if(subagentOutcomeState==='error')subagentOutcomesRequested=false;", page)
-        self.assertIn("data-open-issues", page)
 
 
 class ReservedAreaMigrationTests(unittest.TestCase):
@@ -2211,3 +2185,37 @@ class ReservedAreaMigrationTests(unittest.TestCase):
         self.assertEqual([a["name"] for a in areas], ["Mobile", "Outside history (area)"])
         with self.assertRaises(ValueError):
             W.normalize_areas([{"name": "Not labeled yet", "description": "x"}, {"name": "Web", "description": "y"}])
+
+
+class SubagentModelTrendTests(unittest.TestCase):
+    def test_model_days_are_aggregated_projected_and_rendered(self):
+        from token_meter.domain import agents
+        from token_meter import projections
+        record = {"id": "c1", "kind": "spawned", "parent_id": "root", "runtime": "codex", "model": "gpt-5.6-terra",
+                  "role": "tester", "activity_state": "complete", "cost": 2.0, "cost_available": True,
+                  "tokens": 10, "tokens_available": True, "last_activity_at": 1_790_000_000, "retries": 0,
+                  "failed_attempts": 0, "executions": 1, "depth": 1}
+        record = agents._normalize_record(record, "r", "p")
+        usage = agents.aggregate_agent_usage([{"_all_agents": [record], "root_session_id": "r", "_project": "p"}],
+                                             now=1_790_000_100)
+        self.assertEqual([(row["model"], row["agents"]) for row in usage["model_days"]], [("gpt-5.6-terra", 1)])
+        projected = projections.agent_usage_projection(usage)
+        self.assertEqual(projected["model_days"][0]["model"], "gpt-5.6-terra")
+        self.assertFalse(projected["model_days_truncated"])
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "page.html"),
+                  encoding="utf-8") as handle:
+            page = handle.read()
+        for marker in ("<h4>Model trends</h4>", "data-subagent-inspect-model", "function openSubagentModelRuns(",
+                       "modelTrends:buildSubagentModelTrends(usage,filters,nowMs)", "<h4>Role trends</h4>"):
+            self.assertIn(marker, page)
+
+
+class AreaGuessTests(unittest.TestCase):
+    def test_low_confidence_area_guesses_count_in_their_area_and_are_tracked(self):
+        sure, guess = row("sure", cost=4.0), row("guess", cost=6.0)
+        labels = {"sure": {"area": "Personal"}, "guess": {"area": "Personal", "area_guess": True}}
+        out = domain.build_work_insights([sure, guess], labels, lambda ident: ident.split("\0")[0], DomainTests.AREAS,
+                                         lambda m, p: None, today="2026-09-30")
+        september = next(b for b in out["allocation"] if b["month"] == "2026-09")
+        self.assertEqual(september["spend"]["Personal"], 10.0)
+        self.assertEqual((september["guess_spend"], september["guess_sessions"]), ({"Personal": 6.0}, {"Personal": 1}))

@@ -488,7 +488,12 @@ sent to the classifier.
   routine work, long session, newer cheaper sibling model); the menu bar
   notifies once per session and suggestion (`live_hints`, setting
   `live_notifications`).
-- `agent_usage.completion` (agents domain, projected) reports finished,
-  stopped early, running, and retried child runs overall, by role, and by
-  model; the Work payload adds `subagent_outcomes` (with vs without
-  subagents). The Subagents page renders both in "Do subagents finish?".
+- A "Do subagents finish?" card on the Subagents page was built and then
+  removed at the user's request (2026-10-05); the page keeps role trends and
+  adds model trends instead.
+- Area guesses: answers between 0.25 and 0.4 keep the model's area as a
+  flagged low-confidence guess (`area_guess`, allocation `guess_spend` and
+  `guess_sessions`); below 0.25 stays Unclear. Evidence (3 months): $324 of
+  $397 Unclear spend was one multi-area project (a developer tool with a UI).
+- Subagents page: model trends (`agent_usage.model_days`, projected) below
+  role trends, sharing the Cost / run · Spend · Runs switch and "View runs".

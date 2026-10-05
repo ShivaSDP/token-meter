@@ -242,7 +242,7 @@ def _prepare_sessions(rows, labels, key_for, area_names, tiers, runtime, project
             elif label_since and max(days) < label_since:  # the classifier skips by newest activity
                 area = OUTSIDE
         sessions.append({
-            "row": row, "entry": entry, "area": area,
+            "row": row, "entry": entry, "area": area, "area_guess": bool(entry.get("area_guess")) and area in area_names,
             "work_type": entry.get("work_type") or "",
             "complexity": entry.get("complexity") or "",
             "days": days, "start": _bucket(start_day or (days[0] if days else ""), grain),
@@ -303,7 +303,7 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
     for month in all_months:
         bucket = {"month": month, "partial": bool(today and _bucket(today, grain) == month),
                   "turns": dict.fromkeys(segments, 0), "sessions": dict.fromkeys(segments, 0),
-                  "spend": dict.fromkeys(segments, 0.0)}
+                  "spend": dict.fromkeys(segments, 0.0), "guess_spend": {}, "guess_sessions": {}}
         allocation.append(bucket)
     by_month = {b["month"]: b for b in allocation}
     for s in sessions:
@@ -313,10 +313,15 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
                 bucket["turns"][s["area"]] += 1
         if s["start"] in by_month:
             by_month[s["start"]]["sessions"][s["area"]] += 1
+            if s["area_guess"]:
+                guesses = by_month[s["start"]]["guess_sessions"]
+                guesses[s["area"]] = guesses.get(s["area"], 0) + 1
         for day, cost in _day_costs(s).items():
             bucket = by_month.get(_bucket(str(day), grain))
             if bucket:
                 bucket["spend"][s["area"]] += float(cost or 0)
+                if s["area_guess"]:
+                    bucket["guess_spend"][s["area"]] = round(bucket["guess_spend"].get(s["area"], 0.0) + float(cost or 0), 6)
     for bucket in allocation:
         for measure in ("turns", "sessions", "spend"):
             values = bucket[measure]
@@ -434,7 +439,6 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
         "tags": _tag_summary(in_window, tag_context),
         "rhythm": rhythm,
         "recommendations": _recommendations(in_window, opportunities, tiers, model_prices or {}),
-        "subagent_outcomes": _subagent_outcomes(in_window),
         "coverage": {
             "sessions": len(in_window), "labeled_sessions": labeled_sessions,
             "no_text_sessions": sum(1 for s in in_window if s["area"] == NO_TEXT),
@@ -446,27 +450,6 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
             "projects": [name for name, _ in project_options.most_common(50)],
         },
     }
-
-
-def _outcome_summary(group):
-    outcomes = [_outcome(s) for s in group]
-    judged = sum(o in ("accepted", "recovered", "ended_on_pushback") for o in outcomes)
-    resolved = [s for s, o in zip(group, outcomes) if o in ("accepted", "recovered")]
-    return {
-        "sessions": len(group), "judged_sessions": judged,
-        "resolved_rate": len(resolved) / judged if judged else None,
-        "ended_on_pushback": sum(o == "ended_on_pushback" for o in outcomes),
-        "pushback": _rate(sum(s["corrections"] for s in group), sum(s["correction_labels"] for s in group)),
-        "cost_per_resolved": sum(_cost(s) for s in resolved) / len(resolved) if resolved else None,
-        "spend": round(sum(_cost(s) for s in group), 6),
-    }
-
-
-def _subagent_outcomes(in_window):
-    """How sessions that ran subagents ended, next to sessions that did not (labels are estimates)."""
-    multi = [s for s in in_window if s["turns"] > 1]
-    return {"with": _outcome_summary([s for s in multi if s["children"]]),
-            "without": _outcome_summary([s for s in multi if not s["children"]])}
 
 
 def _trend_point(day, grain):

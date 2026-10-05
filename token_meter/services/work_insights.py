@@ -43,6 +43,9 @@ ACTIVE_WINDOW_S = 600
 UNCLEAR_CONFIDENCE = 0.5
 # Per-question Unclear cutoffs, from the live-label audit (work type is right far more often than 0.5 implies).
 UNCLEAR_BY_QUESTION = {"work_type": 0.35, "area": 0.4, "correction": 0.5}
+# Between this and the area cutoff the model's best area is kept as a low-confidence guess: a request that fits
+# two areas (for example a developer tool with a UI) splits the model's confidence without being wrong.
+AREA_GUESS_CONFIDENCE = 0.25
 # Bump when prompt wording, options, or turn selection changes; stale labels are shown until relabeled.
 PROMPT_VERSION = "p2"
 # Per-question prompt versions: bumping one relabels only that question.
@@ -1334,7 +1337,10 @@ class WorkInsightsService:
             entry = sessions.setdefault(row["session_key"], {})
             unclear = float(row["confidence"]) < cutoff(question)
             if question == "area":
-                entry["area"] = "Unclear" if unclear else row["value"]
+                guess = unclear and float(row["confidence"]) >= AREA_GUESS_CONFIDENCE
+                entry["area"] = row["value"] if guess or not unclear else "Unclear"
+                if guess:
+                    entry["area_guess"] = True
             elif question == "complexity":
                 entry["complexity"] = row["value"]
             elif question == "work_type":

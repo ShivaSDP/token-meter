@@ -62,7 +62,12 @@ position bias. Labels carry a per-question prompt version
 (`QUESTION_VERSIONS`: work type and area `p3`, complexity and pushback `p2`);
 changing one relabels only that question. Area labels count whenever their
 taxonomy hash matches, so older labels show until replaced. Cutoffs apply when
-labels are read, so changing one needs no relabeling. (The 0.4 area cutoff
+labels are read, so changing one needs no relabeling. An area answer between
+0.25 and the 0.4 cutoff is kept as a **low-confidence guess** (`area_guess`):
+it counts in that area, and the bar shows its spend lighter with a
+"low-confidence" count. A request that fits two areas, such as work on a
+developer tool with a UI, splits the model's confidence without being wrong;
+in one 3-month check this moved Unclear from about $400 to $14. (The 0.4 area cutoff
 labels 98% of a synthetic set at 81% accuracy, against 90% at 84% for 0.5.)
 
 Sessions without a label fall in one of three groups, shown muted after the
@@ -182,29 +187,7 @@ sent only while Work insights are on and **Notify me about live suggestions**
 is checked (`live_notifications`, on by default within Work insights). The
 first poll after installing only records what is already showing.
 
-## 7. Subagents: do they finish?
-
-The Subagents page opens with **Do subagents finish?**, from the child-agent
-records Token Meter already reads (`agent_usage.completion`):
-
-- **Finished**: the run's trace reached its end. **Incomplete**: it ended
-  without finishing (interrupted or crashed). **Still running** runs are left
-  out of the finish rate, and so are ended runs from apps that never record a
-  finish (OpenCode today), which count as "without a recorded finish".
-  **Retried**: at least one retry or failed attempt.
-- Per role and per model (scoped by app): runs, finish rate, incomplete runs,
-  spend on them, and cost per finished run, most incomplete first; rows with
-  a finish rate under 80% (3+ ended runs) are highlighted. The card covers all
-  apps, projects, and time; the page filters below it do not apply.
-- **How the sessions ended** compares sessions with and without subagents
-  (two or more requests each) using Work labels over all history: resolved
-  rate, pushback, and cost per resolved session. It is a pattern, not a cause: sessions that use
-  subagents are often bigger jobs.
-
-Finished does not prove the result was right; the outcome comparison is the
-signal for that.
-
-## 8. Limits
+## 7. Limits
 
 - Labels come from a 4B local model and are estimates; misclassified
   complexity or work type moves a session into the wrong comparison.
