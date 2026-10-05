@@ -390,26 +390,28 @@ function Show-UsagePanel {
     if (-not $script:UsagePanel.Visible) { $script:UsagePanel.Show() }
 }
 
-function Update-UsagePanel($State) {
+function Set-PanelText([string]$Text) {
     if ($null -eq $script:UsagePanel -or -not $script:PanelVisible) { return }
+    $script:PanelLabel.Text = $Text
     try {
-        $Text = Format-PanelText $State
-        $script:PanelLabel.Text = $Text
         $Measured = [System.Windows.Forms.TextRenderer]::MeasureText($Text, $script:PanelLabel.Font)
         $NewWidth = [Math]::Max(280, [Math]::Min(900, $Measured.Width + 36))
         $script:UsagePanel.ClientSize = New-Object System.Drawing.Size($NewWidth, 30)
     } catch { }
 }
 
-function Set-PanelHoverText {
+function Update-UsagePanel($State) {
     if ($null -eq $script:UsagePanel -or -not $script:PanelVisible) { return }
+    Set-PanelText (Format-PanelText $State)
+}
+
+function Set-PanelHoverText {
     $Base = if ($script:LastState) { Format-PanelText $script:LastState } else { "Token Meter - waiting for server" }
-    $script:PanelLabel.Text = "$Base | Right-click for options"
+    Set-PanelText "$Base | Right-click for options"
 }
 
 function Clear-PanelHoverText {
-    if ($null -eq $script:UsagePanel -or -not $script:PanelVisible) { return }
-    $script:PanelLabel.Text = if ($script:LastState) { Format-PanelText $script:LastState } else { "Token Meter - waiting for server" }
+    Set-PanelText (if ($script:LastState) { Format-PanelText $script:LastState } else { "Token Meter - waiting for server" })
 }
 
 function Start-UsagePanelDrag($Sender, $EventArgs) {
