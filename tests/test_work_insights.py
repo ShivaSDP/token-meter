@@ -1393,7 +1393,7 @@ class SessionTagProjectionTests(unittest.TestCase):
             payload = meter.dashboard_state_payload({"source": dict(source)})
             other = meter.work_session_tags({"id": "sess-1", "path": "/traces/fork.jsonl"})
         self.assertIsNone(other)
-        self.assertEqual(set(tags), {"area", "work_type", "complexity", "corrections", "labeled_turns"})
+        self.assertEqual(set(tags), {"area", "area_guess", "work_type", "complexity", "corrections", "labeled_turns"})
         self.assertEqual(payload["work_tags"], tags)
         self.assertNotIn("zebra", json.dumps(payload))
         self.assertNotIn("/traces", json.dumps(payload["work_tags"]))
