@@ -5,6 +5,7 @@ Pure functions over cached session summary rows and content-free classifier labe
 
 import collections
 import datetime
+import re
 import statistics
 
 UNCLEAR = "Unclear"
@@ -63,7 +64,7 @@ def price_tiers(rows, output_price, with_prices=False):
                 prices[key] = float(price)
     distinct = sorted(set(prices.values()))
     if not distinct:
-        return ({}, {}) if with_prices else {}
+        return ({}, {}, {}) if with_prices else {}
     if len(distinct) == 1:
         tiers = {key: "standard" for key in prices}
     else:
@@ -77,7 +78,7 @@ def price_tiers(rows, output_price, with_prices=False):
     by_tier = collections.defaultdict(list)
     for key, name in tiers.items():
         by_tier[name].append(prices[key])
-    return tiers, {name: statistics.median(values) for name, values in by_tier.items()}
+    return tiers, {name: statistics.median(values) for name, values in by_tier.items()}, prices
 
 
 def _month(day):
@@ -173,13 +174,13 @@ def build_work_insights(rows, labels, key_for, areas, output_price, months=6,
     """Aggregate labeled sessions. ``months`` is a History choice (see ``parse_period``); 0 is all history."""
     grain, count = _period(months)
     area_names = [a["name"] for a in areas]
-    tiers, tier_prices = price_tiers(rows, output_price, with_prices=True)
+    tiers, tier_prices, model_prices = price_tiers(rows, output_price, with_prices=True)
     sessions, runtime_options, project_options = _prepare_sessions(
         rows, labels, key_for, area_names, tiers, runtime, project, pending_keys, grain)
     buckets = _window(sessions, grain, count, today)
     segments = area_names + [UNCLEAR, PENDING]
     return _aggregate(sessions, buckets, set(buckets), segments, area_names, tiers, tier_prices,
-                      runtime_options, project_options, today, corrections_for, grain)
+                      runtime_options, project_options, today, corrections_for, grain, model_prices)
 
 
 def _root_agent_id(row):
@@ -277,7 +278,7 @@ def _attach_sequences(sessions, corrections_for):
 
 
 def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tier_prices,
-               runtime_options, project_options, today, corrections_for, grain="month"):
+               runtime_options, project_options, today, corrections_for, grain="month", model_prices=None):
     allocation = []
     for month in all_months:
         bucket = {"month": month, "partial": bool(today and _bucket(today, grain) == month),
@@ -412,7 +413,7 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
         "opportunities": opportunities,
         "tags": _tag_summary(in_window, tag_context),
         "rhythm": rhythm,
-        "recommendations": _recommendations(in_window, opportunities),
+        "recommendations": _recommendations(in_window, opportunities, tiers, model_prices or {}),
         "coverage": {
             "sessions": len(in_window), "labeled_sessions": labeled_sessions,
             "turns": later_turns, "labeled_turns": min(labeled_turns, later_turns),
@@ -649,6 +650,9 @@ def _rhythm(in_window):
 
 
 MIN_SWITCH_JUDGED = 5
+MIN_BASELINE_JUDGED = 10
+MIN_FAMILY_JUDGED = 5
+MAX_NAMED_MODELS = 3
 SWITCH_COST_RATIO = 0.7
 SWITCH_RATE_SLACK = 0.05
 SHORT_THREAD_TURNS = 10
@@ -658,7 +662,7 @@ MAX_RECOMMENDATIONS = 8
 MIN_RECOMMENDATION_SESSIONS = 3
 
 
-def _switch_recommendations(in_window):
+def _switch_recommendations(in_window, tiers, prices):
     """Per kind of work and complexity: a model that resolves about as often for much less per resolved session.
 
     Comparing within one complexity level keeps a cheaper model that only saw easier requests from looking better.
@@ -678,14 +682,24 @@ def _switch_recommendations(in_window):
             resolved = [s for s, o in zip(group, outcomes) if o in ("accepted", "recovered")]
             if judged < MIN_SWITCH_JUDGED or not resolved:
                 continue
-            stats.append({"model": model, "runtime": runtime, "sessions": len(group),
+            stats.append({"model": model, "runtime": runtime, "sessions": len(group), "judged": judged,
                           "spend": sum(_cost(s) for s in group), "rate": len(resolved) / judged,
                           "resolved": len(resolved), "cost": sum(_cost(s) for s in resolved) / len(resolved)})
         if len(stats) < 2:
             continue
         usual = max(stats, key=lambda x: (x["sessions"], x["spend"]))
-        better = [x for x in stats if x is not usual and x["rate"] >= usual["rate"] - SWITCH_RATE_SLACK
-                  and x["cost"] <= usual["cost"] * SWITCH_COST_RATIO]
+        if usual["judged"] < MIN_BASELINE_JUDGED:
+            continue
+        usual_price = prices.get((usual["runtime"], usual["model"]))
+
+        def eligible(x):
+            price = prices.get((x["runtime"], x["model"]))
+            # A per-token cheaper model is required, so easier sessions alone cannot make a model look cheaper.
+            return (x is not usual and price is not None and usual_price is not None and price < usual_price
+                    and not (level == "routine" and tiers.get((x["runtime"], x["model"])) == "premium")
+                    and x["rate"] >= usual["rate"] - SWITCH_RATE_SLACK
+                    and x["cost"] <= usual["cost"] * SWITCH_COST_RATIO)
+        better = [x for x in stats if eligible(x)]
         if not better:
             continue
         alt = min(better, key=lambda x: x["cost"])
@@ -719,11 +733,68 @@ def _long_thread_recommendation(in_window):
             "saving": round(max(0.0, spend - long_turns * short_rate), 6)}
 
 
-def _recommendations(in_window, opportunities):
+def model_family(name):
+    """Model name without version numbers or vendor prefixes: claude-opus-4-8 and claude-opus-5-5 share one family."""
+    text = str(name or "").lower().rsplit("/", 1)[-1]
+    text = re.sub(r"^[a-z]+\.(?=[a-z])", "", text)
+    text = re.sub(r"-v\d+(?::\d+)?$", "", text)
+    return "-".join(part for part in re.split(r"[-_]", text) if part and not re.fullmatch(r"[\d.]+", part))
+
+
+def _model_outcomes(group):
+    outcomes = [_outcome(s) for s in group]
+    judged = sum(o in ("accepted", "recovered", "ended_on_pushback") for o in outcomes)
+    resolved = sum(o in ("accepted", "recovered") for o in outcomes)
+    return judged, (resolved / judged if judged else None)
+
+
+def _family_recommendations(in_window, prices):
+    """A cheaper version from the same model family and app that resolves about as often for this user."""
+    groups = collections.defaultdict(list)
+    for s in in_window:
+        if s["model"]:
+            groups[(s["row"].get("runtime") or "", s["model"])].append(s)
+    stats = {}
+    for key, group in groups.items():
+        judged, rate = _model_outcomes(group)
+        if key in prices and judged >= MIN_FAMILY_JUDGED:
+            stats[key] = {"judged": judged, "rate": rate, "sessions": len(group),
+                          "spend": sum(_cost(s) for s in group), "price": prices[key]}
+    out = []
+    for (runtime, model), current in stats.items():
+        siblings = [(key, other) for key, other in stats.items()
+                    if key[0] == runtime and key[1] != model and model_family(key[1]) == model_family(model)
+                    and other["price"] < current["price"] and other["rate"] >= current["rate"] - SWITCH_RATE_SLACK]
+        if not siblings or current["spend"] <= 0:
+            continue
+        (_runtime, to_model), alt = min(siblings, key=lambda item: (item[1]["price"], -item[1]["rate"]))
+        out.append({"kind": "family_upgrade", "model": model, "runtime": runtime, "to_model": to_model,
+                    "to_runtime": runtime, "from_price": current["price"], "to_price": alt["price"],
+                    "from_rate": current["rate"], "to_rate": alt["rate"], "sessions": current["sessions"],
+                    "spend": round(current["spend"], 6),
+                    "saving": round(current["spend"] * (1 - alt["price"] / current["price"]), 6)})
+    return out
+
+
+def _named_models(sessions, limit=MAX_NAMED_MODELS):
+    spend = collections.Counter()
+    for s in sessions:
+        if s["model"]:
+            spend[(s["model"], s["row"].get("runtime") or "")] += _cost(s) or 1e-9
+    return [{"model": model, "runtime": runtime} for (model, runtime), _ in spend.most_common(limit)]
+
+
+def _recommendations(in_window, opportunities, tiers, prices):
     """Ranked ways to spend less on models; savings are estimates and can overlap between items."""
     recs = [dict(item, saving=round(item["spend"] - item["estimate"], 6) if item["estimate"] is not None else None)
             for item in opportunities if item["sessions"] >= MIN_RECOMMENDATION_SESSIONS]
-    recs.extend(_switch_recommendations(in_window))
+    for item in recs:
+        if item["kind"] == "premium_routine":
+            routine = [s for s in in_window if s["complexity"] == "routine"]
+            item["from_models"] = _named_models([s for s in routine if s["tier"] == "premium"])
+            item["to_models"] = _named_models([s for s in in_window if s["tier"] == "standard"], 2)
+    recs.extend(_switch_recommendations(in_window, tiers, prices))
+    recs.extend(_family_recommendations(in_window, prices))
     long = _long_thread_recommendation(in_window)
     if long:
         recs.append(long)

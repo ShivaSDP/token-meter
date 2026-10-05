@@ -440,3 +440,16 @@ sent to the classifier.
   default names is kept. Settings writes are serialized.
 - Model-switch suggestions compare models within one complexity level and name
   the app when it differs. The unused KPI payload was removed.
+
+### Suggestion fixes (2026-10-05)
+
+- `switch_model` requires the alternative to be cheaper per token (catalog
+  output price) than the current model, never points routine work at a
+  premium model, and needs ten judged sessions for the current model (five for
+  the alternative). A per-token pricier model with a low observed cost per
+  resolved session was only seeing smaller requests.
+- New `family_upgrade`: same app and model family (name without version
+  numbers or vendor prefix), cheaper per token, resolved rate within five
+  points, five judged sessions each; saving = spend × (1 − price ratio).
+- `premium_routine` names up to three premium models used on routine work and
+  the two most-used standard models (`from_models`, `to_models`).

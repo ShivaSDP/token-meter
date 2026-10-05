@@ -256,15 +256,26 @@ question it also reads the last 600 characters of the assistant reply before
 your turn. Tool output and files are never read, and cloud-proxied Ollama
 models are refused.
 
-- **Right-sizing** comes first. Its suggestions, each with sessions, spend,
-  and an estimated saving: a model that resolves a kind of work within five
-  points as often for at most 70% of the cost per resolved session (at least
-  five judged sessions each); a standard model for routine work on premium
-  models; lower reasoning effort on routine work; a stronger model for complex
-  work that got pushback on light models; and fresh sessions sooner when
-  sessions with 30+ requests cost at least 1.5× more per request than sessions
-  with 10 or fewer. Savings can overlap. Below them, spend is split by model
-  tier and reasoning effort; striped segments are the mismatches.
+- **Right-sizing** comes first. Model tiers rank the models you use by catalog
+  output price into thirds; premium is your most expensive third. Suggestions,
+  each with sessions, spend, and an estimated saving:
+  - *Try a cheaper model* for one kind of work at one complexity level, when a
+    model that costs less per token resolves within five points as often for at
+    most 70% of the cost per resolved session. The current model needs ten
+    judged sessions there and the alternative five; routine work is never
+    pointed at a premium model.
+  - *Use a newer version of the same model* (for example Opus 5.5 instead of
+    Opus 4.8) when it is cheaper per token in the same app and resolves about as
+    often across your sessions (five judged sessions each). The saving applies
+    the price difference to the older model's spend.
+  - *Use a mid-priced model for routine work*, naming the premium models used
+    and your most-used standard ones.
+  - *Lower reasoning effort on routine work*, *use a stronger model for complex
+    work* that got pushback on light models, and *start a fresh session sooner*
+    when sessions with 30+ requests cost at least 1.5× more per request than
+    sessions with 10 or fewer.
+  Savings can overlap. Below them, spend is split by model tier and reasoning
+  effort; striped segments are the mismatches.
 - **Where the spend went** lists spend by area for sessions started in the
   period, with a small trend line across the period. Not labeled yet and
   Unclear (the model was not confident) appear last.

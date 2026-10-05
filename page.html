@@ -1206,7 +1206,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 	   </div>
 	  </section>
   <section class="card workSizing" id=w-module-sizing>
-   <div class=workCardHead><div><h2 class=fieldtip tabindex=0 aria-description="Spend by request complexity, split by model tier and reasoning effort. Savings are estimates." data-tip="Spend by request complexity, split by model tier and reasoning effort. Savings are estimates.">Right-sizing</h2><div class=subline>Ways to spend less on models without losing results. Savings are estimates.</div></div></div>
+   <div class=workCardHead><div><h2 class=fieldtip tabindex=0 aria-description="Spend by request complexity, split by model tier and reasoning effort. Savings are estimates." data-tip="Spend by request complexity, split by model tier and reasoning effort. Savings are estimates.">Right-sizing</h2><div class=subline>Ways to spend less on models without losing results. Savings are estimates. Model tiers rank the models you use by price: premium is your most expensive third.</div></div></div>
    <div class=workSavings id=w-savings></div>
    <div class=workTableWrap><table class=workIssues id=w-opportunities></table></div>
    <div class="workSplit workMixSplit">
@@ -6091,7 +6091,12 @@ function workFlagReason(cell){
 function workSuggestion(item){
  const work=WORK_TYPE_LABELS[item.work_type]||item.work_type||'';
  switch(item.kind){
-  case 'premium_routine':return{title:'Use a standard model for routine work',detail:`${item.sessions.toLocaleString()} routine session${item.sessions===1?'':'s'} ran on premium models.`,drill:{complexity:item.complexity,tier:item.tier}};
+  case 'premium_routine':{
+   const names=(list,joiner)=>(list||[]).map(entry=>entry.model).join(joiner);
+   const from=names(item.from_models,', '),to=names(item.to_models,' or ');
+   return{title:to?`Use ${to} for routine work`:'Use a cheaper model for routine work',detail:`${item.sessions.toLocaleString()} routine request${item.sessions===1?'':'s'} ran on your most expensive models${from?` (${from})`:''}.${to?` ${item.to_models.length===1?'It is':'Both are'} among your mid-priced models.`:''}`,drill:{complexity:item.complexity,tier:item.tier}};
+  }
+  case 'family_upgrade':return{title:`Use ${item.to_model} instead of ${item.model}`,detail:`Same model family in ${item.runtime}: ${Math.round(100*(1-item.to_price/item.from_price))}% cheaper per token, and it resolved ${workPercent(item.to_rate)} of your sessions vs ${workPercent(item.from_rate)}.`,drill:{model:item.model,model_runtime:item.runtime}};
   case 'effort_routine':return{title:`Lower reasoning effort on routine work`,detail:`${item.sessions.toLocaleString()} routine session${item.sessions===1?'':'s'} used ${item.effort} effort.`,drill:{complexity:item.complexity,effort:item.effort}};
   case 'light_complex':return{title:'Use a stronger model for complex work',detail:`Complex work on light models got pushback on ${workPercent(item.rework?.rate)} of follow-ups.`,drill:{complexity:item.complexity,tier:item.tier}};
   case 'switch_model':{

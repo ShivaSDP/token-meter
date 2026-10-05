@@ -1835,27 +1835,80 @@ class TagHighlightRhythmTests(unittest.TestCase):
         self.assertEqual(bands["evening"]["pushback"]["rate"], 0.5)
         self.assertIsNone(bands["night"]["pushback"])
 
-    def test_recommendations_suggest_a_cheaper_model_that_resolves_as_often(self):
+    def sessions(self, model, count, cost, complexity="everyday", work_type="debug", prefix=None, runtime="Codex"):
         rows, labels, sequences = [], {}, {}
-        for i in range(12):
-            model, cost = ("gpt-5.6", 10.0) if i < 6 else ("cheap", 2.0)
-            r = row(f"m{i}", model=model, cost=cost)
-            rows.append(r)
-            labels[f"m{i}"] = {"work_type": "debug", "complexity": "everyday", "correction_labels": 2, "corrections": 0}
-            sequences[f"m{i}"] = [(1, False), (2, False)]
-        rows.append(row("m12", model="gpt-5.6", cost=10.0))
-        labels["m12"] = {"work_type": "debug", "complexity": "everyday", "correction_labels": 2, "corrections": 0}
-        sequences["m12"] = [(1, False), (2, False)]
+        for i in range(count):
+            key = f"{prefix or model}{i}"
+            rows.append(row(key, model=model, cost=cost, runtime=runtime))
+            labels[key] = {"work_type": work_type, "complexity": complexity, "correction_labels": 2, "corrections": 0}
+            sequences[key] = [(1, False), (2, False)]
+        return rows, labels, sequences
+
+    def combine(self, *parts):
+        rows, labels, sequences = [], {}, {}
+        for r, l, q in parts:
+            rows += r
+            labels.update(l)
+            sequences.update(q)
+        return rows, labels, sequences
+
+    def test_recommendations_suggest_a_cheaper_model_that_resolves_as_often(self):
+        rows, labels, sequences = self.combine(self.sessions("gpt-5.6", 12, 10.0), self.sessions("cheap", 10, 2.0))
         recs = self.build(rows, labels, sequences)["recommendations"]
         switch = next(r for r in recs if r["kind"] == "switch_model")
         self.assertEqual((switch["model"], switch["to_model"], switch["work_type"], switch["complexity"]),
                          ("gpt-5.6", "cheap", "debug", "everyday"))
-        self.assertEqual(switch["saving"], 8.0 * 7)
-        # A cheap model that only handled routine requests is not compared with complex ones.
-        for i in range(6, 12):
-            labels[f"m{i}"]["complexity"] = "routine"
+        self.assertEqual(switch["saving"], 8.0 * 12)
+        # A cheap model that only handled routine requests is not compared with everyday ones.
+        for key in labels:
+            if key.startswith("cheap"):
+                labels[key]["complexity"] = "routine"
         recs = self.build(rows, labels, sequences)["recommendations"]
         self.assertFalse(any(r["kind"] == "switch_model" for r in recs))
+
+    def test_switch_needs_enough_judged_sessions_and_a_cheaper_per_token_model(self):
+        few = self.combine(self.sessions("gpt-5.6", 12, 10.0), self.sessions("cheap", 4, 2.0))
+        self.assertFalse(any(r["kind"] == "switch_model" for r in self.build(*few)["recommendations"]))
+        thin_baseline = self.combine(self.sessions("gpt-5.6", 8, 10.0), self.sessions("cheap", 6, 2.0))
+        self.assertFalse(any(r["kind"] == "switch_model" for r in self.build(*thin_baseline)["recommendations"]))
+        # "mid" costs less per resolved session here only because its sessions were small; it is not cheaper per token.
+        pricier = self.combine(self.sessions("cheap", 12, 10.0), self.sessions("mid", 10, 2.0))
+        self.assertFalse(any(r["kind"] == "switch_model" for r in self.build(*pricier)["recommendations"]))
+
+    def test_routine_work_is_never_pointed_at_a_premium_model(self):
+        self.PRICES = dict(self.PRICES, premium2=9.0, six=6.0)
+        parts = self.combine(self.sessions("gpt-5.6", 12, 10.0, "routine"), self.sessions("premium2", 10, 2.0, "routine"),
+                             self.sessions("cheap", 1, 1.0, "routine"), self.sessions("mid", 1, 1.0, "routine"),
+                             self.sessions("six", 1, 1.0, "routine"))
+        out = self.build(*parts)
+        tiers = {(c["complexity"], c["tier"]) for c in out["right_sizing"]["cells"] if c["sessions"]}
+        self.assertIn(("routine", "premium"), tiers)
+        recs = out["recommendations"]
+        self.assertFalse(any(r["kind"] == "switch_model" and r["to_model"] == "premium2" for r in recs))
+
+    def test_family_upgrade_suggests_the_cheaper_version_of_the_same_model(self):
+        self.PRICES = {"claude-opus-4-8": 25.0, "claude-opus-5-5": 20.0, "claude-sonnet-5": 10.0}
+        parts = self.combine(self.sessions("claude-opus-4-8", 6, 10.0, runtime="Claude"),
+                             self.sessions("claude-opus-5-5", 5, 10.0, runtime="Claude", work_type="feature"),
+                             self.sessions("claude-sonnet-5", 5, 1.0, runtime="Claude"))
+        recs = self.build(*parts)["recommendations"]
+        family = [r for r in recs if r["kind"] == "family_upgrade"]
+        self.assertEqual([(r["model"], r["to_model"]) for r in family], [("claude-opus-4-8", "claude-opus-5-5")])
+        self.assertAlmostEqual(family[0]["saving"], 60.0 * (1 - 20 / 25))
+
+    def test_model_family_ignores_versions_and_vendor_prefixes(self):
+        self.assertEqual(domain.model_family("claude-opus-4-8"), domain.model_family("claude-opus-5-5"))
+        self.assertEqual(domain.model_family("gpt-5.6-sol"), domain.model_family("gpt-6-sol"))
+        self.assertNotEqual(domain.model_family("gpt-5.6-sol"), domain.model_family("gpt-5.6-terra"))
+        self.assertEqual(domain.model_family("anthropic.claude-haiku-4-5-20251001-v1:0"),
+                         domain.model_family("claude-haiku-4-5-20251001"))
+
+    def test_routine_on_premium_names_the_models_to_move_from_and_to(self):
+        parts = self.combine(self.sessions("gpt-5.6", 4, 5.0, "routine"), self.sessions("mid", 2, 1.0),
+                             self.sessions("cheap", 2, 1.0))
+        item = next(r for r in self.build(*parts)["recommendations"] if r["kind"] == "premium_routine")
+        self.assertEqual(item["from_models"], [{"model": "gpt-5.6", "runtime": "Codex"}])
+        self.assertEqual(item["to_models"], [{"model": "mid", "runtime": "Codex"}])
 
     def test_recommendations_flag_long_threads_that_cost_more_per_request(self):
         rows = [row(f"s{i}", cost=1.0, turns_=5) for i in range(5)]
