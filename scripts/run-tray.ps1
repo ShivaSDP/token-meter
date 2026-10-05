@@ -401,18 +401,31 @@ function Set-PanelText([string]$Text) {
     } catch { }
 }
 
+function Refresh-PanelText {
+    $Base = if ($script:CurrentPanelText) { $script:CurrentPanelText } else { "Token Meter - waiting for server" }
+    if ($script:PanelHovering) {
+        Set-PanelText "$Base | Right-click for options"
+    } else {
+        Set-PanelText $Base
+    }
+}
+
 function Update-UsagePanel($State) {
     if ($null -eq $script:UsagePanel -or -not $script:PanelVisible) { return }
-    Set-PanelText (Format-PanelText $State)
+    $script:CurrentPanelText = Format-PanelText $State
+    Refresh-PanelText
 }
 
 function Set-PanelHoverText {
-    $Base = if ($script:LastState) { Format-PanelText $script:LastState } else { "Token Meter - waiting for server" }
-    Set-PanelText "$Base | Right-click for options"
+    if ($script:PanelHovering) { return }
+    $script:PanelHovering = $true
+    Refresh-PanelText
 }
 
 function Clear-PanelHoverText {
-    Set-PanelText (if ($script:LastState) { Format-PanelText $script:LastState } else { "Token Meter - waiting for server" })
+    if (-not $script:PanelHovering) { return }
+    $script:PanelHovering = $false
+    Refresh-PanelText
 }
 
 function Start-UsagePanelDrag($Sender, $EventArgs) {
@@ -457,6 +470,8 @@ $script:TrayExiting = $false
 $script:UsagePanelDragActive = $false
 $script:UsagePanelDragCursor = $null
 $script:UsagePanelDragOrigin = $null
+$script:PanelHovering = $false
+$script:CurrentPanelText = "Token Meter - waiting for server"
 
 function Write-TrayStatus([bool]$Ready, [bool]$Connected) {
     $Record = [ordered]@{
