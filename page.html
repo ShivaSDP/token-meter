@@ -5920,7 +5920,7 @@ function workSetupCopy(setup){
   downloading_model:['Setup','Downloading the classifier model',`${progress} · the download resumes if it is interrupted.`],
   importing:['Setup','Preparing the model','Converting it to a 4-bit model. This can take a few minutes.'],
   failed:['Setup',{network:'The download didn’t finish',verify:'A download didn’t match its checksum',disk_space:'Not enough disk space',ollama_start:'Ollama didn’t start',ollama_offline:'Ollama isn’t running',import:'Importing the model failed'}[setup.reason]||'Setup stopped',
-   {network:'Check the internet connection, then select Retry setup.',verify:'The file was deleted. Select Retry setup to download it again.',disk_space:`Free up about ${workGigabytes(setup.needed_bytes)}, then select Retry setup.`,ollama_start:'Select Retry setup to try again.',ollama_offline:'Open the Ollama app on this Mac, then select Retry setup.',import:'Select Retry setup to try again.'}[setup.reason]||'Select Retry setup to try again.'],
+   {network:'Check the internet connection, then select Retry setup.',verify:'The file was deleted. Select Retry setup to download it again.',disk_space:`Free up about ${workGigabytes(setup.needed_bytes)}, then select Retry setup.`,ollama_start:'Select Retry setup to try again.',ollama_offline:'Start Ollama on this Mac (open the Ollama app or run ollama serve), then select Retry setup.',import:'Select Retry setup to try again.'}[setup.reason]||'Select Retry setup to try again.'],
  }[setup.state]||null;
 }
 async function refreshWorkStatus(){
@@ -5952,7 +5952,8 @@ function renderWorkStatus(payload){
  const shown=setupCopy||copy;
  const pill=$('w-state');pill.dataset.state=setupCopy?(setup.state==='failed'?'setup_needed':'running'):state;pill.textContent=shown[0];
  $('w-status-title').textContent=shown[1];$('w-status-detail').textContent=shown[2];
- $('w-setup-retry').hidden=!(setup&&(setup.state==='failed'||(state==='setup_needed'&&setup.state!=='ready'&&!WORK_SETUP_ACTIVE.includes(setup.state))));
+ const setupState=status.setup?.state;
+ $('w-setup-retry').hidden=!(settings.enabled&&status.setup&&!WORK_SETUP_ACTIVE.includes(setupState)&&(setupState==='failed'||state==='setup_needed'));
  clearTimeout(workSetupTimer);
  if(setup&&WORK_SETUP_ACTIVE.includes(setup.state))workSetupTimer=setTimeout(refreshWorkStatus,4000);
  $('w-pause-wrap').hidden=!settings.enabled||state==='paused';
@@ -6092,11 +6093,11 @@ function workSuggestion(item){
  const work=WORK_TYPE_LABELS[item.work_type]||item.work_type||'';
  switch(item.kind){
   case 'premium_routine':{
-   const names=(list,joiner)=>(list||[]).map(entry=>entry.model).join(joiner);
-   const from=names(item.from_models,', '),to=names(item.to_models,' or ');
-   return{title:to?`Use ${to} for routine work`:'Use a cheaper model for routine work',detail:`${item.sessions.toLocaleString()} routine request${item.sessions===1?'':'s'} ran on your most expensive models${from?` (${from})`:''}.${to?` ${item.to_models.length===1?'It is':'Both are'} among your mid-priced models.`:''}`,drill:{complexity:item.complexity,tier:item.tier}};
+   const from=(item.from_models||[]).map(entry=>entry.model).join(', ');
+   const to=(item.to_models||[]).map(entry=>`${entry.model} in ${entry.runtime}`).join(' or ');
+   return{title:to?`Try ${to} for routine work`:'Use a cheaper model for routine work',detail:`${item.sessions.toLocaleString()} routine session${item.sessions===1?'':'s'} ran on your most expensive models${from?` (${from})`:''}.${to?` ${item.to_models.length===1?'That model is':'Those are'} your most-used mid-priced model${item.to_models.length===1?'':'s'} in the same app.`:''}`,drill:{complexity:item.complexity,tier:item.tier}};
   }
-  case 'family_upgrade':return{title:`Use ${item.to_model} instead of ${item.model}`,detail:`Same model family in ${item.runtime}: ${Math.round(100*(1-item.to_price/item.from_price))}% cheaper per token, and it resolved ${workPercent(item.to_rate)} of your sessions vs ${workPercent(item.from_rate)}.`,drill:{model:item.model,model_runtime:item.runtime}};
+  case 'family_upgrade':return{title:`Use ${item.to_model} instead of ${item.model}`,detail:`A newer version in ${item.runtime}: ${Math.round(100*(1-item.to_price/item.from_price))}% cheaper per token. It resolved ${workPercent(item.to_rate)} of your sessions, vs ${workPercent(item.from_rate)} on ${item.model}.`,drill:{model:item.model,model_runtime:item.runtime}};
   case 'effort_routine':return{title:`Lower reasoning effort on routine work`,detail:`${item.sessions.toLocaleString()} routine session${item.sessions===1?'':'s'} used ${item.effort} effort.`,drill:{complexity:item.complexity,effort:item.effort}};
   case 'light_complex':return{title:'Use a stronger model for complex work',detail:`Complex work on light models got pushback on ${workPercent(item.rework?.rate)} of follow-ups.`,drill:{complexity:item.complexity,tier:item.tier}};
   case 'switch_model':{

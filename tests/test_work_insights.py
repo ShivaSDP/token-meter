@@ -1888,13 +1888,21 @@ class TagHighlightRhythmTests(unittest.TestCase):
 
     def test_family_upgrade_suggests_the_cheaper_version_of_the_same_model(self):
         self.PRICES = {"claude-opus-4-8": 25.0, "claude-opus-5-5": 20.0, "claude-sonnet-5": 10.0}
-        parts = self.combine(self.sessions("claude-opus-4-8", 6, 10.0, runtime="Claude"),
+        parts = self.combine(self.sessions("claude-opus-4-8", 10, 10.0, runtime="Claude"),
                              self.sessions("claude-opus-5-5", 5, 10.0, runtime="Claude", work_type="feature"),
                              self.sessions("claude-sonnet-5", 5, 1.0, runtime="Claude"))
         recs = self.build(*parts)["recommendations"]
         family = [r for r in recs if r["kind"] == "family_upgrade"]
         self.assertEqual([(r["model"], r["to_model"]) for r in family], [("claude-opus-4-8", "claude-opus-5-5")])
-        self.assertAlmostEqual(family[0]["saving"], 60.0 * (1 - 20 / 25))
+        self.assertAlmostEqual(family[0]["saving"], 100.0 * (1 - 20 / 25))
+        thin = self.combine(self.sessions("claude-opus-4-8", 6, 10.0, runtime="Claude"),
+                            self.sessions("claude-opus-5-5", 5, 10.0, runtime="Claude"))
+        self.assertFalse(any(r["kind"] == "family_upgrade" for r in self.build(*thin)["recommendations"]))
+
+    def test_family_upgrade_never_points_at_an_older_version(self):
+        self.PRICES = {"gpt-5.6": 20.0, "gpt-5.4": 15.0}
+        parts = self.combine(self.sessions("gpt-5.6", 10, 10.0), self.sessions("gpt-5.4", 10, 10.0))
+        self.assertFalse(any(r["kind"] == "family_upgrade" for r in self.build(*parts)["recommendations"]))
 
     def test_model_family_ignores_versions_and_vendor_prefixes(self):
         self.assertEqual(domain.model_family("claude-opus-4-8"), domain.model_family("claude-opus-5-5"))
@@ -1902,6 +1910,12 @@ class TagHighlightRhythmTests(unittest.TestCase):
         self.assertNotEqual(domain.model_family("gpt-5.6-sol"), domain.model_family("gpt-5.6-terra"))
         self.assertEqual(domain.model_family("anthropic.claude-haiku-4-5-20251001-v1:0"),
                          domain.model_family("claude-haiku-4-5-20251001"))
+        self.assertEqual(domain.model_family("us.anthropic.claude-opus-4-8-v1:0"), "claude-opus")
+        self.assertEqual(domain.model_family("claude-opus-4-8[1m]"), "claude-opus")
+        self.assertEqual(domain.model_version("claude-opus-4-8[1m]"), (4, 8))
+        self.assertEqual(domain.model_version("claude-haiku-4-5-20251001"), (4, 5))
+        self.assertGreater(domain.model_version("claude-opus-5"), domain.model_version("claude-opus-4-8"))
+        self.assertLess(domain.model_version("gpt-5.4"), domain.model_version("gpt-5.6"))
 
     def test_routine_on_premium_names_the_models_to_move_from_and_to(self):
         parts = self.combine(self.sessions("gpt-5.6", 4, 5.0, "routine"), self.sessions("mid", 2, 1.0),
@@ -1909,6 +1923,10 @@ class TagHighlightRhythmTests(unittest.TestCase):
         item = next(r for r in self.build(*parts)["recommendations"] if r["kind"] == "premium_routine")
         self.assertEqual(item["from_models"], [{"model": "gpt-5.6", "runtime": "Codex"}])
         self.assertEqual(item["to_models"], [{"model": "mid", "runtime": "Codex"}])
+        other_app = self.combine(self.sessions("gpt-5.6", 4, 5.0, "routine"),
+                                 self.sessions("mid", 2, 1.0, runtime="Claude"), self.sessions("cheap", 2, 1.0))
+        item = next(r for r in self.build(*other_app)["recommendations"] if r["kind"] == "premium_routine")
+        self.assertEqual(item["to_models"], [])
 
     def test_recommendations_flag_long_threads_that_cost_more_per_request(self):
         rows = [row(f"s{i}", cost=1.0, turns_=5) for i in range(5)]
@@ -2005,4 +2023,4 @@ class ReviewFixTests(unittest.TestCase):
                                          lambda m, p: None, today="2026-09-30")
         long = next(r for r in out["recommendations"] if r["kind"] == "long_threads")
         tag = next(t for t in out["tags"]["items"] if t["tag"] == "long_thread")
-        self.assertEqual(long["sessions"], tag["sessions"], 6)
+        self.assertEqual((long["sessions"], tag["sessions"]), (6, 6))

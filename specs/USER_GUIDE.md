@@ -266,10 +266,11 @@ models are refused.
     pointed at a premium model.
   - *Use a newer version of the same model* (for example Opus 5.5 instead of
     Opus 4.8) when it is cheaper per token in the same app and resolves about as
-    often across your sessions (five judged sessions each). The saving applies
-    the price difference to the older model's spend.
-  - *Use a mid-priced model for routine work*, naming the premium models used
-    and your most-used standard ones.
+    often across your sessions (ten judged sessions on the current model, five
+    on the newer one). Older versions are never suggested. The saving applies
+    the price difference to the current model's spend.
+  - *Try a mid-priced model for routine work*, naming the premium models used
+    and, for each app they ran in, your most-used standard model there.
   - *Lower reasoning effort on routine work*, *use a stronger model for complex
     work* that got pushback on light models, and *start a fresh session sooner*
     when sessions with 30+ requests cost at least 1.5× more per request than

@@ -2135,7 +2135,9 @@ _work_settings_write_lock = threading.Lock()
 
 def set_work_insights_settings(values, path=None):
     """Validate and persist work-insight settings atomically. Unknown fields are rejected."""
-    with _work_settings_write_lock:  # The setup thread writes too; serialize read-modify-write.
+    path = path or TOKEN_METER_SETTINGS
+    # The setup thread writes too, and budget saves rewrite the same file; share the per-file lock.
+    with _work_settings_write_lock, _budget_settings_lock(path):
         return _set_work_insights_settings(values, path)
 
 

@@ -55,7 +55,8 @@ JET_FILES = (
 IMPORT_RESERVE_BYTES = sum(size for _path, size, _digest in JET_FILES) + 3 * 1024 ** 3
 CHUNK = 1 << 20
 CLI_CANDIDATES = ("/usr/local/bin/ollama", "/opt/homebrew/bin/ollama",
-                  "/Applications/Ollama.app/Contents/Resources/ollama")
+                  "/Applications/Ollama.app/Contents/Resources/ollama",
+                  "~/Applications/Ollama.app/Contents/Resources/ollama")
 # An installed Ollama that is not answering yet (for example at login) gets this long to come up.
 OWN_OLLAMA_WAIT_S = 120
 MACHO_MAGIC = {b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}
@@ -158,6 +159,7 @@ class WorkSetup:
         self._lock = threading.Lock()
         self._thread = None
         self._cancel = threading.Event()
+        self._restart = False
         self._state = {"state": IDLE, "reason": "", "done_bytes": 0, "total_bytes": 0, "needed_bytes": 0}
 
     @property
@@ -187,7 +189,11 @@ class WorkSetup:
         """Run setup in the background unless it is already running; returns True when started."""
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
+                if self._cancel.is_set():
+                    self._restart = True  # Turned off and on again before the old run reached a checkpoint.
+                    return True
                 return False
+            self._restart = False
             self._cancel.clear()
             self._state = {"state": CHECKING, "reason": "", "done_bytes": 0, "total_bytes": 0, "needed_bytes": 0}
             self._thread = threading.Thread(target=self._run_safely, name="work-setup", daemon=True)
@@ -207,6 +213,19 @@ class WorkSetup:
 
     def _run_safely(self):
         try:
+            self._run_once()
+        finally:
+            with self._lock:
+                restart, self._restart = self._restart, False
+            if restart:
+                with self._lock:
+                    self._cancel.clear()
+                    self._state = {"state": CHECKING, "reason": "", "done_bytes": 0, "total_bytes": 0,
+                                   "needed_bytes": 0}
+                self._run_safely()
+
+    def _run_once(self):
+        try:
             self.run()
         except SetupError as error:
             if error.reason == "cancelled":
@@ -222,7 +241,7 @@ class WorkSetup:
         url, cli = self._ollama(settings["ollama_url"])
         has_model = self._has_model(url, settings["model"])
         if has_model is None:
-            raise SetupError("ollama_start")
+            raise SetupError("ollama_start" if url == MANAGED_URL else "ollama_offline")
         if not has_model:
             folder = self._download_model()
             self._checkpoint()
@@ -288,7 +307,8 @@ class WorkSetup:
         return MANAGED_URL, binary
 
     def _find_cli(self):
-        for path in CLI_CANDIDATES:
+        for candidate in CLI_CANDIDATES:
+            path = os.path.expanduser(candidate)
             if os.path.isfile(path) and os.access(path, os.X_OK):
                 return path
         return None

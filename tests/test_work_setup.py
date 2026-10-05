@@ -252,7 +252,7 @@ class WorkSetupTests(unittest.TestCase):
             setup = self.make()
             setup.opener = setup.loopback_opener = flaky
             setup._run_safely()
-        self.assertEqual(setup.status()["reason"], "ollama_start")
+        self.assertEqual(setup.status()["reason"], "ollama_offline")
         self.assertFalse(any("huggingface" in u for u in self.urls))
 
     def test_port_conflict_unloads_the_agent(self):
@@ -328,6 +328,41 @@ class WorkSetupTests(unittest.TestCase):
             with self.assertRaises(S.SetupError):
                 setup.run()
         self.assertFalse(os.path.exists(setup.binary))
+
+    def test_turning_back_on_during_a_cancel_restarts_setup(self):
+        import threading
+        self.ollama["http://127.0.0.1:11434"] = {"version": "0.34.4", "models": ["token-meter-jet:latest"]}
+        gate, runs = threading.Event(), []
+        with mock.patch.object(S, "CLI_CANDIDATES", (self.runner_path(),)):
+            setup = self.make()
+            original = setup.run
+
+            def run():
+                runs.append(1)
+                if len(runs) == 1:
+                    gate.wait(5)
+                    setup._checkpoint()
+                original()
+            setup.run = run
+            self.assertTrue(setup.start())
+            setup._cancel.set()
+            self.assertTrue(setup.start())  # Re-enabled while the old run is still winding down.
+            gate.set()
+            setup._thread.join(5)
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(setup.status()["state"], "ready")
+
+    def test_ollama_in_the_users_applications_folder_is_found(self):
+        home = os.path.join(self.tmp.name, "home")
+        app = os.path.join(home, "Applications", "Ollama.app", "Contents", "Resources")
+        os.makedirs(app)
+        with open(os.path.join(app, "ollama"), "w") as handle:
+            handle.write("#!/bin/sh\n")
+        os.chmod(os.path.join(app, "ollama"), 0o755)
+        self.assertIn("~/Applications/Ollama.app/Contents/Resources/ollama", S.CLI_CANDIDATES)
+        with mock.patch.dict(os.environ, {"HOME": home}), \
+                mock.patch.object(S, "CLI_CANDIDATES", ("~/Applications/Ollama.app/Contents/Resources/ollama",)):
+            self.assertEqual(self.make()._find_cli(), os.path.join(app, "ollama"))
 
     def test_pinned_sources_and_versions(self):
         self.assertTrue(S.OLLAMA_ARCHIVE_URL.startswith("https://github.com/ollama/ollama/releases/download/v0.34.4/"))

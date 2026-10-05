@@ -453,3 +453,11 @@ sent to the classifier.
   points, five judged sessions each; saving = spend × (1 − price ratio).
 - `premium_routine` names up to three premium models used on routine work and
   the two most-used standard models (`from_models`, `to_models`).
+- Review follow-up: `family_upgrade` requires a newer parsed version (version
+  tuple from the name; `[1m]`, region and vendor prefixes, `-v1:0`, and date
+  stamps are ignored) and ten judged sessions on the current model.
+  `premium_routine` targets one standard model per app the premium routine
+  work ran in. Setup: re-enabling during a cancel restarts setup; Ollama in
+  `~/Applications` counts as installed; an own Ollama that stops answering
+  reports `ollama_offline`; Work settings writes share the per-file settings
+  lock with budgets; uninstall always cleans the default locations.

@@ -733,12 +733,28 @@ def _long_thread_recommendation(in_window):
             "saving": round(max(0.0, spend - long_turns * short_rate), 6)}
 
 
+def _model_name_parts(name):
+    text = str(name or "").lower().rsplit("/", 1)[-1]
+    text = re.sub(r"\[[^\]]*\]$", "", text)  # context-size markers such as [1m]
+    while re.match(r"^[a-z]+\.(?=[a-z])", text):  # vendor or region prefixes such as us.anthropic.
+        text = re.sub(r"^[a-z]+\.", "", text, count=1)
+    text = re.sub(r"-v\d+(?::\d+)?$", "", text)
+    text = re.sub(r"-\d{8}$", "", text)  # release date stamps
+    parts = [part for part in re.split(r"[-_]", text) if part]
+    numbers = [part for part in parts if re.fullmatch(r"\d+(?:\.\d+)*", part)]
+    family = "-".join(part for part in parts if part not in numbers)
+    version = tuple(int(piece) for part in numbers for piece in part.split("."))
+    return family, version
+
+
 def model_family(name):
     """Model name without version numbers or vendor prefixes: claude-opus-4-8 and claude-opus-5-5 share one family."""
-    text = str(name or "").lower().rsplit("/", 1)[-1]
-    text = re.sub(r"^[a-z]+\.(?=[a-z])", "", text)
-    text = re.sub(r"-v\d+(?::\d+)?$", "", text)
-    return "-".join(part for part in re.split(r"[-_]", text) if part and not re.fullmatch(r"[\d.]+", part))
+    return _model_name_parts(name)[0]
+
+
+def model_version(name):
+    """Version numbers in a model name as a tuple, e.g. (4, 8) for claude-opus-4-8; empty when there are none."""
+    return _model_name_parts(name)[1]
 
 
 def _model_outcomes(group):
@@ -749,7 +765,7 @@ def _model_outcomes(group):
 
 
 def _family_recommendations(in_window, prices):
-    """A cheaper version from the same model family and app that resolves about as often for this user."""
+    """A newer, cheaper version from the same model family and app that resolves about as often for this user."""
     groups = collections.defaultdict(list)
     for s in in_window:
         if s["model"]:
@@ -762,8 +778,12 @@ def _family_recommendations(in_window, prices):
                           "spend": sum(_cost(s) for s in group), "price": prices[key]}
     out = []
     for (runtime, model), current in stats.items():
+        version = model_version(model)
+        if current["judged"] < MIN_BASELINE_JUDGED or not version:
+            continue
         siblings = [(key, other) for key, other in stats.items()
                     if key[0] == runtime and key[1] != model and model_family(key[1]) == model_family(model)
+                    and model_version(key[1]) > version
                     and other["price"] < current["price"] and other["rate"] >= current["rate"] - SWITCH_RATE_SLACK]
         if not siblings or current["spend"] <= 0:
             continue
@@ -792,7 +812,12 @@ def _recommendations(in_window, opportunities, tiers, prices):
         if item["kind"] == "premium_routine":
             routine = [s for s in in_window if s["complexity"] == "routine"]
             item["from_models"] = _named_models([s for s in routine if s["tier"] == "premium"])
-            item["to_models"] = _named_models([s for s in in_window if s["tier"] == "standard"], 2)
+            # One mid-priced model per app the premium routine work ran in, so advice stays within that app.
+            item["to_models"] = []
+            for runtime in dict.fromkeys(m["runtime"] for m in item["from_models"]):
+                choice = _named_models([s for s in in_window if s["tier"] == "standard"
+                                        and (s["row"].get("runtime") or "") == runtime], 1)
+                item["to_models"].extend(choice)
     recs.extend(_switch_recommendations(in_window, tiers, prices))
     recs.extend(_family_recommendations(in_window, prices))
     long = _long_thread_recommendation(in_window)

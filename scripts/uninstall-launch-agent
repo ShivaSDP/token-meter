@@ -8,8 +8,9 @@ SERVER_PLIST="$HOME/Library/LaunchAgents/$SERVER_LABEL.plist"
 MENUBAR_PLIST="$HOME/Library/LaunchAgents/$MENUBAR_LABEL.plist"
 OLLAMA_LABEL="com.token-meter.ollama"
 OLLAMA_PLIST="$HOME/Library/LaunchAgents/$OLLAMA_LABEL.plist"
-OLLAMA_DIR="${TOKEN_METER_OLLAMA_DIR:-$HOME/Library/Application Support/Token Meter/ollama}"
-SETUP_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/token-meter"
+# The server LaunchAgent never sets path overrides, so always clean the default locations it uses.
+OLLAMA_DIR="$HOME/Library/Application Support/Token Meter/ollama"
+SETUP_CACHE="$HOME/.cache/token-meter"
 
 REMOVED_WORK_SETUP=0
 if [ -e "$OLLAMA_PLIST" ] || [ -d "$OLLAMA_DIR" ]; then
