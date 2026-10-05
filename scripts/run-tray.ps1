@@ -352,11 +352,23 @@ function Set-PanelPosition($Panel, $X, $Y) {
     $Panel.Location = New-Object System.Drawing.Point($ClampedX, $ClampedY)
 }
 
+function Show-UsagePanel {
+    $SavedX = [int]($script:TraySettings["panel_x"])
+    $SavedY = [int]($script:TraySettings["panel_y"])
+    if ($SavedX -ge 0 -and $SavedY -ge 0) {
+        Set-PanelPosition $script:UsagePanel $SavedX $SavedY
+    } else {
+        $WorkArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+        Set-PanelPosition $script:UsagePanel ($WorkArea.Right - $script:UsagePanel.Width - 12) ($WorkArea.Bottom - $script:UsagePanel.Height - 48)
+    }
+    if (-not $script:UsagePanel.Visible) { $script:UsagePanel.Show() }
+}
+
 function Update-UsagePanel($State) {
     if ($null -eq $script:UsagePanel -or -not $script:PanelVisible) { return }
-    $Text = Format-PanelText $State
-    $script:PanelLabel.Text = $Text
     try {
+        $Text = Format-PanelText $State
+        $script:PanelLabel.Text = $Text
         $Measured = [System.Windows.Forms.TextRenderer]::MeasureText($Text, $script:PanelLabel.Font)
         $NewWidth = [Math]::Max(280, [Math]::Min(900, $Measured.Width + 36))
         $script:UsagePanel.ClientSize = New-Object System.Drawing.Size($NewWidth, 30)
@@ -375,11 +387,9 @@ function Start-UsagePanelDrag($Sender, $EventArgs) {
 function Move-UsagePanelDrag {
     if (-not $script:UsagePanelDragActive) { return }
     $Cursor = [System.Windows.Forms.Control]::MousePosition
-    $script:UsagePanel.Location = New-Object System.Drawing.Point(
-        ($script:UsagePanelDragOrigin.X + $Cursor.X - $script:UsagePanelDragCursor.X),
+    Set-PanelPosition $script:UsagePanel `
+        ($script:UsagePanelDragOrigin.X + $Cursor.X - $script:UsagePanelDragCursor.X) `
         ($script:UsagePanelDragOrigin.Y + $Cursor.Y - $script:UsagePanelDragCursor.Y)
-    )
-    Set-PanelPosition $script:UsagePanel $script:UsagePanel.Left $script:UsagePanel.Top
 }
 
 function Stop-UsagePanelDrag {
@@ -387,6 +397,11 @@ function Stop-UsagePanelDrag {
     $script:UsagePanelDragActive = $false
     $script:UsagePanel.Capture = $false
     Set-PanelPosition $script:UsagePanel $script:UsagePanel.Left $script:UsagePanel.Top
+    try {
+        $script:TraySettings["panel_x"] = $script:UsagePanel.Left
+        $script:TraySettings["panel_y"] = $script:UsagePanel.Top
+        Save-TraySettings $SettingsPath $script:TraySettings
+    } catch { }
 }
 
 $RuntimeRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -660,11 +675,14 @@ $script:PanelLabel.add_MouseLeave({
     } catch { }
 })
 $script:UsagePanel.add_LocationChanged({
-    try {
-        $script:TraySettings["panel_x"] = $script:UsagePanel.Left
-        $script:TraySettings["panel_y"] = $script:UsagePanel.Top
-        Save-TraySettings $SettingsPath $script:TraySettings
-    } catch { }
+    # Only persist position when the user is actively dragging.
+    if ($script:UsagePanelDragActive) {
+        try {
+            $script:TraySettings["panel_x"] = $script:UsagePanel.Left
+            $script:TraySettings["panel_y"] = $script:UsagePanel.Top
+            Save-TraySettings $SettingsPath $script:TraySettings
+        } catch { }
+    }
 })
 $script:UsagePanel.add_FormClosing({
     param($s, $e)
@@ -674,14 +692,11 @@ $script:UsagePanel.add_FormClosing({
     )) { $e.Cancel = $true }
 })
 $script:UsagePanel.add_VisibleChanged({
+    # Restore panel if Windows hides it unexpectedly (shell transitions, etc.).
+    # Direct call is safe: Show() fires VisibleChanged(true) and the guard
+    # below returns immediately on that re-entry.
     if (-not $script:TrayExiting -and $script:PanelVisible -and -not $script:UsagePanel.Visible) {
-        try {
-            $script:UsagePanel.BeginInvoke([System.Action]{
-                if (-not $script:TrayExiting -and $script:PanelVisible -and -not $script:UsagePanel.Visible) {
-                    $script:UsagePanel.Show()
-                }
-            }) | Out-Null
-        } catch { }
+        try { Show-UsagePanel } catch { }
     }
 })
 
@@ -742,6 +757,7 @@ $script:TogglePanelItem.add_Click({
         Save-TraySettings $SettingsPath $script:TraySettings
         if ($script:PanelVisible) {
             Update-UsagePanel $script:LastState
+            Show-UsagePanel
             $script:TogglePanelItem.Text = "Hide usage panel"
         } else {
             $script:UsagePanel.Hide()
@@ -771,15 +787,7 @@ $script:Context = New-Object System.Windows.Forms.ApplicationContext
 
 try {
     [System.IO.File]::WriteAllText($PidPath, "$PID`r`n", [System.Text.UTF8Encoding]::new($false))
-    $SavedX = [int]($script:TraySettings["panel_x"])
-    $SavedY = [int]($script:TraySettings["panel_y"])
-    if ($SavedX -ge 0 -and $SavedY -ge 0) {
-        Set-PanelPosition $script:UsagePanel $SavedX $SavedY
-    } else {
-        $WorkArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-        Set-PanelPosition $script:UsagePanel ($WorkArea.Right - $script:UsagePanel.Width - 12) ($WorkArea.Bottom - $script:UsagePanel.Height - 48)
-    }
-    if ($script:PanelVisible) { $script:UsagePanel.Show() }
+    if ($script:PanelVisible) { Show-UsagePanel }
     Invoke-TrayRefresh
     $Timer.Start()
     [System.Windows.Forms.Application]::Run($script:Context)
