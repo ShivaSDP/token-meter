@@ -270,9 +270,104 @@ function Format-MenuStatus($State) {
     return "`$$($Cost.ToString('0.00', [System.Globalization.CultureInfo]::InvariantCulture)) est | $Tokens tokens"
 }
 
+function Load-TraySettings($SettingsPath) {
+    $Defaults = @{ panel_visible = $true; panel_x = -1; panel_y = -1 }
+    if (-not (Test-Path -LiteralPath $SettingsPath -PathType Leaf)) { return $Defaults }
+    try {
+        $Loaded = Get-Content -LiteralPath $SettingsPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        foreach ($Key in @($Defaults.Keys)) {
+            $Prop = $Loaded.PSObject.Properties[$Key]
+            if ($null -ne $Prop) { $Defaults[$Key] = $Prop.Value }
+        }
+    } catch { }
+    return $Defaults
+}
+
+function Save-TraySettings($SettingsPath, $Settings) {
+    $Temporary = "$SettingsPath.tmp-$PID"
+    try {
+        [System.IO.File]::WriteAllText(
+            $Temporary,
+            ($Settings | ConvertTo-Json -Compress) + [Environment]::NewLine,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        Move-Item -LiteralPath $Temporary -Destination $SettingsPath -Force
+    } catch {
+        Remove-Item -LiteralPath $Temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Format-PanelText($State) {
+    if (-not $State -or -not [bool](Get-Value $State "ok" $false)) {
+        return "Token Meter — waiting for server"
+    }
+    $Cost = 0.0
+    [double]::TryParse(
+        [string](Get-Value $State "total_cost" 0),
+        [System.Globalization.NumberStyles]::Any,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [ref]$Cost
+    ) | Out-Null
+    $Tokens = Format-CompactNumber (Get-Value $State "total_tokens" 0)
+    $Source = Get-Value $State "source" $null
+    $Model = [string](Get-Value $Source "model" "")
+    if (-not $Model) { $Model = [string](Get-Value $State "model" "") }
+    $Verdict = Get-Value $State "verdict" $null
+    $VerdictLabel = [string](Get-Value $Verdict "label" "")
+    $Parts = [System.Collections.Generic.List[string]]::new()
+    if ($VerdictLabel) { $Parts.Add($VerdictLabel) }
+    if ($Model) { $Parts.Add($Model) }
+    $Parts.Add("$Tokens tokens")
+    $Parts.Add("`$$($Cost.ToString('0.00', [System.Globalization.CultureInfo]::InvariantCulture)) est")
+    return ($Parts -join " · ")
+}
+
+function New-UsagePanel {
+    $Panel = New-Object System.Windows.Forms.Form
+    $Panel.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+    $Panel.ShowInTaskbar = $false
+    $Panel.TopMost = $true
+    $Panel.Height = 30
+    $Panel.Width = 320
+    $Panel.BackColor = [System.Drawing.Color]::FromArgb(31, 41, 55)
+    $Panel.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+
+    $Label = New-Object System.Windows.Forms.Label
+    $Label.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Regular)
+    $Label.ForeColor = [System.Drawing.Color]::FromArgb(245, 245, 245)
+    $Label.BackColor = [System.Drawing.Color]::Transparent
+    $Label.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $Label.AutoEllipsis = $true
+    $Label.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $Panel.Controls.Add($Label)
+    return $Panel, $Label
+}
+
+function Set-PanelPosition($Panel, $X, $Y) {
+    $WorkArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $BottomReserve = 48
+    $ClampedX = [Math]::Max($WorkArea.Left, [Math]::Min($X, $WorkArea.Right - $Panel.Width))
+    $ClampedY = [Math]::Max($WorkArea.Top, [Math]::Min($Y, $WorkArea.Bottom - $Panel.Height - $BottomReserve))
+    $Panel.SetDesktopLocation($ClampedX, $ClampedY)
+}
+
+function Update-UsagePanel($State) {
+    if ($null -eq $script:UsagePanel -or -not $script:PanelVisible) { return }
+    $Text = Format-PanelText $State
+    $script:PanelLabel.Text = $Text
+    $MeasureText = if ($Text) { $Text } else { "Token Meter" }
+    $Size = [System.Windows.Forms.TextRenderer]::MeasureText($MeasureText, $script:PanelLabel.Font)
+    $NewWidth = [Math]::Max(280, [Math]::Min($Size.Width + 32, 900))
+    if ($script:UsagePanel.Width -ne $NewWidth) {
+        $script:UsagePanel.Width = $NewWidth
+        Set-PanelPosition $script:UsagePanel $script:UsagePanel.Left $script:UsagePanel.Top
+    }
+}
+
 $RuntimeRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $PidPath = Join-Path $RuntimeRoot "tray.pid"
 $StatusPath = Join-Path $RuntimeRoot "tray.status.json"
+$SettingsPath = Join-Path $RuntimeRoot "tray-settings.json"
 $script:BaseUrl = "http://127.0.0.1:8722"
 $script:SelectedSessionId = ""
 $script:LastState = $null
@@ -371,6 +466,10 @@ if ($SmokeTest) {
 
         $IconBitmap = $ProbeIcon.ToBitmap()
         $BrandPixel = $IconBitmap.GetPixel(4, 4)
+        $PanelTextSample = Format-PanelText $Sample
+        $ProbePanel, $ProbePanelLabel = New-UsagePanel
+        $PanelConstructed = $null -ne $ProbePanel -and $null -ne $ProbePanelLabel
+        if ($PanelConstructed) { $ProbePanel.Dispose() }
         [ordered]@{
             ok = $Probe.Visible -and $OpenedUrl -eq "$($script:BaseUrl)/#sessions"
             platform = "windows"
@@ -384,6 +483,8 @@ if ($SmokeTest) {
             unknown_runtime_label = Get-RuntimeLabel $Sample "future-runtime"
             dpi_awareness = $script:DpiAwareness
             theme = $ProbeTheme
+            panel_text = $PanelTextSample
+            panel_constructed = $PanelConstructed
         } | ConvertTo-Json -Compress
     } finally {
         $Probe.Visible = $false
@@ -461,6 +562,7 @@ function Update-TrayMenu($State) {
     $script:ActivityItem.Text = Limit-Text "Activity: $ActivityTitle" 100
 
     Update-RecentSessions $State
+    Update-UsagePanel $State
 }
 
 function Invoke-TrayRefresh {
@@ -501,6 +603,75 @@ $script:TrayIcon = New-TokenMeterIcon
 $script:NotifyIcon.Icon = $script:TrayIcon
 $script:NotifyIcon.Text = "Token Meter - starting"
 $script:NotifyIcon.Visible = $true
+
+$script:TraySettings = Load-TraySettings $SettingsPath
+$script:PanelVisible = [bool]$script:TraySettings["panel_visible"]
+$script:UsagePanel, $script:PanelLabel = New-UsagePanel
+$script:DragOffset = $null
+
+$script:UsagePanel.add_MouseDown({
+    param($s, $e)
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+        $script:DragOffset = New-Object System.Drawing.Point(
+            [System.Windows.Forms.Cursor]::Position.X - $script:UsagePanel.Left,
+            [System.Windows.Forms.Cursor]::Position.Y - $script:UsagePanel.Top
+        )
+    }
+})
+$script:UsagePanel.add_MouseMove({
+    param($s, $e)
+    if ($null -ne $script:DragOffset -and ($e.Button -band [System.Windows.Forms.MouseButtons]::Left)) {
+        $NewX = [System.Windows.Forms.Cursor]::Position.X - $script:DragOffset.X
+        $NewY = [System.Windows.Forms.Cursor]::Position.Y - $script:DragOffset.Y
+        Set-PanelPosition $script:UsagePanel $NewX $NewY
+    }
+})
+$script:UsagePanel.add_MouseUp({
+    param($s, $e)
+    if ($null -ne $script:DragOffset) {
+        $script:TraySettings["panel_x"] = $script:UsagePanel.Left
+        $script:TraySettings["panel_y"] = $script:UsagePanel.Top
+        Save-TraySettings $SettingsPath $script:TraySettings
+        $script:DragOffset = $null
+    }
+})
+$script:PanelLabel.add_MouseDown({
+    param($s, $e)
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+        $script:DragOffset = New-Object System.Drawing.Point(
+            [System.Windows.Forms.Cursor]::Position.X - $script:UsagePanel.Left,
+            [System.Windows.Forms.Cursor]::Position.Y - $script:UsagePanel.Top
+        )
+    }
+})
+$script:PanelLabel.add_MouseMove({
+    param($s, $e)
+    if ($null -ne $script:DragOffset -and ($e.Button -band [System.Windows.Forms.MouseButtons]::Left)) {
+        $NewX = [System.Windows.Forms.Cursor]::Position.X - $script:DragOffset.X
+        $NewY = [System.Windows.Forms.Cursor]::Position.Y - $script:DragOffset.Y
+        Set-PanelPosition $script:UsagePanel $NewX $NewY
+    }
+})
+$script:PanelLabel.add_MouseUp({
+    param($s, $e)
+    if ($null -ne $script:DragOffset) {
+        $script:TraySettings["panel_x"] = $script:UsagePanel.Left
+        $script:TraySettings["panel_y"] = $script:UsagePanel.Top
+        Save-TraySettings $SettingsPath $script:TraySettings
+        $script:DragOffset = $null
+    }
+})
+$script:PanelLabel.add_MouseEnter({
+    if ($script:LastState) {
+        $Base = Format-PanelText $script:LastState
+        $script:PanelLabel.Text = "Token Meter | $Base | Right-click for options"
+    }
+})
+$script:PanelLabel.add_MouseLeave({
+    if ($script:LastState) {
+        $script:PanelLabel.Text = Format-PanelText $script:LastState
+    }
+})
 
 $Menu = New-Object System.Windows.Forms.ContextMenuStrip
 $TitleItem = New-Object System.Windows.Forms.ToolStripMenuItem
@@ -550,6 +721,23 @@ $Refresh.Text = "Refresh now"
 $Refresh.add_Click({ Invoke-TrayRefresh })
 $Menu.Items.Add($Refresh) | Out-Null
 
+$script:TogglePanelItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$script:TogglePanelItem.Text = if ($script:PanelVisible) { "Hide usage panel" } else { "Show usage panel" }
+$script:TogglePanelItem.add_Click({
+    $script:PanelVisible = -not $script:PanelVisible
+    $script:TraySettings["panel_visible"] = $script:PanelVisible
+    Save-TraySettings $SettingsPath $script:TraySettings
+    if ($script:PanelVisible) {
+        Update-UsagePanel $script:LastState
+        $script:UsagePanel.Show()
+        $script:TogglePanelItem.Text = "Hide usage panel"
+    } else {
+        $script:UsagePanel.Hide()
+        $script:TogglePanelItem.Text = "Show usage panel"
+    }
+})
+$Menu.Items.Add($script:TogglePanelItem) | Out-Null
+
 $Quit = New-Object System.Windows.Forms.ToolStripMenuItem
 $Quit.Text = "Quit tray widget"
 $Quit.add_Click({ $script:Context.ExitThread() })
@@ -570,6 +758,16 @@ $script:Context = New-Object System.Windows.Forms.ApplicationContext
 
 try {
     [System.IO.File]::WriteAllText($PidPath, "$PID`r`n", [System.Text.UTF8Encoding]::new($false))
+    $script:PanelLabel.Text = "Token Meter — starting"
+    $SavedX = [int]$script:TraySettings["panel_x"]
+    $SavedY = [int]$script:TraySettings["panel_y"]
+    if ($SavedX -ge 0 -and $SavedY -ge 0) {
+        Set-PanelPosition $script:UsagePanel $SavedX $SavedY
+    } else {
+        $WorkArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+        Set-PanelPosition $script:UsagePanel ($WorkArea.Right - $script:UsagePanel.Width - 12) ($WorkArea.Bottom - $script:UsagePanel.Height - 48)
+    }
+    if ($script:PanelVisible) { $script:UsagePanel.Show() }
     Invoke-TrayRefresh
     $Timer.Start()
     [System.Windows.Forms.Application]::Run($script:Context)
@@ -580,6 +778,10 @@ try {
     $script:NotifyIcon.Dispose()
     $script:TrayIcon.Dispose()
     $Menu.Dispose()
+    if ($null -ne $script:UsagePanel) {
+        $script:UsagePanel.Visible = $false
+        $script:UsagePanel.Dispose()
+    }
     $script:Context.Dispose()
     foreach ($Path in @($PidPath, $StatusPath)) {
         if (Test-Path -LiteralPath $Path -PathType Leaf) {
