@@ -356,7 +356,7 @@ function New-UsagePanel {
     $Panel.TopMost = $true
     $Panel.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
     $Panel.BackColor = [System.Drawing.Color]::FromArgb(31, 41, 55)
-    $Panel.ClientSize = New-Object System.Drawing.Size(420, 30)
+    $Panel.ClientSize = New-Object System.Drawing.Size(500, 30)
 
     $Label = New-Object System.Windows.Forms.Label
     $Label.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Regular)
@@ -395,8 +395,9 @@ function Set-PanelText([string]$Text) {
     $script:PanelLabel.Text = $Text
     try {
         $Measured = [System.Windows.Forms.TextRenderer]::MeasureText($Text, $script:PanelLabel.Font)
-        $NewWidth = [Math]::Max(280, [Math]::Min(900, $Measured.Width + 36))
-        $script:UsagePanel.ClientSize = New-Object System.Drawing.Size($NewWidth, 30)
+        $NewWidth  = [Math]::Max(280, [Math]::Min(900, $Measured.Width  + 36))
+        $NewHeight = [Math]::Max(30,  $Measured.Height + 12)
+        $script:UsagePanel.ClientSize = New-Object System.Drawing.Size($NewWidth, $NewHeight)
     } catch { }
 }
 
