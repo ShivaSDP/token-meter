@@ -396,6 +396,9 @@ class WindowsPackagingContracts(unittest.TestCase):
             "TopMost = $true",
             "WorkingArea",
             "TextRenderer",
+            "$script:Dragging",
+            "$script:DragOffsetX",
+            "$script:DragOffsetY",
             "panel_text",
             "panel_constructed",
         ):

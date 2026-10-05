@@ -607,58 +607,33 @@ $script:NotifyIcon.Visible = $true
 $script:TraySettings = Load-TraySettings $SettingsPath
 $script:PanelVisible = [bool]$script:TraySettings["panel_visible"]
 $script:UsagePanel, $script:PanelLabel = New-UsagePanel
-$script:DragOffset = $null
+$script:Dragging = $false
+$script:DragOffsetX = 0
+$script:DragOffsetY = 0
 
-$script:UsagePanel.add_MouseDown({
-    param($s, $e)
-    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
-        $script:DragOffset = New-Object System.Drawing.Point(
-            [System.Windows.Forms.Cursor]::Position.X - $script:UsagePanel.Left,
-            [System.Windows.Forms.Cursor]::Position.Y - $script:UsagePanel.Top
-        )
-    }
-})
-$script:UsagePanel.add_MouseMove({
-    param($s, $e)
-    if ($null -ne $script:DragOffset -and ($e.Button -band [System.Windows.Forms.MouseButtons]::Left)) {
-        $NewX = [System.Windows.Forms.Cursor]::Position.X - $script:DragOffset.X
-        $NewY = [System.Windows.Forms.Cursor]::Position.Y - $script:DragOffset.Y
-        Set-PanelPosition $script:UsagePanel $NewX $NewY
-    }
-})
-$script:UsagePanel.add_MouseUp({
-    param($s, $e)
-    if ($null -ne $script:DragOffset) {
-        $script:TraySettings["panel_x"] = $script:UsagePanel.Left
-        $script:TraySettings["panel_y"] = $script:UsagePanel.Top
-        Save-TraySettings $SettingsPath $script:TraySettings
-        $script:DragOffset = $null
-    }
-})
 $script:PanelLabel.add_MouseDown({
     param($s, $e)
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
-        $script:DragOffset = New-Object System.Drawing.Point(
-            [System.Windows.Forms.Cursor]::Position.X - $script:UsagePanel.Left,
-            [System.Windows.Forms.Cursor]::Position.Y - $script:UsagePanel.Top
-        )
+        $script:Dragging = $true
+        $CursorPos = [System.Windows.Forms.Cursor]::Position
+        $script:DragOffsetX = $CursorPos.X - $script:UsagePanel.Left
+        $script:DragOffsetY = $CursorPos.Y - $script:UsagePanel.Top
     }
 })
 $script:PanelLabel.add_MouseMove({
     param($s, $e)
-    if ($null -ne $script:DragOffset -and ($e.Button -band [System.Windows.Forms.MouseButtons]::Left)) {
-        $NewX = [System.Windows.Forms.Cursor]::Position.X - $script:DragOffset.X
-        $NewY = [System.Windows.Forms.Cursor]::Position.Y - $script:DragOffset.Y
-        Set-PanelPosition $script:UsagePanel $NewX $NewY
+    if ($script:Dragging) {
+        $CursorPos = [System.Windows.Forms.Cursor]::Position
+        Set-PanelPosition $script:UsagePanel ($CursorPos.X - $script:DragOffsetX) ($CursorPos.Y - $script:DragOffsetY)
     }
 })
 $script:PanelLabel.add_MouseUp({
     param($s, $e)
-    if ($null -ne $script:DragOffset) {
+    if ($script:Dragging) {
+        $script:Dragging = $false
         $script:TraySettings["panel_x"] = $script:UsagePanel.Left
         $script:TraySettings["panel_y"] = $script:UsagePanel.Top
         Save-TraySettings $SettingsPath $script:TraySettings
-        $script:DragOffset = $null
     }
 })
 $script:PanelLabel.add_MouseEnter({
