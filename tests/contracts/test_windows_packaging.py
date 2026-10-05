@@ -395,7 +395,6 @@ class WindowsPackagingContracts(unittest.TestCase):
             "ShowInTaskbar = $false",
             "TopMost = $true",
             "WorkingArea",
-            "TextRenderer",
             "$script:Dragging",
             "$script:DragOffsetX",
             "$script:DragOffsetY",

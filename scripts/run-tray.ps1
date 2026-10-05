@@ -328,7 +328,7 @@ function New-UsagePanel {
     $Panel.ShowInTaskbar = $false
     $Panel.TopMost = $true
     $Panel.Height = 30
-    $Panel.Width = 320
+    $Panel.Width = 420
     $Panel.BackColor = [System.Drawing.Color]::FromArgb(31, 41, 55)
     $Panel.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
 
@@ -339,7 +339,7 @@ function New-UsagePanel {
     $Label.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
     $Label.AutoEllipsis = $true
     $Label.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $Panel.Controls.Add($Label)
+    $Panel.Controls.Add($Label) | Out-Null
     return $Panel, $Label
 }
 
@@ -353,15 +353,7 @@ function Set-PanelPosition($Panel, $X, $Y) {
 
 function Update-UsagePanel($State) {
     if ($null -eq $script:UsagePanel -or -not $script:PanelVisible) { return }
-    $Text = Format-PanelText $State
-    $script:PanelLabel.Text = $Text
-    $MeasureText = if ($Text) { $Text } else { "Token Meter" }
-    $Size = [System.Windows.Forms.TextRenderer]::MeasureText($MeasureText, $script:PanelLabel.Font)
-    $NewWidth = [Math]::Max(280, [Math]::Min($Size.Width + 32, 900))
-    if ($script:UsagePanel.Width -ne $NewWidth) {
-        $script:UsagePanel.Width = $NewWidth
-        Set-PanelPosition $script:UsagePanel $script:UsagePanel.Left $script:UsagePanel.Top
-    }
+    $script:PanelLabel.Text = Format-PanelText $State
 }
 
 $RuntimeRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -728,7 +720,7 @@ $Menu.add_Opening({
 
 $Timer = New-Object System.Windows.Forms.Timer
 $Timer.Interval = 10000
-$Timer.add_Tick({ Invoke-TrayRefresh })
+$Timer.add_Tick({ try { Invoke-TrayRefresh } catch { } })
 $script:Context = New-Object System.Windows.Forms.ApplicationContext
 
 try {
