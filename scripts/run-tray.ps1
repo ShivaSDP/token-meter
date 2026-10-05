@@ -354,6 +354,17 @@ function Set-PanelPosition($Panel, $X, $Y) {
 function Update-UsagePanel($State) {
     if ($null -eq $script:UsagePanel -or -not $script:PanelVisible) { return }
     $script:PanelLabel.Text = Format-PanelText $State
+    if (-not $script:UsagePanel.Visible) {
+        $SavedX = [int]($script:TraySettings["panel_x"])
+        $SavedY = [int]($script:TraySettings["panel_y"])
+        if ($SavedX -ge 0 -and $SavedY -ge 0) {
+            Set-PanelPosition $script:UsagePanel $SavedX $SavedY
+        } else {
+            $WorkArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+            Set-PanelPosition $script:UsagePanel ($WorkArea.Right - $script:UsagePanel.Width - 12) ($WorkArea.Bottom - $script:UsagePanel.Height - 48)
+        }
+        $script:UsagePanel.Show()
+    }
 }
 
 $RuntimeRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -589,6 +600,10 @@ if (-not $CreatedNew) {
     exit 0
 }
 
+[System.Windows.Forms.Application]::SetUnhandledExceptionMode(
+    [System.Windows.Forms.UnhandledExceptionMode]::CatchException
+)
+[System.Windows.Forms.Application]::add_ThreadException({ param($s, $e) })
 [System.Windows.Forms.Application]::EnableVisualStyles()
 $script:NotifyIcon = New-Object System.Windows.Forms.NotifyIcon
 $script:TrayIcon = New-TokenMeterIcon
@@ -605,39 +620,49 @@ $script:DragOffsetY = 0
 
 $script:PanelLabel.add_MouseDown({
     param($s, $e)
-    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
-        $script:Dragging = $true
-        $CursorPos = [System.Windows.Forms.Cursor]::Position
-        $script:DragOffsetX = $CursorPos.X - $script:UsagePanel.Left
-        $script:DragOffsetY = $CursorPos.Y - $script:UsagePanel.Top
-    }
+    try {
+        if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+            $script:Dragging = $true
+            $CursorPos = [System.Windows.Forms.Cursor]::Position
+            $script:DragOffsetX = [int]$CursorPos.X - [int]$script:UsagePanel.Left
+            $script:DragOffsetY = [int]$CursorPos.Y - [int]$script:UsagePanel.Top
+        }
+    } catch { $script:Dragging = $false }
 })
 $script:PanelLabel.add_MouseMove({
     param($s, $e)
-    if ($script:Dragging) {
-        $CursorPos = [System.Windows.Forms.Cursor]::Position
-        Set-PanelPosition $script:UsagePanel ($CursorPos.X - $script:DragOffsetX) ($CursorPos.Y - $script:DragOffsetY)
-    }
+    try {
+        if ($script:Dragging) {
+            $CursorPos = [System.Windows.Forms.Cursor]::Position
+            Set-PanelPosition $script:UsagePanel ([int]$CursorPos.X - $script:DragOffsetX) ([int]$CursorPos.Y - $script:DragOffsetY)
+        }
+    } catch { $script:Dragging = $false }
 })
 $script:PanelLabel.add_MouseUp({
     param($s, $e)
-    if ($script:Dragging) {
-        $script:Dragging = $false
-        $script:TraySettings["panel_x"] = $script:UsagePanel.Left
-        $script:TraySettings["panel_y"] = $script:UsagePanel.Top
-        Save-TraySettings $SettingsPath $script:TraySettings
-    }
+    try {
+        if ($script:Dragging) {
+            $script:Dragging = $false
+            $script:TraySettings["panel_x"] = $script:UsagePanel.Left
+            $script:TraySettings["panel_y"] = $script:UsagePanel.Top
+            Save-TraySettings $SettingsPath $script:TraySettings
+        }
+    } catch { $script:Dragging = $false }
 })
 $script:PanelLabel.add_MouseEnter({
-    if ($script:LastState) {
-        $Base = Format-PanelText $script:LastState
-        $script:PanelLabel.Text = "Token Meter | $Base | Right-click for options"
-    }
+    try {
+        if ($script:LastState) {
+            $Base = Format-PanelText $script:LastState
+            $script:PanelLabel.Text = "Token Meter | $Base | Right-click for options"
+        }
+    } catch { }
 })
 $script:PanelLabel.add_MouseLeave({
-    if ($script:LastState) {
-        $script:PanelLabel.Text = Format-PanelText $script:LastState
-    }
+    try {
+        if ($script:LastState) {
+            $script:PanelLabel.Text = Format-PanelText $script:LastState
+        }
+    } catch { }
 })
 
 $Menu = New-Object System.Windows.Forms.ContextMenuStrip
@@ -691,17 +716,18 @@ $Menu.Items.Add($Refresh) | Out-Null
 $script:TogglePanelItem = New-Object System.Windows.Forms.ToolStripMenuItem
 $script:TogglePanelItem.Text = if ($script:PanelVisible) { "Hide usage panel" } else { "Show usage panel" }
 $script:TogglePanelItem.add_Click({
-    $script:PanelVisible = -not $script:PanelVisible
-    $script:TraySettings["panel_visible"] = $script:PanelVisible
-    Save-TraySettings $SettingsPath $script:TraySettings
-    if ($script:PanelVisible) {
-        Update-UsagePanel $script:LastState
-        $script:UsagePanel.Show()
-        $script:TogglePanelItem.Text = "Hide usage panel"
-    } else {
-        $script:UsagePanel.Hide()
-        $script:TogglePanelItem.Text = "Show usage panel"
-    }
+    try {
+        $script:PanelVisible = -not $script:PanelVisible
+        $script:TraySettings["panel_visible"] = $script:PanelVisible
+        Save-TraySettings $SettingsPath $script:TraySettings
+        if ($script:PanelVisible) {
+            Update-UsagePanel $script:LastState
+            $script:TogglePanelItem.Text = "Hide usage panel"
+        } else {
+            $script:UsagePanel.Hide()
+            $script:TogglePanelItem.Text = "Show usage panel"
+        }
+    } catch { }
 })
 $Menu.Items.Add($script:TogglePanelItem) | Out-Null
 
@@ -725,16 +751,6 @@ $script:Context = New-Object System.Windows.Forms.ApplicationContext
 
 try {
     [System.IO.File]::WriteAllText($PidPath, "$PID`r`n", [System.Text.UTF8Encoding]::new($false))
-    $script:PanelLabel.Text = "Token Meter — starting"
-    $SavedX = [int]$script:TraySettings["panel_x"]
-    $SavedY = [int]$script:TraySettings["panel_y"]
-    if ($SavedX -ge 0 -and $SavedY -ge 0) {
-        Set-PanelPosition $script:UsagePanel $SavedX $SavedY
-    } else {
-        $WorkArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-        Set-PanelPosition $script:UsagePanel ($WorkArea.Right - $script:UsagePanel.Width - 12) ($WorkArea.Bottom - $script:UsagePanel.Height - 48)
-    }
-    if ($script:PanelVisible) { $script:UsagePanel.Show() }
     Invoke-TrayRefresh
     $Timer.Start()
     [System.Windows.Forms.Application]::Run($script:Context)

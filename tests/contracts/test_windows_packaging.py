@@ -400,6 +400,8 @@ class WindowsPackagingContracts(unittest.TestCase):
             "$script:DragOffsetY",
             "panel_text",
             "panel_constructed",
+            "SetUnhandledExceptionMode",
+            "add_ThreadException",
         ):
             self.assertIn(marker, tray, f"run-tray.ps1 missing: {marker!r}")
 
