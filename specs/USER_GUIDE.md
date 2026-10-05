@@ -244,6 +244,9 @@ disable recommendations.
 
 ### Work
 
+The exact rules behind every number and suggestion are in
+[Work insights: how it works](WORK_INSIGHTS.md).
+
 Work is available on macOS only. It is off until you turn on **Settings → Work
 insights**, which also sets up Ollama and the model in the background (see the
 README). A local Jet decision model then labels each session's opening request with an

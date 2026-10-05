@@ -298,7 +298,7 @@ periods. Role, nickname, model, status,
 signal, and text filters operate only on that bounded child inventory, so the
 browser suspends role trends while a filter not represented by the aggregate is
 active.
-Work is an opt-in view over the same cached summaries plus content-free labels
+Work ([logic reference](WORK_INSIGHTS.md)) is an opt-in view over the same cached summaries plus content-free labels
 from `token_meter/services/work_insights.py`. `session_summary` hands each
 adapter's already-extracted human turns (and the preceding assistant text tail)
 to the service through a thread-local slot; the service keeps unlabeled,

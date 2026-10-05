@@ -352,6 +352,41 @@ class WorkSetupTests(unittest.TestCase):
         self.assertEqual(len(runs), 2)
         self.assertEqual(setup.status()["state"], "ready")
 
+    def off_on_off(self):
+        import threading
+        self.ollama["http://127.0.0.1:11434"] = {"version": "0.34.4", "models": ["token-meter-jet:latest"]}
+        gate, runs = threading.Event(), []
+        with mock.patch.object(S, "CLI_CANDIDATES", (self.runner_path(),)):
+            setup = self.make()
+            original = setup.run
+
+            def run():
+                runs.append(1)
+                if len(runs) == 1:
+                    gate.wait(5)
+                    setup._checkpoint()
+                original()
+            setup.run = run
+            setup.start()
+            setup.cancel(wait_s=0)
+            setup.start()
+            return setup, gate, runs
+
+    def test_off_on_off_during_a_cancel_does_not_run_setup_again(self):
+        setup, gate, runs = self.off_on_off()
+        setup.cancel(wait_s=0)
+        gate.set()
+        setup._thread.join(5)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(setup.status()["state"], "idle")
+
+    def test_restart_is_skipped_when_work_insights_were_turned_off(self):
+        setup, gate, runs = self.off_on_off()
+        self.settings["enabled"] = False
+        gate.set()
+        setup._thread.join(5)
+        self.assertEqual(len(runs), 1)
+
     def test_ollama_in_the_users_applications_folder_is_found(self):
         home = os.path.join(self.tmp.name, "home")
         app = os.path.join(home, "Applications", "Ollama.app", "Contents", "Resources")

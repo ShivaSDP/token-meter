@@ -202,7 +202,9 @@ class WorkSetup:
 
     def cancel(self, wait_s=10.0):
         """Stop a running setup at its next checkpoint, waiting briefly for it to finish."""
-        self._cancel.set()
+        with self._lock:
+            self._cancel.set()
+            self._restart = False  # A later off overrides an earlier off-then-on.
         thread = self._thread
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(wait_s)
@@ -217,11 +219,12 @@ class WorkSetup:
         finally:
             with self._lock:
                 restart, self._restart = self._restart, False
-            if restart:
-                with self._lock:
+                restart = restart and self.get_settings().get("enabled", True)
+                if restart:
                     self._cancel.clear()
                     self._state = {"state": CHECKING, "reason": "", "done_bytes": 0, "total_bytes": 0,
                                    "needed_bytes": 0}
+            if restart:
                 self._run_safely()
 
     def _run_once(self):

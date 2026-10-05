@@ -1,8 +1,7 @@
 # Work Insights Design
 
-Status: approved direction (2026-09-30), implementation in progress on
-`feat/work-insights`. Classifier accuracy figures come from a local evaluation
-and are recorded in the Evaluation section when final.
+Status: historical design log (2026-09-30 onward), one section per iteration.
+For how the Work page behaves now, see [WORK_INSIGHTS.md](WORK_INSIGHTS.md).
 
 ## Goal
 
@@ -461,3 +460,7 @@ sent to the classifier.
   `~/Applications` counts as installed; an own Ollama that stops answering
   reports `ollama_offline`; Work settings writes share the per-file settings
   lock with budgets; uninstall always cleans the default locations.
+- A later off clears a pending restart, and a restart runs only while Work
+  insights are still on. A Work filter in All sessions says it is loading
+  instead of showing zero sessions. `specs/WORK_INSIGHTS.md` is now the current
+  logic reference, with an infographic in `specs/images/`.

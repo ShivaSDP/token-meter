@@ -1912,6 +1912,8 @@ class TagHighlightRhythmTests(unittest.TestCase):
                          domain.model_family("claude-haiku-4-5-20251001"))
         self.assertEqual(domain.model_family("us.anthropic.claude-opus-4-8-v1:0"), "claude-opus")
         self.assertEqual(domain.model_family("claude-opus-4-8[1m]"), "claude-opus")
+        self.assertEqual((domain.model_family("claude-opus-4-8@20250101"), domain.model_version("claude-opus-4-8@20250101")),
+                         ("claude-opus", (4, 8)))
         self.assertEqual(domain.model_version("claude-opus-4-8[1m]"), (4, 8))
         self.assertEqual(domain.model_version("claude-haiku-4-5-20251001"), (4, 5))
         self.assertGreater(domain.model_version("claude-opus-5"), domain.model_version("claude-opus-4-8"))

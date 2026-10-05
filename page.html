@@ -5953,7 +5953,8 @@ function renderWorkStatus(payload){
  const pill=$('w-state');pill.dataset.state=setupCopy?(setup.state==='failed'?'setup_needed':'running'):state;pill.textContent=shown[0];
  $('w-status-title').textContent=shown[1];$('w-status-detail').textContent=shown[2];
  const setupState=status.setup?.state;
- $('w-setup-retry').hidden=!(settings.enabled&&status.setup&&!WORK_SETUP_ACTIVE.includes(setupState)&&(setupState==='failed'||state==='setup_needed'));
+ const serviceNeedsSetup=['setup_needed','backoff'].includes(status.state);
+ $('w-setup-retry').hidden=!(settings.enabled&&status.setup&&!WORK_SETUP_ACTIVE.includes(setupState)&&(setupState==='failed'?serviceNeedsSetup:state==='setup_needed'));
  clearTimeout(workSetupTimer);
  if(setup&&WORK_SETUP_ACTIVE.includes(setup.state))workSetupTimer=setTimeout(refreshWorkStatus,4000);
  $('w-pause-wrap').hidden=!settings.enabled||state==='paused';
@@ -8123,7 +8124,8 @@ function renderAllSessions(xs){
 	  wait:(a,b)=>Number(b.wait_time?.total_s||0)-Number(a.wait_time?.total_s||0)||(b.mtime||0)-(a.mtime||0),
  };
  sessions=sessions.slice().sort(sorters[globalSort]||sorters.recent);
- setLogText($('g-count'),allSessionsCountText(view));
+ if(workSessionFilter?.loading)setLogText($('g-count'),'Loading the sessions behind this Work filter…');
+ else setLogText($('g-count'),allSessionsCountText(view));
  const maxCost=Math.max(.001,...sessions.map(s=>s.cost||0));
  reconcileLogRows(sessions,maxCost,liveSessionIds);
  if(compareIds.length)syncCompareSelectionUi();

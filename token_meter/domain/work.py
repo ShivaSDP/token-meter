@@ -736,6 +736,7 @@ def _long_thread_recommendation(in_window):
 def _model_name_parts(name):
     text = str(name or "").lower().rsplit("/", 1)[-1]
     text = re.sub(r"\[[^\]]*\]$", "", text)  # context-size markers such as [1m]
+    text = re.sub(r"@[\w.-]*$", "", text)  # Vertex-style release suffixes such as @20250101
     while re.match(r"^[a-z]+\.(?=[a-z])", text):  # vendor or region prefixes such as us.anthropic.
         text = re.sub(r"^[a-z]+\.", "", text, count=1)
     text = re.sub(r"-v\d+(?::\d+)?$", "", text)
