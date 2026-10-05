@@ -7812,7 +7812,7 @@ function renderSubagentCompletion(usage){
  $('sa-completion-note').textContent=`${overall.runs.toLocaleString()} child run${overall.runs===1?'':'s'} · all apps, projects, and time · the filters below do not apply here`;
  const stat=(label,value,detail,tone)=>`<div class=subagentCompletionStat data-tone="${tone||''}"><span>${esc(label)}</span><strong class=num>${esc(value)}</strong><small>${esc(detail)}</small></div>`;
  $('sa-completion-stats').innerHTML=[
-  stat('Finished',overall.finished.toLocaleString(),`${ended?`${workPercent(overall.finish_rate)} of runs that ended`:'none ended yet'}${overall.no_end_evidence?` · ${overall.no_end_evidence.toLocaleString()} more from apps that do not record a finish`:''}`,'good'),
+  stat('Finished',overall.finished.toLocaleString(),`${ended?`${workPercent(overall.finish_rate)} of runs that ended`:'none ended yet'}${overall.no_end_evidence?` · ${overall.no_end_evidence.toLocaleString()} without a recorded finish`:''}`,'good'),
   stat('Incomplete',overall.stopped.toLocaleString(),overall.stopped?`${money(overall.stopped_cost)} spent on them`:'none',overall.stopped?'warn':''),
   stat('Still running',overall.running.toLocaleString(),overall.running?'not counted in the finish rate':'none right now'),
   stat('Retried',overall.retry_runs.toLocaleString(),'runs with a retry or failed attempt'),
@@ -7829,7 +7829,9 @@ function renderSubagentCompletion(usage){
  const shown=rows.length,total=Math.max(count||0,allRows.length);
  $('sa-completion-foot').innerHTML=`<span>Showing ${shown} of ${total} ${dimLabel}${total===1?'':'s'}, most incomplete runs first</span>${hiddenRows?`<button type=button class=subagentCompletionMore data-completion-more>Show all</button>`:subagentCompletionAll&&allRows.length>6?`<button type=button class=subagentCompletionMore data-completion-more>Show fewer</button>`:''}${overall.stopped?`<a class=subagentCompletionMore href="#sessions-subagents" data-open-issues>Investigate incomplete runs</a>`:''}`;
  const outcome=$('sa-completion-outcome');
- outcome.innerHTML=workSupported!==true?'':subagentOutcomeState==='ready'?subagentOutcomeHtml(subagentOutcomes)
+ // A failed background refresh keeps the last good comparison on screen and retries quietly.
+ const showReady=subagentOutcomeState==='ready'||(subagentOutcomeState==='error'&&(subagentOutcomes?.with?.judged_sessions||subagentOutcomes?.without?.judged_sessions));
+ outcome.innerHTML=workSupported!==true?'':showReady?subagentOutcomeHtml(subagentOutcomes)
   :subagentOutcomeState==='loading'||!subagentOutcomeState?'<div class=subagentOutcomeHead><b>How the sessions ended</b></div><p>Loading Work labels…</p>'
   :subagentOutcomeState==='empty'?'<div class=subagentOutcomeHead><b>How the sessions ended</b></div><p>No labeled sessions yet. They appear as Work insights labels your sessions.</p>'
   :subagentOutcomeState==='off'?'<div class=subagentOutcomeHead><b>How the sessions ended</b></div><p>See whether sessions that use subagents end up resolved: <a href="#settings-work-insights">turn on Work insights</a>.</p>'
