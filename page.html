@@ -5877,7 +5877,7 @@ function renderWorkTags(tags){
  const host=$('preview-work-tags');
  if(!tags||!(tags.area||tags.work_type)){host.hidden=true;host.innerHTML='';return;}
  const chips=[];
- if(tags.area&&tags.area!=='Pending')chips.push(`<span class=workTag title="Area (local model estimate)">${esc(tags.area)}</span>`);
+ if(tags.area&&tags.area!=='Pending')chips.push(`<span class=workTag title="${tags.area_guess?'Area: the local model\u2019s best guess with low confidence':'Area (local model estimate)'}">${esc(tags.area)}${tags.area_guess?' (likely)':''}</span>`);
  if(tags.work_type)chips.push(`<span class=workTag title="Work type (local model estimate)">${esc(WORK_TYPE_LABELS[tags.work_type]||tags.work_type)}</span>`);
  if(tags.complexity)chips.push(`<span class=workTag title="Complexity (local model estimate)">${esc(WORK_COMPLEXITY_LABELS[tags.complexity]||tags.complexity)}</span>`);
  if(tags.labeled_turns)chips.push(`<span class="workTag${tags.corrections?' pushback':''}" title="Follow-up turns that pushed back on the previous work">${tags.corrections} pushback${tags.corrections===1?'':'s'} / ${tags.labeled_turns}</span>`);

@@ -1002,7 +1002,7 @@ class OperatingRhythmTests(unittest.TestCase):
         self.assertEqual(out["spend"], 14.0)
         self.assertEqual(set(out["sessions"][0]), {
             "id", "session", "title", "runtime", "project", "start", "last", "cost", "turns", "model", "area",
-            "work_type", "complexity", "outcome", "corrections", "labeled_turns", "tags"})
+            "work_type", "complexity", "outcome", "corrections", "labeled_turns", "tags", "area_guess"})
 
     def test_outcome_model_and_limit_filters(self):
         rows = [row(f"s{i}", cost=float(i), model="mid" if i % 2 else "gpt-5.6", turns_=3) for i in range(6)]

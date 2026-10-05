@@ -8204,6 +8204,7 @@ def work_session_tags(source):
         return None
     return {
         "area": entry.get("area") or "",
+        "area_guess": bool(entry.get("area_guess")),
         "work_type": entry.get("work_type") or "",
         "complexity": entry.get("complexity") or "",
         "corrections": int(entry.get("corrections") or 0),
