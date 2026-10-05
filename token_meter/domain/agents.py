@@ -597,12 +597,14 @@ def _usage_body(entries):
     }
 
 
-MAX_COMPLETION_ROWS = 12
+MAX_COMPLETION_ROWS = 40
 
 
-def _completion_row(records):
+def _completion_row(records, reports_end=None):
+    """``reports_end``: runtimes that record a finish; their unfinished runs are incomplete, others unknown."""
     finished = [r for r in records if r["activity_state"] == "complete"]
-    stopped = [r for r in records if r["activity_state"] == "incomplete"]
+    ended_without = [r for r in records if r["activity_state"] == "incomplete"]
+    stopped = [r for r in ended_without if reports_end is None or r["runtime"] in reports_end]
     ended = len(finished) + len(stopped)
     finished_cost = [r["cost"] for r in finished if r["cost_available"]]
     return {
@@ -611,6 +613,7 @@ def _completion_row(records):
         "stopped": len(stopped),
         "running": sum(r["activity_state"] == "working" for r in records),
         "unknown": sum(r["activity_state"] == "unknown" for r in records),
+        "no_end_evidence": len(ended_without) - len(stopped),
         # Share of runs that reached their end, among runs that are no longer running.
         "finish_rate": len(finished) / ended if ended else None,
         "stopped_cost": round(sum(r["cost"] for r in stopped if r["cost_available"]), 6),
@@ -622,6 +625,8 @@ def _completion_row(records):
 def _completion(records):
     """Do child runs reach their end? Overall, by role, and by model (runtime-scoped)."""
     children = [r for r in records if r["kind"] != "root"]
+    # Some runtimes (OpenCode today) never record that a child run finished; an ended run there is unknown.
+    reports_end = {r["runtime"] for r in children if r["activity_state"] == "complete"}
 
     def grouped(key_fn, label_fn):
         groups = defaultdict(list)
@@ -629,7 +634,7 @@ def _completion(records):
             key = key_fn(record)
             if key:
                 groups[key].append(record)
-        rows = [dict(label_fn(key), **_completion_row(members)) for key, members in groups.items()]
+        rows = [dict(label_fn(key), **_completion_row(members, reports_end)) for key, members in groups.items()]
         rows.sort(key=lambda row: (-row["stopped"], -row["runs"], row["id"]))
         return rows[:MAX_COMPLETION_ROWS], len(rows)
 
@@ -637,7 +642,7 @@ def _completion(records):
                                 lambda key: {"id": f"{key[1]}::{key[0]}", "role": key[1], "runtime": key[0]})
     models, model_count = grouped(lambda r: (r["runtime"], r["model"]) if r.get("model") else None,
                                   lambda key: {"id": f"{key[1]}::{key[0]}", "model": key[1], "runtime": key[0]})
-    return {"overall": _completion_row(children), "roles": roles, "role_count": role_count,
+    return {"overall": _completion_row(children, reports_end), "roles": roles, "role_count": role_count,
             "models": models, "model_count": model_count}
 
 

@@ -363,7 +363,7 @@ def _agent_usage_body_projection(usage):
     }
 
 
-AGENT_COMPLETION_FIELDS = ("runs", "finished", "stopped", "running", "unknown", "retry_runs")
+AGENT_COMPLETION_FIELDS = ("runs", "finished", "stopped", "running", "unknown", "no_end_evidence", "retry_runs")
 
 
 def _agent_completion_row(item, identity=()):
@@ -381,9 +381,9 @@ def _agent_completion_projection(completion):
     return {
         "overall": _agent_completion_row(completion.get("overall")),
         "roles": [_agent_completion_row(item, ("id", "role", "runtime"))
-                  for item in list(completion.get("roles") or ())[:12]],
+                  for item in list(completion.get("roles") or ())[:40]],
         "models": [_agent_completion_row(item, ("id", "model", "runtime"))
-                   for item in list(completion.get("models") or ())[:12]],
+                   for item in list(completion.get("models") or ())[:40]],
         "role_count": _nonnegative_projection_int(completion.get("role_count")),
         "model_count": _nonnegative_projection_int(completion.get("model_count")),
     }

@@ -100,7 +100,8 @@ routine, everyday, and Complex+ (complex plus high-impact).
 
 All modules count sessions *started* in the selected range (1 day, 1 week,
 1 month, 3, 6, 12 months, or all history), except the area allocation, which
-spreads turns and spend across the days they happened.
+spreads turns and spend across the days they happened (sessions without a
+daily split count their cost on their start day).
 
 ## 4. Page modules
 
@@ -165,32 +166,39 @@ suggestions (`live_session_hints`), computed when the live state refreshes:
 | Suggestion | When |
 | --- | --- |
 | Two pushbacks in a row | the last two confidently labeled follow-ups were pushback |
-| Complex work on a light model | Complex+ request on a light-tier model with at least one pushback |
+| Complex work on a light model | Complex+ request on a light-tier model that has had pushback in this session (a per-session check, looser than Right-sizing's median rule) |
 | Routine request on a premium model | routine request on a premium-tier model; names the app's most-used standard model |
 | High reasoning effort on routine work | routine request at xhigh, max, or ultra effort |
 | Long session | 30 or more requests so far |
-| Newer, cheaper model | a newer version of the same model family, cheaper per token, that this user has run 5+ times in the same app |
 
-The first four need Work labels; the last two work without them. The menu bar
-gets the same suggestions as `live_hints` (stable id, title, body; no paths or
-titles) and notifies once per session and suggestion, remembering the last 200
-ids. **Settings → Work insights → Notify me about live suggestions** turns this
-off (`live_notifications`, on by default).
+The first four need Work labels; the long-session check works without them.
+Model-switch advice that needs outcome evidence (a cheaper or newer model)
+stays in Right-sizing. A resumed session uses its newest trace file.
+
+The menu bar gets the same suggestions as `live_hints` (stable id, title, and
+body naming only the app and model) and sends one notification per suggestion
+for each running session, remembering the last 200 ids. Notifications are
+sent only while Work insights are on and **Notify me about live suggestions**
+is checked (`live_notifications`, on by default within Work insights). The
+first poll after installing only records what is already showing.
 
 ## 7. Subagents: do they finish?
 
 The Subagents page opens with **Do subagents finish?**, from the child-agent
 records Token Meter already reads (`agent_usage.completion`):
 
-- **Finished**: the run's trace reached its end. **Stopped early**: it ended
+- **Finished**: the run's trace reached its end. **Incomplete**: it ended
   without finishing (interrupted or crashed). **Still running** runs are left
-  out of the finish rate. **Retried**: at least one retry or failed attempt.
-- Per role and per model (scoped by app): runs, finish rate, stopped runs,
-  spend on stopped runs, and cost per finished run; rows with a finish rate
-  under 80% (3+ ended runs) are highlighted.
+  out of the finish rate, and so are ended runs from apps that never record a
+  finish (OpenCode today), which count as "without a recorded finish".
+  **Retried**: at least one retry or failed attempt.
+- Per role and per model (scoped by app): runs, finish rate, incomplete runs,
+  spend on them, and cost per finished run, most incomplete first; rows with
+  a finish rate under 80% (3+ ended runs) are highlighted. The card covers all
+  apps, projects, and time; the page filters below it do not apply.
 - **How the sessions ended** compares sessions with and without subagents
-  (two or more requests each) using Work labels: resolved rate, pushback, and
-  cost per resolved session. It is a pattern, not a cause: sessions that use
+  (two or more requests each) using Work labels over all history: resolved
+  rate, pushback, and cost per resolved session. It is a pattern, not a cause: sessions that use
   subagents are often bigger jobs.
 
 Finished does not prove the result was right; the outcome comparison is the

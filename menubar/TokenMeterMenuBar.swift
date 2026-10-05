@@ -1095,6 +1095,8 @@ final class TokenMeterMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var monthlyBudget: MonthlyBudget?
     private var deliveredLiveHintIDs: [String] =
         tokenMeterDefaults.stringArray(forKey: liveHintNotificationIDsDefaultsKey) ?? []
+    // The first poll ever only records what is already showing, so an update never sends a burst.
+    private var liveHintsSeeded = tokenMeterDefaults.object(forKey: liveHintNotificationIDsDefaultsKey) != nil
     private var softwareUpdate = SoftwareUpdateSnapshot.waiting
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -2288,20 +2290,23 @@ final class TokenMeterMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// One notification per running session and suggestion; the server only sends hints when
     /// "Notify me about live suggestions" is on in Settings.
     private func evaluateLiveHintNotifications(_ hints: [[String: Any]]) {
-        var changed = false
+        var changed = !liveHintsSeeded
         for hint in hints.prefix(12) {
             guard let id = hint["id"] as? String, !id.isEmpty,
                   let title = hint["title"] as? String,
                   let body = hint["body"] as? String,
                   !deliveredLiveHintIDs.contains(id)
             else { continue }
-            deliverQuotaNotification(title: "Token Meter: \(title)", body: body)
+            if liveHintsSeeded {
+                deliverQuotaNotification(title: "Token Meter: \(title)", body: body)
+            }
             deliveredLiveHintIDs.append(id)
             changed = true
         }
         if deliveredLiveHintIDs.count > maxRememberedLiveHintIDs {
             deliveredLiveHintIDs.removeFirst(deliveredLiveHintIDs.count - maxRememberedLiveHintIDs)
         }
+        liveHintsSeeded = true
         if changed {
             tokenMeterDefaults.set(deliveredLiveHintIDs, forKey: liveHintNotificationIDsDefaultsKey)
         }

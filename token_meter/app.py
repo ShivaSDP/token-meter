@@ -8160,10 +8160,13 @@ def attach_live_hints(current, rows):
     """Add Right-sizing style suggestions to each running session; label-based ones need Work insights."""
     service = (work_insights_service()
                if work_insights_supported() and work_insights_settings()["enabled"] else None)
-    hints = _domain_live_session_hints(
-        rows, current, service.snapshot() if service else {},
-        service.session_key if service else (lambda _row_id: ""), _work_output_price,
-        corrections_for=service.session_corrections if service else None)
+    try:
+        hints = _domain_live_session_hints(
+            rows, current, service.snapshot() if service else {},
+            service.session_key if service else (lambda _row_id: ""), _work_output_price,
+            corrections_for=service.session_corrections if service else None)
+    except Exception:  # Suggestions are optional; never let them break the live session payload.
+        hints = {}
     for summary in current or ():
         summary["hints"] = hints.get(str(summary.get("session") or ""), [])
     return current
@@ -8171,14 +8174,18 @@ def attach_live_hints(current, rows):
 
 def live_hint_notifications(current):
     """Bounded, content-free notifications for the menu bar: one stable id per session and hint."""
-    if not (work_insights_supported() and work_insights_settings().get("live_notifications", True)):
+    settings = work_insights_settings()
+    # Notifications are part of the opt-in Work insights feature, never on for people who did not turn it on.
+    if not (work_insights_supported() and settings["enabled"] and settings.get("live_notifications", True)):
         return []
     out = []
     for summary in current or ():
         for hint in summary.get("hints") or ():
             ident = hashlib.sha256(f"{summary.get('session')}\0{hint['kind']}".encode("utf-8")).hexdigest()[:16]
+            where = " · ".join(part for part in (str(summary.get("runtime") or "")[:40],
+                                                  str(summary.get("primary_model") or "")[:80]) if part)
             out.append({"id": ident, "title": hint["title"][:80],
-                        "body": f"{hint['detail'][:200]} ({summary.get('runtime') or 'session'})"})
+                        "body": f"{hint['detail'][:200]}{f' ({where})' if where else ''}"})
     return out[:12]
 
 

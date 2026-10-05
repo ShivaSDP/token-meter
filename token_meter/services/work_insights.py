@@ -61,7 +61,8 @@ RATE_CHOICES = (5, 10, 20, 40, 60)
 DEFAULT_RATE_PER_MINUTE = 5  # Gentle enough for a 4B model on a low-end laptop.
 BACKFILL_CHOICES = (30, 90, 365, 0)
 MIN_AREAS, MAX_AREAS = 2, 8
-RESERVED_AREA_NAMES = ("unclear", "pending", "no request text", "outside history")
+RESERVED_AREA_NAMES = ("unclear", "pending", "no request text", "outside history", "not labeled yet",
+                       "outside labeling history")
 MAX_AREA_NAME, MAX_AREA_DESCRIPTION = 40, 160
 
 WORK_TYPES = {
@@ -312,8 +313,14 @@ def normalize_settings(raw):
         settings["ollama_url"] = validate_ollama_url(raw.get("ollama_url") or DEFAULT_URL)
     except ValueError:
         pass
+    stored = raw.get("areas")
+    if isinstance(stored, list):
+        # A saved area whose name became reserved keeps its place under a distinct name.
+        stored = [dict(area, name=f"{area.get('name')} (area)")
+                  if isinstance(area, dict) and str(area.get("name") or "").strip().lower() in RESERVED_AREA_NAMES
+                  else area for area in stored]
     try:
-        areas = normalize_areas(raw.get("areas"))
+        areas = normalize_areas(stored)
     except ValueError:
         areas = None
     if areas and (raw.get("areas_version") == AREAS_VERSION

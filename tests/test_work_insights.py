@@ -2116,6 +2116,10 @@ class SubagentCompletionTests(unittest.TestCase):
         self.assertAlmostEqual(overall["finish_rate"], 2 / 3)
         self.assertEqual((overall["stopped_cost"], overall["cost_per_finished"], overall["retry_runs"]), (5.0, 3.0, 1))
         self.assertEqual(out["roles"][0]["role"], "tester")
+        no_end = [self.record("o1", "incomplete", 3.0, runtime="opencode"), self.record("o2", "incomplete", runtime="opencode")]
+        mixed = agents._completion(records + no_end)["overall"]
+        self.assertEqual((mixed["stopped"], mixed["no_end_evidence"], mixed["stopped_cost"]), (1, 2, 5.0))
+        self.assertAlmostEqual(mixed["finish_rate"], 2 / 3)
         projected = __import__("token_meter.projections", fromlist=["x"])._agent_completion_projection(out)
         self.assertEqual(set(projected), {"overall", "roles", "models", "role_count", "model_count"})
         self.assertEqual(projected["roles"][0]["runtime"], "codex")
@@ -2141,28 +2145,35 @@ class LiveHintTests(unittest.TestCase):
         self.assertEqual(out["live.jsonl"][1]["to_model"], "mid")
         self.assertTrue(all(hint["title"] and hint["detail"] for hint in out["live.jsonl"]))
 
-    def test_long_session_and_newer_model_need_no_labels(self):
+    def test_long_session_needs_no_labels_and_model_switches_stay_on_the_work_page(self):
         live = row("live", model="claude-opus-4-8", runtime="Claude", turns_=30)
         live["session"] = "live.jsonl"
         newer = [row(f"n{i}", model="claude-opus-5-5", runtime="Claude") for i in range(5)]
         out = self.hints([live, *newer], [{"session": "live.jsonl"}])
-        self.assertEqual([hint["kind"] for hint in out["live.jsonl"]], ["long_thread", "newer_version"])
-        self.assertIn("20% less per token", out["live.jsonl"][1]["detail"])
-        self.assertEqual(self.hints([live, *newer[:4]], [{"session": "live.jsonl"}])["live.jsonl"][0]["kind"],
-                         "long_thread")
+        self.assertEqual([hint["kind"] for hint in out["live.jsonl"]], ["long_thread"])
+
+    def test_resumed_sessions_use_their_newest_file(self):
+        old, new = row("x", turns_=40), row("x", turns_=2)
+        old["session"] = new["session"] = "x.jsonl"
+        old["mtime"], new["mtime"] = 100, 200
+        self.assertEqual(self.hints([new, old], [{"session": "x.jsonl"}]), {})
 
     def test_menu_bar_notifications_are_bounded_and_respect_the_setting(self):
         current = [{"session": "a.jsonl", "runtime": "Codex",
                     "hints": [{"kind": "long_thread", "title": "Long session", "detail": "30 requests so far."}]}]
         with mock.patch.object(meter, "work_insights_supported", return_value=True), \
                 mock.patch.object(meter, "work_insights_settings", return_value=W.normalize_settings({})):
+            self.assertEqual(meter.live_hint_notifications(current), [], "off until Work insights is on")
+        with mock.patch.object(meter, "work_insights_supported", return_value=True), \
+                mock.patch.object(meter, "work_insights_settings",
+                                  return_value=W.normalize_settings({"enabled": True})):
             first = meter.live_hint_notifications(current)
             self.assertEqual(first, meter.live_hint_notifications(current))
             self.assertEqual(set(first[0]), {"id", "title", "body"})
             self.assertNotIn("a.jsonl", json.dumps(first))
         with mock.patch.object(meter, "work_insights_supported", return_value=True), \
                 mock.patch.object(meter, "work_insights_settings",
-                                  return_value=W.normalize_settings({"live_notifications": False})):
+                                  return_value=W.normalize_settings({"enabled": True, "live_notifications": False})):
             self.assertEqual(meter.live_hint_notifications(current), [])
 
     def test_live_notification_setting_is_validated_and_public(self):
@@ -2186,3 +2197,12 @@ class LiveHintTests(unittest.TestCase):
         self.assertLess(page.index("let subagentCompletionDim"), page.index("function applyHashRoute(){"))
         for marker in ("evaluateLiveHintNotifications", '"TokenMeterLiveHintNotificationIDs"', 'dict["live_hints"]'):
             self.assertIn(marker, swift)
+
+
+class ReservedAreaMigrationTests(unittest.TestCase):
+    def test_a_stored_area_with_a_reserved_name_is_renamed_not_reset(self):
+        stored = [{"name": "Mobile", "description": "iOS"}, {"name": "Outside history", "description": "old"}]
+        areas = W.normalize_settings({"areas": stored, "areas_version": W.AREAS_VERSION})["areas"]
+        self.assertEqual([a["name"] for a in areas], ["Mobile", "Outside history (area)"])
+        with self.assertRaises(ValueError):
+            W.normalize_areas([{"name": "Not labeled yet", "description": "x"}, {"name": "Web", "description": "y"}])

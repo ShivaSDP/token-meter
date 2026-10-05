@@ -976,18 +976,17 @@ def find_sessions(rows, labels, key_for, areas, output_price, filters, months=6,
     }
 
 
-LIVE_HINT_ORDER = ("pushback_streak", "light_complex", "premium_routine", "effort_routine", "long_thread",
-                   "newer_version")
+LIVE_HINT_ORDER = ("pushback_streak", "light_complex", "premium_routine", "effort_routine", "long_thread")
 MAX_LIVE_HINTS = 3
-MIN_SIBLING_SESSIONS = 5
+MAX_HINT_MODEL = 80
 
 
 def live_session_hints(rows, current, labels, key_for, output_price, corrections_for=None):
     """Suggestions for running sessions, keyed by trace key; content-free and bounded.
 
-    Uses the same rules as Right-sizing, applied to one session: routine work on a premium model or
-    high effort, complex work on a light model that got pushback, two pushbacks in a row, a long thread,
-    and a newer, cheaper version of the same model that this user already runs in the same app.
+    Per-session versions of the Right-sizing checks: routine work on a premium model or at high effort,
+    complex work on a light model that has had pushback in this session, the last two labeled follow-ups
+    both pushback, and 30+ requests. Model-switch advice that needs outcome evidence stays on the Work page.
     """
     wanted = {str(c.get("session") or "") for c in current or () if c.get("session")}
     if not wanted:
@@ -999,12 +998,14 @@ def live_session_hints(rows, current, labels, key_for, output_price, corrections
     for (runtime, model), _count in used.most_common():
         if tiers.get((runtime, model)) == "standard":
             standard.setdefault(runtime, model)
-    out = {}
+    out, newest = {}, {}
     for row in rows:
         key = _trace_key(row)
-        if key not in wanted or is_child_row(row):
-            continue
-        runtime, model = row.get("runtime") or "", primary_model(row)
+        # Resumed sessions span several files with one key; the newest file is the live one.
+        if key in wanted and not is_child_row(row) and (row.get("mtime") or 0) >= (newest.get(key, {}).get("mtime") or 0):
+            newest[key] = row
+    for key, row in newest.items():
+        runtime, model = row.get("runtime") or "", primary_model(row)[:MAX_HINT_MODEL]
         entry = labels.get(key_for(work_identity(row))) or {}
         complexity = entry.get("complexity") or ""
         tier = tiers.get((runtime, model))
@@ -1012,7 +1013,8 @@ def live_session_hints(rows, current, labels, key_for, output_price, corrections
         turns = len(turn_days(row))
         hints = []
         if complexity == "routine" and tier == "premium":
-            hints.append({"kind": "premium_routine", "model": model, "to_model": standard.get(runtime) or ""})
+            hints.append({"kind": "premium_routine", "model": model,
+                          "to_model": (standard.get(runtime) or "")[:MAX_HINT_MODEL]})
         if complexity == "routine" and effort in HIGH_EFFORTS:
             hints.append({"kind": "effort_routine", "effort": effort})
         if complexity in ("complex", "high_impact") and tier == "light" and int(entry.get("corrections") or 0) > 0:
@@ -1023,16 +1025,6 @@ def live_session_hints(rows, current, labels, key_for, output_price, corrections
                 hints.append({"kind": "pushback_streak"})
         if turns >= LONG_THREAD_TURNS:
             hints.append({"kind": "long_thread", "turns": turns})
-        price, version = prices.get((runtime, model)), model_version(model)
-        if price and version:
-            siblings = [(m, prices[(r, m)]) for (r, m), count in used.items()
-                        if r == runtime and m != model and count >= MIN_SIBLING_SESSIONS and (r, m) in prices
-                        and model_family(m) == model_family(model) and model_version(m) > version
-                        and prices[(r, m)] < price]
-            if siblings:
-                to_model, to_price = min(siblings, key=lambda item: item[1])
-                hints.append({"kind": "newer_version", "model": model, "to_model": to_model,
-                              "saving_share": round(1 - to_price / price, 4)})
         hints.sort(key=lambda hint: LIVE_HINT_ORDER.index(hint["kind"]))
         if hints:
             out[key] = [dict(hint, **_live_hint_text(hint)) for hint in hints[:MAX_LIVE_HINTS]]
@@ -1042,7 +1034,7 @@ def live_session_hints(rows, current, labels, key_for, output_price, corrections
 def _live_hint_text(hint):
     kind = hint["kind"]
     if kind == "pushback_streak":
-        return {"title": "Two pushbacks in a row",
+        return {"title": "Two pushbacks in a row",  # the last two confidently labeled follow-ups
                 "detail": "Restate the goal in one message, or start a fresh session with what you learned."}
     if kind == "light_complex":
         return {"title": "Complex work on a light model",
@@ -1054,9 +1046,6 @@ def _live_hint_text(hint):
     if kind == "effort_routine":
         return {"title": "High reasoning effort on routine work",
                 "detail": f"{hint['effort']} effort costs more than a routine request needs. Try medium."}
-    if kind == "long_thread":
-        return {"title": "Long session",
-                "detail": f"{hint['turns']} requests so far, and each re-sends the conversation. "
-                          "A fresh session with a short summary costs less."}
-    return {"title": "Newer, cheaper model",
-            "detail": f"{hint['to_model']} costs {round(100 * hint['saving_share'])}% less per token than {hint['model']}."}
+    return {"title": "Long session",
+            "detail": f"{hint['turns']} requests so far, and each re-sends the conversation. "
+                      "A fresh session with a short summary costs less."}
