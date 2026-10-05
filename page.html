@@ -7797,8 +7797,8 @@ async function loadSubagentOutcomes(){
  try{
   const response=await fetch('/work?months=0',{cache:'no-store'}),payload=await response.json();
   if(!response.ok||!payload.ok)subagentOutcomeState='error';
-  else if(!payload.settings?.enabled)subagentOutcomeState='off';
-  else{subagentOutcomes=payload.insights?.subagent_outcomes||null;subagentOutcomeState=subagentOutcomes?.with?.judged_sessions||subagentOutcomes?.without?.judged_sessions?'ready':'empty';}
+  else if(!payload.settings?.enabled){subagentOutcomeState='off';subagentOutcomes=null;}
+  else{subagentOutcomes=payload.insights?.subagent_outcomes||null;subagentOutcomeState=subagentOutcomes?.with?.judged_sessions||subagentOutcomes?.without?.judged_sessions?'ready':'empty';if(subagentOutcomeState==='empty')subagentOutcomes=null;}
  }catch(error){subagentOutcomeState='error';}
  subagentOutcomesAt=Date.now();
  if(LATEST)renderSubagentCompletion(LATEST.xsession?.agent_usage);
