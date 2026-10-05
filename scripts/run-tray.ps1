@@ -309,7 +309,7 @@ function Save-TraySettings($SettingsPath, $Settings) {
 
 function Format-PanelText($State) {
     if (-not $State -or -not [bool](Get-Value $State "ok" $false)) {
-        return "Token Meter — waiting for server"
+        return "Token Meter - waiting for server"
     }
     $Cost = 0.0
     [double]::TryParse(
@@ -329,7 +329,7 @@ function Format-PanelText($State) {
     if ($Model) { $Parts.Add($Model) }
     $Parts.Add("$Tokens tokens")
     $Parts.Add("`$$($Cost.ToString('0.00', [System.Globalization.CultureInfo]::InvariantCulture)) est")
-    return ($Parts -join " · ")
+    return ($Parts -join " | ")
 }
 
 function New-UsagePanel {
