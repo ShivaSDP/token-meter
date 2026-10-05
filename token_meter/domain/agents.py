@@ -509,6 +509,18 @@ def _role_rows(records, attention_ids):
     return rows
 
 
+def _with_activity(rows, records, key_fn):
+    """Add complete / incomplete / working counts to cohort rows keyed by ``key_fn(record) == row["id"]``."""
+    states = defaultdict(lambda: defaultdict(int))
+    for record in records:
+        states[key_fn(record)][record["activity_state"]] += 1
+    for row in rows:
+        counts = states.get(row["id"], {})
+        row.update({"complete_agents": counts.get("complete", 0), "incomplete_agents": counts.get("incomplete", 0),
+                    "working_agents": counts.get("working", 0)})
+    return rows
+
+
 def _usage_body(entries):
     records = [record for record, _group in entries]
     groups = {}
@@ -572,6 +584,12 @@ def _usage_body(entries):
                 "kind": key[2],
             },
         ),
+        # One row per model in an app, whatever the run kind, for model trends.
+        "model_runtimes": _with_activity(_cohort_rows(
+            records,
+            lambda record: (record["runtime"], record["model"]),
+            lambda key: {"id": f"{key[1]}::{key[0]}", "runtime": key[0], "model": key[1]},
+        ), records, lambda record: f"{record['model']}::{record['runtime']}"),
         "depths": _cohort_rows(
             records,
             lambda record: (

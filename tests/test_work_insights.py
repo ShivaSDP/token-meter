@@ -1202,7 +1202,7 @@ class SurfaceContractTests(unittest.TestCase):
 
     def test_work_palette_uses_validated_product_hues(self):
         for marker in ("--w1:#079bc2;--w2:#c17a01;--w3:#c36b95;--w4:#af851e;--w5:#9979cd;--w6:#d66555;--w7:#5f8adf;--w8:#05a386",
-                       "--w-tier-light:#026e8b;--w-tier-standard:#0594ba;--w-tier-premium:#02bceb",
+                       "--w-tier-light:#05a386;--w-tier-standard:#5f8adf;--w-tier-premium:#c17a01",
                        "--w-accepted:var(--good);--w-recovered:var(--warn);--w-ended:var(--bad)",
                        ".workLine{fill:none;stroke:var(--spectrum-cyan)",
                        ".workGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:10px;align-items:stretch}"):
@@ -2219,3 +2219,21 @@ class AreaGuessTests(unittest.TestCase):
         september = next(b for b in out["allocation"] if b["month"] == "2026-09")
         self.assertEqual(september["spend"]["Personal"], 10.0)
         self.assertEqual((september["guess_spend"], september["guess_sessions"]), ({"Personal": 6.0}, {"Personal": 1}))
+
+
+class RightSizingColourTests(unittest.TestCase):
+    def test_effort_is_folded_into_three_bands_and_drills_accept_a_level_list(self):
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "page.html"),
+                  encoding="utf-8") as handle:
+            page = handle.read()
+        self.assertIn("{key:'extra',label:'Extra high+',levels:['xhigh','max','ultra']}", page)
+        rows = [row("a"), row("b")]
+        rows[0]["reasoning_effort"], rows[1]["reasoning_effort"] = "xhigh", "max"
+        out = domain.find_sessions(rows, {}, lambda ident: ident.split("\0")[0], DomainTests.AREAS, lambda m, p: None,
+                                   {"effort": "xhigh,max,ultra"}, today="2026-09-30")
+        self.assertEqual(out["total"], 2)
+        with mock.patch.object(meter, "TOKEN_METER_SETTINGS", os.path.join(tempfile.mkdtemp(), "s.json")), \
+                mock.patch.object(meter, "_work_service_instance", None), \
+                mock.patch.dict(meter._xsess, {"data": {"ok": True}, "internal_rows": tuple(rows)}):
+            self.assertEqual(meter.work_sessions_state({"months": ["6"], "effort": ["xhigh,max"]})[1], 200)
+            self.assertEqual(meter.work_sessions_state({"months": ["6"], "effort": ["xhigh,bogus"]})[1], 400)

@@ -497,3 +497,12 @@ sent to the classifier.
   $397 Unclear spend was one multi-area project (a developer tool with a UI).
 - Subagents page: model trends (`agent_usage.model_days`, projected) below
   role trends, sharing the Cost / run · Spend · Runs switch and "View runs".
+- Right-sizing colours: tier ramp (three close cyans) and six-step effort
+  purples were hard to read. Tiers and effort bands now share teal / blue /
+  amber (#05a386, #5f8adf, #c17a01; dark-surface validator: all checks pass,
+  worst adjacent CVD ΔE 14.7). Six distinct effort hues could not pass the
+  normal-vision floor, so effort folds into Low–medium, High, Extra high+;
+  drills accept a comma-separated effort list. Flag stripes are dark and the
+  label sits on a pill. Model trends use a runtime+model cohort
+  (`model_runtimes`, with activity counts) so a model run as several kinds is
+  one row.

@@ -113,7 +113,11 @@ daily split count their cost on their start day).
 1. **Right-sizing** (first): suggestions (below), "Spend to review" (spend on
    complexity-labeled sessions in any mismatched cell, counted once), the
    biggest single possible saving, and spend split by model tier and by
-   reasoning effort per complexity group. Striped segments are mismatches:
+   reasoning effort per complexity group. Both charts use the same three
+   validated hues, cheap to expensive: teal (light models; low–medium effort),
+   blue (standard; high), and amber (premium; xhigh, max, or ultra). Effort is
+   folded into those three bands for readability; the tables keep every level.
+   Striped segments are mismatches:
    premium models or xhigh/max/ultra effort on routine work, or light models on
    complex work whose pushback rate is above the median cell.
 2. **Where the spend went**: spend by area with a sparkline per area (three or

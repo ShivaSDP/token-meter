@@ -8286,7 +8286,9 @@ def work_sessions_state(query):
             [a["name"] for a in settings["areas"]] + [_work_domain_unclear, *_work_domain_unlabeled]):
         return {"ok": False, "error": "Area was not found."}, 404
     for name, allowed in WORK_DRILL_ENUMS.items():
-        if name in filters and filters[name] not in allowed:
+        # Effort may name several levels (an effort group); every other filter names one value.
+        values = filters[name].split(",") if name == "effort" and name in filters else [filters.get(name)]
+        if name in filters and not all(value in allowed for value in values):
             return {"ok": False, "error": "Choose a supported filter."}, 400
     if "model" in filters and "model_runtime" not in filters:
         filters["model_runtime"] = ""

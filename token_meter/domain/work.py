@@ -914,7 +914,7 @@ def find_sessions(rows, labels, key_for, areas, output_price, filters, months=6,
             continue
         if filters.get("tier") and s["tier"] != filters["tier"]:
             continue
-        if filters.get("effort") and s["effort"] != filters["effort"]:
+        if filters.get("effort") and s["effort"] not in filters["effort"].split(","):
             continue
         if filters.get("model") and (s["model"] != filters["model"]
                                      or (s["row"].get("runtime") or "") != filters.get("model_runtime", "")):

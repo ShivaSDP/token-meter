@@ -358,7 +358,7 @@ def _agent_usage_body_projection(usage):
         "totals": _agent_totals_projection(usage.get("totals")),
         **{
             key: _agent_cohort_projection(usage.get(key))
-            for key in ("runtimes", "models", "depths", "kinds", "roles")
+            for key in ("runtimes", "models", "model_runtimes", "depths", "kinds", "roles")
         },
     }
 
