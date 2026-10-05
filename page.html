@@ -1722,7 +1722,7 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 let WORK=null,workRequest=0,workLastLoadedAt=0,workMonths='6',workRuntime='',workProject='';
 let workSupported=null;
 let subagentCompletionDim=localStorage.getItem('tm_subagent_completion_dim')==='models'?'models':'roles';
-let subagentOutcomes=null,subagentOutcomesRequested=false,subagentCompletionAll=false,subagentOutcomeState='';
+let subagentOutcomes=null,subagentOutcomesRequested=false,subagentCompletionAll=false,subagentOutcomeState='',subagentOutcomesAt=0;
 let workSessionFilter=null,workFilterRequest=0;
 let WORK_SETTINGS=null,workAreasDraft=null;
 function durationShort(seconds){
@@ -6286,7 +6286,7 @@ async function saveWorkSettings(payload,message){
   const result=await postWorkAction('/settings/work-insights',payload);
   renderWorkSettings({settings:result.work_insights,status:result.status},{force:true});
   $('work-settings-status').textContent=message||'Saved locally.';
-  workLastLoadedAt=0;subagentOutcomesRequested=false;subagentOutcomes=null;subagentOutcomeState='';
+  workLastLoadedAt=0;subagentOutcomesRequested=false;subagentOutcomes=null;subagentOutcomeState='';subagentOutcomesAt=0;
  }catch(error){$('work-settings-status').textContent=error.message;}
 }
 $('work-areas').addEventListener('input',event=>{const input=event.target.closest('[data-area-index]');if(!input||!workAreasDraft)return;workAreasDraft[Number(input.dataset.areaIndex)][input.dataset.areaField]=input.value;});
@@ -7787,15 +7787,20 @@ function subagentOutcomeHtml(outcomes){
  }
  return `<div class=subagentOutcomeHead><b>How the sessions ended</b><small>Work labels, all history · estimates</small></div><div class=subagentOutcomeSides>${side('With subagents',a)}${side('Without subagents',b)}</div>${takeaway}`;
 }
+const SUBAGENT_OUTCOME_RETRY_MS=60000,SUBAGENT_OUTCOME_REFRESH_MS=300000;
 async function loadSubagentOutcomes(){
- if(subagentOutcomesRequested||workSupported!==true)return;
- subagentOutcomesRequested=true;subagentOutcomeState='loading';
+ if(workSupported!==true)return;
+ // One request at a time; after a failure wait a minute, and refresh good results every five minutes.
+ const wait=subagentOutcomeState==='error'?SUBAGENT_OUTCOME_RETRY_MS:SUBAGENT_OUTCOME_REFRESH_MS;
+ if(subagentOutcomesRequested&&(subagentOutcomeState==='loading'||Date.now()-subagentOutcomesAt<wait))return;
+ subagentOutcomesRequested=true;subagentOutcomesAt=Date.now();if(!subagentOutcomes)subagentOutcomeState='loading';
  try{
   const response=await fetch('/work?months=0',{cache:'no-store'}),payload=await response.json();
   if(!response.ok||!payload.ok)subagentOutcomeState='error';
   else if(!payload.settings?.enabled)subagentOutcomeState='off';
   else{subagentOutcomes=payload.insights?.subagent_outcomes||null;subagentOutcomeState=subagentOutcomes?.with?.judged_sessions||subagentOutcomes?.without?.judged_sessions?'ready':'empty';}
  }catch(error){subagentOutcomeState='error';}
+ subagentOutcomesAt=Date.now();
  if(LATEST)renderSubagentCompletion(LATEST.xsession?.agent_usage);
 }
 function renderSubagentCompletion(usage){
@@ -7807,9 +7812,9 @@ function renderSubagentCompletion(usage){
  $('sa-completion-note').textContent=`${overall.runs.toLocaleString()} child run${overall.runs===1?'':'s'} · all apps, projects, and time · the filters below do not apply here`;
  const stat=(label,value,detail,tone)=>`<div class=subagentCompletionStat data-tone="${tone||''}"><span>${esc(label)}</span><strong class=num>${esc(value)}</strong><small>${esc(detail)}</small></div>`;
  $('sa-completion-stats').innerHTML=[
-  stat('Finished',overall.finished.toLocaleString(),ended?`${workPercent(overall.finish_rate)} of runs that ended`:'none ended yet','good'),
+  stat('Finished',overall.finished.toLocaleString(),`${ended?`${workPercent(overall.finish_rate)} of runs that ended`:'none ended yet'}${overall.no_end_evidence?` · ${overall.no_end_evidence.toLocaleString()} more from apps that do not record a finish`:''}`,'good'),
   stat('Incomplete',overall.stopped.toLocaleString(),overall.stopped?`${money(overall.stopped_cost)} spent on them`:'none',overall.stopped?'warn':''),
-  stat('Still running',overall.running.toLocaleString(),overall.no_end_evidence?`not counted, nor ${overall.no_end_evidence.toLocaleString()} from apps that do not record a finish`:overall.running?'not counted in the finish rate':'none right now'),
+  stat('Still running',overall.running.toLocaleString(),overall.running?'not counted in the finish rate':'none right now'),
   stat('Retried',overall.retry_runs.toLocaleString(),'runs with a retry or failed attempt'),
  ].join('');
  document.querySelectorAll('[data-completion-dim]').forEach(button=>{const on=button.dataset.completionDim===subagentCompletionDim;button.classList.toggle('on',on);button.setAttribute('aria-pressed',String(on));});
@@ -7822,17 +7827,17 @@ function renderSubagentCompletion(usage){
   return `<tr data-low="${low}"><th scope=row><span class=workScoreName title="${esc(`${label} · ${app}`)}"><b>${esc(label)}</b><small>${esc(app)}${row.no_end_evidence?` · ${row.no_end_evidence} without a recorded finish`:''}</small></span></th><td><span class=mono>${row.runs.toLocaleString()}</span></td><td>${row.finish_rate==null?'<span class=workMuted>--</span>':`<span class=workMeter data-few="${ended<3}"${ended<3?' title="Fewer than 3 runs have ended"':''}><i><b style="width:${(100*row.finish_rate).toFixed(1)}%;--meter:${low?'var(--warn)':'var(--good)'}"></b></i><em class=mono>${workPercent(row.finish_rate)}</em></span>`}</td><td><span class=mono>${row.stopped?row.stopped.toLocaleString():'<span class=workMuted>0</span>'}</span></td><td><span class=mono>${row.stopped&&row.stopped_cost?money(row.stopped_cost):'<span class=workMuted>--</span>'}</span></td><td><span class=mono>${row.cost_per_finished==null?'<span class=workMuted>--</span>':money(row.cost_per_finished)}</span></td><td><span class=mono>${row.retry_runs?row.retry_runs.toLocaleString():'<span class=workMuted>0</span>'}</span></td></tr>`;
  }).join('')}</tbody>`:'<tbody><tr><td><div class=workEmpty>No child runs with this detail yet.</div></td></tr></tbody>';
  const shown=rows.length,total=Math.max(count||0,allRows.length);
- $('sa-completion-foot').innerHTML=`<span>Showing ${shown} of ${total} ${dimLabel}${total===1?'':'s'}, most incomplete runs first</span>${hiddenRows?`<button type=button class=subagentCompletionMore data-completion-more>Show all</button>`:subagentCompletionAll&&allRows.length>6?`<button type=button class=subagentCompletionMore data-completion-more>Show fewer</button>`:''}${overall.stopped?`<a class=subagentCompletionMore href="#sessions-subagents">Investigate incomplete runs</a>`:''}`;
+ $('sa-completion-foot').innerHTML=`<span>Showing ${shown} of ${total} ${dimLabel}${total===1?'':'s'}, most incomplete runs first</span>${hiddenRows?`<button type=button class=subagentCompletionMore data-completion-more>Show all</button>`:subagentCompletionAll&&allRows.length>6?`<button type=button class=subagentCompletionMore data-completion-more>Show fewer</button>`:''}${overall.stopped?`<a class=subagentCompletionMore href="#sessions-subagents" data-open-issues>Investigate incomplete runs</a>`:''}`;
  const outcome=$('sa-completion-outcome');
  outcome.innerHTML=workSupported!==true?'':subagentOutcomeState==='ready'?subagentOutcomeHtml(subagentOutcomes)
   :subagentOutcomeState==='loading'||!subagentOutcomeState?'<div class=subagentOutcomeHead><b>How the sessions ended</b></div><p>Loading Work labels…</p>'
   :subagentOutcomeState==='empty'?'<div class=subagentOutcomeHead><b>How the sessions ended</b></div><p>No labeled sessions yet. They appear as Work insights labels your sessions.</p>'
   :subagentOutcomeState==='off'?'<div class=subagentOutcomeHead><b>How the sessions ended</b></div><p>See whether sessions that use subagents end up resolved: <a href="#settings-work-insights">turn on Work insights</a>.</p>'
-  :'<div class=subagentOutcomeHead><b>How the sessions ended</b></div><p>Work labels could not be loaded. Token Meter tries again when you reopen this page.</p>';
- if(subagentOutcomeState==='error')subagentOutcomesRequested=false;
+  :'<div class=subagentOutcomeHead><b>How the sessions ended</b></div><p>Work labels could not be loaded. Token Meter tries again in a minute.</p>';
  outcome.hidden=!outcome.innerHTML;
 }
 $('sa-completion-foot').addEventListener('click',event=>{
+ if(event.target.closest('[data-open-issues]')){subagentView='issues';localStorage.setItem('tm_subagent_view','issues');return;}
  if(!event.target.closest('[data-completion-more]'))return;
  subagentCompletionAll=!subagentCompletionAll;
  if(LATEST)renderSubagentCompletion(LATEST.xsession?.agent_usage);

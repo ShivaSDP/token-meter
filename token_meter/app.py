@@ -8172,11 +8172,15 @@ def attach_live_hints(current, rows):
     return current
 
 
+def live_hint_notifications_enabled():
+    settings = work_insights_settings()
+    return bool(work_insights_supported() and settings["enabled"] and settings.get("live_notifications", True))
+
+
 def live_hint_notifications(current):
     """Bounded, content-free notifications for the menu bar: one stable id per session and hint."""
-    settings = work_insights_settings()
     # Notifications are part of the opt-in Work insights feature, never on for people who did not turn it on.
-    if not (work_insights_supported() and settings["enabled"] and settings.get("live_notifications", True)):
+    if not live_hint_notifications_enabled():
         return []
     out = []
     for summary in current or ():
@@ -10563,6 +10567,7 @@ def menubar_state(session_id=None):
         "today_spend": menubar_today_spend(cross),
         "work_insights": menubar_work_insights(),
         "live_hints": live_hint_notifications(cross.get("current_sessions")),
+        "live_hints_enabled": live_hint_notifications_enabled(),
         "cost_approx": st.get("cost_approx", False),
         "total_tokens": st.get("total_tokens", 0),
         "turns": st.get("turns", 0),

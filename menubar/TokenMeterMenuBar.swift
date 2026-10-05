@@ -1097,6 +1097,7 @@ final class TokenMeterMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         tokenMeterDefaults.stringArray(forKey: liveHintNotificationIDsDefaultsKey) ?? []
     // The first poll ever only records what is already showing, so an update never sends a burst.
     private var liveHintsSeeded = tokenMeterDefaults.object(forKey: liveHintNotificationIDsDefaultsKey) != nil
+    private var liveHintsWereEnabled = false
     private var softwareUpdate = SoftwareUpdateSnapshot.waiting
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1194,7 +1195,10 @@ final class TokenMeterMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 )
                 self.evaluateQuotaNotifications()
                 self.evaluateBudgetNotifications()
-                self.evaluateLiveHintNotifications(dict["live_hints"] as? [[String: Any]] ?? [])
+                self.evaluateLiveHintNotifications(
+                    dict["live_hints"] as? [[String: Any]] ?? [],
+                    enabled: dict["live_hints_enabled"] as? Bool ?? false
+                )
                 self.refreshMenu()
             }
         }.resume()
@@ -2289,7 +2293,11 @@ final class TokenMeterMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// One notification per running session and suggestion; the server only sends hints when
     /// "Notify me about live suggestions" is on in Settings.
-    private func evaluateLiveHintNotifications(_ hints: [[String: Any]]) {
+    private func evaluateLiveHintNotifications(_ hints: [[String: Any]], enabled: Bool) {
+        // Turning notifications on (or Work insights) records what is already showing instead of
+        // announcing every running session at once.
+        if enabled && !liveHintsWereEnabled { liveHintsSeeded = false }
+        liveHintsWereEnabled = enabled
         var changed = !liveHintsSeeded
         for hint in hints.prefix(12) {
             guard let id = hint["id"] as? String, !id.isEmpty,

@@ -2195,8 +2195,13 @@ class LiveHintTests(unittest.TestCase):
                        "live_notifications:event.target.checked", "renderSubagentCompletion(usage);"):
             self.assertIn(marker, page)
         self.assertLess(page.index("let subagentCompletionDim"), page.index("function applyHashRoute(){"))
-        for marker in ("evaluateLiveHintNotifications", '"TokenMeterLiveHintNotificationIDs"', 'dict["live_hints"]'):
+        for marker in ("evaluateLiveHintNotifications", '"TokenMeterLiveHintNotificationIDs"', 'dict["live_hints"]',
+                       'dict["live_hints_enabled"]', "if enabled && !liveHintsWereEnabled { liveHintsSeeded = false }"):
             self.assertIn(marker, swift)
+        # A failed outcome load waits before retrying instead of refetching on every live refresh.
+        self.assertIn("SUBAGENT_OUTCOME_RETRY_MS=60000", page)
+        self.assertNotIn("if(subagentOutcomeState==='error')subagentOutcomesRequested=false;", page)
+        self.assertIn("data-open-issues", page)
 
 
 class ReservedAreaMigrationTests(unittest.TestCase):
