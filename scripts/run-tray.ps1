@@ -401,6 +401,17 @@ function Update-UsagePanel($State) {
     } catch { }
 }
 
+function Set-PanelHoverText {
+    if ($null -eq $script:UsagePanel -or -not $script:PanelVisible) { return }
+    $Base = if ($script:LastState) { Format-PanelText $script:LastState } else { "Token Meter - waiting for server" }
+    $script:PanelLabel.Text = "$Base | Right-click for options"
+}
+
+function Clear-PanelHoverText {
+    if ($null -eq $script:UsagePanel -or -not $script:PanelVisible) { return }
+    $script:PanelLabel.Text = if ($script:LastState) { Format-PanelText $script:LastState } else { "Token Meter - waiting for server" }
+}
+
 function Start-UsagePanelDrag($Sender, $EventArgs) {
     if ($EventArgs.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
         $script:UsagePanelDragActive = $true
@@ -689,21 +700,12 @@ $script:UsagePanel, $script:PanelLabel = New-UsagePanel
 $script:UsagePanel.add_MouseDown({ param($s, $e) try { Start-UsagePanelDrag $s $e } catch { } })
 $script:UsagePanel.add_MouseMove({ try { Move-UsagePanelDrag } catch { } })
 $script:UsagePanel.add_MouseUp({ try { Stop-UsagePanelDrag } catch { } })
+$script:UsagePanel.add_MouseEnter({ try { Set-PanelHoverText } catch { } })
+$script:UsagePanel.add_MouseLeave({ try { Clear-PanelHoverText } catch { } })
 $script:PanelLabel.add_MouseDown({ param($s, $e) try { Start-UsagePanelDrag $s $e } catch { } })
 $script:PanelLabel.add_MouseUp({ try { Stop-UsagePanelDrag } catch { } })
-$script:PanelLabel.add_MouseEnter({
-    try {
-        if ($script:LastState) {
-            $Base = Format-PanelText $script:LastState
-            $script:PanelLabel.Text = "Token Meter | $Base | Right-click for options"
-        }
-    } catch { }
-})
-$script:PanelLabel.add_MouseLeave({
-    try {
-        if ($script:LastState) { $script:PanelLabel.Text = Format-PanelText $script:LastState }
-    } catch { }
-})
+$script:PanelLabel.add_MouseEnter({ try { Set-PanelHoverText } catch { } })
+$script:PanelLabel.add_MouseLeave({ try { Clear-PanelHoverText } catch { } })
 $script:UsagePanel.add_LocationChanged({
     # Only persist position when the user is actively dragging.
     if ($script:UsagePanelDragActive) {
