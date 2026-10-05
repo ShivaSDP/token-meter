@@ -325,17 +325,17 @@ function Format-PanelText($State) {
 function New-UsagePanel {
     $Panel = New-Object System.Windows.Forms.Form
     $Panel.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+    $Panel.ControlBox = $false
     $Panel.ShowInTaskbar = $false
     $Panel.TopMost = $true
-    $Panel.Height = 30
-    $Panel.Width = 420
-    $Panel.BackColor = [System.Drawing.Color]::FromArgb(31, 41, 55)
     $Panel.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+    $Panel.BackColor = [System.Drawing.Color]::FromArgb(31, 41, 55)
+    $Panel.ClientSize = New-Object System.Drawing.Size(420, 30)
 
     $Label = New-Object System.Windows.Forms.Label
     $Label.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Regular)
-    $Label.ForeColor = [System.Drawing.Color]::FromArgb(245, 245, 245)
-    $Label.BackColor = [System.Drawing.Color]::Transparent
+    $Label.ForeColor = [System.Drawing.Color]::White
+    $Label.BackColor = $Panel.BackColor
     $Label.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
     $Label.AutoEllipsis = $true
     $Label.Dock = [System.Windows.Forms.DockStyle]::Fill
@@ -344,27 +344,49 @@ function New-UsagePanel {
 }
 
 function Set-PanelPosition($Panel, $X, $Y) {
-    $WorkArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-    $BottomReserve = 48
+    $Screen = [System.Windows.Forms.Screen]::FromPoint($Panel.Location)
+    $WorkArea = $Screen.WorkingArea
+    $BottomReserve = if ($WorkArea.Bottom -eq $Screen.Bounds.Bottom) { 48 } else { 0 }
     $ClampedX = [Math]::Max($WorkArea.Left, [Math]::Min($X, $WorkArea.Right - $Panel.Width))
     $ClampedY = [Math]::Max($WorkArea.Top, [Math]::Min($Y, $WorkArea.Bottom - $Panel.Height - $BottomReserve))
-    $Panel.SetDesktopLocation($ClampedX, $ClampedY)
+    $Panel.Location = New-Object System.Drawing.Point($ClampedX, $ClampedY)
 }
 
 function Update-UsagePanel($State) {
     if ($null -eq $script:UsagePanel -or -not $script:PanelVisible) { return }
-    $script:PanelLabel.Text = Format-PanelText $State
-    if (-not $script:UsagePanel.Visible) {
-        $SavedX = [int]($script:TraySettings["panel_x"])
-        $SavedY = [int]($script:TraySettings["panel_y"])
-        if ($SavedX -ge 0 -and $SavedY -ge 0) {
-            Set-PanelPosition $script:UsagePanel $SavedX $SavedY
-        } else {
-            $WorkArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-            Set-PanelPosition $script:UsagePanel ($WorkArea.Right - $script:UsagePanel.Width - 12) ($WorkArea.Bottom - $script:UsagePanel.Height - 48)
-        }
-        $script:UsagePanel.Show()
+    $Text = Format-PanelText $State
+    $script:PanelLabel.Text = $Text
+    try {
+        $Measured = [System.Windows.Forms.TextRenderer]::MeasureText($Text, $script:PanelLabel.Font)
+        $NewWidth = [Math]::Max(280, [Math]::Min(900, $Measured.Width + 36))
+        $script:UsagePanel.ClientSize = New-Object System.Drawing.Size($NewWidth, 30)
+    } catch { }
+}
+
+function Start-UsagePanelDrag($Sender, $EventArgs) {
+    if ($EventArgs.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+        $script:UsagePanelDragActive = $true
+        $script:UsagePanelDragCursor = [System.Windows.Forms.Control]::MousePosition
+        $script:UsagePanelDragOrigin = $script:UsagePanel.Location
+        $script:UsagePanel.Capture = $true
     }
+}
+
+function Move-UsagePanelDrag {
+    if (-not $script:UsagePanelDragActive) { return }
+    $Cursor = [System.Windows.Forms.Control]::MousePosition
+    $script:UsagePanel.Location = New-Object System.Drawing.Point(
+        ($script:UsagePanelDragOrigin.X + $Cursor.X - $script:UsagePanelDragCursor.X),
+        ($script:UsagePanelDragOrigin.Y + $Cursor.Y - $script:UsagePanelDragCursor.Y)
+    )
+    Set-PanelPosition $script:UsagePanel $script:UsagePanel.Left $script:UsagePanel.Top
+}
+
+function Stop-UsagePanelDrag {
+    if (-not $script:UsagePanelDragActive) { return }
+    $script:UsagePanelDragActive = $false
+    $script:UsagePanel.Capture = $false
+    Set-PanelPosition $script:UsagePanel $script:UsagePanel.Left $script:UsagePanel.Top
 }
 
 $RuntimeRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -376,6 +398,10 @@ $script:SelectedSessionId = ""
 $script:LastState = $null
 $script:Connected = $false
 $script:OpenProbePath = $OpenProbePath
+$script:TrayExiting = $false
+$script:UsagePanelDragActive = $false
+$script:UsagePanelDragCursor = $null
+$script:UsagePanelDragOrigin = $null
 
 function Write-TrayStatus([bool]$Ready, [bool]$Connected) {
     $Record = [ordered]@{
@@ -614,41 +640,12 @@ $script:NotifyIcon.Visible = $true
 $script:TraySettings = Load-TraySettings $SettingsPath
 $script:PanelVisible = [bool]$script:TraySettings["panel_visible"]
 $script:UsagePanel, $script:PanelLabel = New-UsagePanel
-$script:Dragging = $false
-$script:DragOffsetX = 0
-$script:DragOffsetY = 0
 
-$script:PanelLabel.add_MouseDown({
-    param($s, $e)
-    try {
-        if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
-            $script:Dragging = $true
-            $CursorPos = [System.Windows.Forms.Cursor]::Position
-            $script:DragOffsetX = [int]$CursorPos.X - [int]$script:UsagePanel.Left
-            $script:DragOffsetY = [int]$CursorPos.Y - [int]$script:UsagePanel.Top
-        }
-    } catch { $script:Dragging = $false }
-})
-$script:PanelLabel.add_MouseMove({
-    param($s, $e)
-    try {
-        if ($script:Dragging) {
-            $CursorPos = [System.Windows.Forms.Cursor]::Position
-            Set-PanelPosition $script:UsagePanel ([int]$CursorPos.X - $script:DragOffsetX) ([int]$CursorPos.Y - $script:DragOffsetY)
-        }
-    } catch { $script:Dragging = $false }
-})
-$script:PanelLabel.add_MouseUp({
-    param($s, $e)
-    try {
-        if ($script:Dragging) {
-            $script:Dragging = $false
-            $script:TraySettings["panel_x"] = $script:UsagePanel.Left
-            $script:TraySettings["panel_y"] = $script:UsagePanel.Top
-            Save-TraySettings $SettingsPath $script:TraySettings
-        }
-    } catch { $script:Dragging = $false }
-})
+$script:UsagePanel.add_MouseDown({ param($s, $e) try { Start-UsagePanelDrag $s $e } catch { } })
+$script:UsagePanel.add_MouseMove({ try { Move-UsagePanelDrag } catch { } })
+$script:UsagePanel.add_MouseUp({ try { Stop-UsagePanelDrag } catch { } })
+$script:PanelLabel.add_MouseDown({ param($s, $e) try { Start-UsagePanelDrag $s $e } catch { } })
+$script:PanelLabel.add_MouseUp({ try { Stop-UsagePanelDrag } catch { } })
 $script:PanelLabel.add_MouseEnter({
     try {
         if ($script:LastState) {
@@ -659,10 +656,33 @@ $script:PanelLabel.add_MouseEnter({
 })
 $script:PanelLabel.add_MouseLeave({
     try {
-        if ($script:LastState) {
-            $script:PanelLabel.Text = Format-PanelText $script:LastState
-        }
+        if ($script:LastState) { $script:PanelLabel.Text = Format-PanelText $script:LastState }
     } catch { }
+})
+$script:UsagePanel.add_LocationChanged({
+    try {
+        $script:TraySettings["panel_x"] = $script:UsagePanel.Left
+        $script:TraySettings["panel_y"] = $script:UsagePanel.Top
+        Save-TraySettings $SettingsPath $script:TraySettings
+    } catch { }
+})
+$script:UsagePanel.add_FormClosing({
+    param($s, $e)
+    if ($script:PanelVisible -and -not $script:TrayExiting -and $e.CloseReason -notin @(
+        [System.Windows.Forms.CloseReason]::WindowsShutDown,
+        [System.Windows.Forms.CloseReason]::TaskManagerClosing
+    )) { $e.Cancel = $true }
+})
+$script:UsagePanel.add_VisibleChanged({
+    if (-not $script:TrayExiting -and $script:PanelVisible -and -not $script:UsagePanel.Visible) {
+        try {
+            $script:UsagePanel.BeginInvoke([System.Action]{
+                if (-not $script:TrayExiting -and $script:PanelVisible -and -not $script:UsagePanel.Visible) {
+                    $script:UsagePanel.Show()
+                }
+            }) | Out-Null
+        } catch { }
+    }
 })
 
 $Menu = New-Object System.Windows.Forms.ContextMenuStrip
@@ -751,10 +771,20 @@ $script:Context = New-Object System.Windows.Forms.ApplicationContext
 
 try {
     [System.IO.File]::WriteAllText($PidPath, "$PID`r`n", [System.Text.UTF8Encoding]::new($false))
+    $SavedX = [int]($script:TraySettings["panel_x"])
+    $SavedY = [int]($script:TraySettings["panel_y"])
+    if ($SavedX -ge 0 -and $SavedY -ge 0) {
+        Set-PanelPosition $script:UsagePanel $SavedX $SavedY
+    } else {
+        $WorkArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+        Set-PanelPosition $script:UsagePanel ($WorkArea.Right - $script:UsagePanel.Width - 12) ($WorkArea.Bottom - $script:UsagePanel.Height - 48)
+    }
+    if ($script:PanelVisible) { $script:UsagePanel.Show() }
     Invoke-TrayRefresh
     $Timer.Start()
     [System.Windows.Forms.Application]::Run($script:Context)
 } finally {
+    $script:TrayExiting = $true
     $Timer.Stop()
     $Timer.Dispose()
     $script:NotifyIcon.Visible = $false
