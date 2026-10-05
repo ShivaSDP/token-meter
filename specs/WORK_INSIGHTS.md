@@ -66,9 +66,11 @@ labels are read, so changing one needs no relabeling. (The 0.4 area cutoff
 labels 98% of a synthetic set at 81% accuracy, against 90% at 84% for 0.5.)
 
 Sessions without a label fall in one of three groups, shown muted after the
-areas: **No request text** (the trace has no typed request to read, for
-example runs started by another tool), **Outside labeling history** (older
-than the history setting), and **Not labeled yet** (waiting in the queue).
+areas: **No request text** (no typed request Token Meter can read, either
+because the app does not record one in a readable form, as with Kiro and Pi,
+or because the session never had one), **Outside labeling history** (last
+active before the history setting), and **Not labeled yet** (waiting in the
+queue).
 Only the last is real backlog; labeling progress counts only labelable
 sessions.
 

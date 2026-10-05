@@ -226,7 +226,7 @@
     <rect class="card" x="60" y="1158" width="480" height="112" rx="12"/>
     <text class="h4" x="84" y="1188">Try a cheaper model</text>
     <text class="t" x="84" y="1210">Same kind of work and complexity. Cheaper per token,</text>
-    <text class="t" x="84" y="1229">as often, no more pushback, ≤ 70% cost per resolved.</text>
+    <text class="t" x="84" y="1229">as often, similar pushback, ≤ 70% cost per resolved.</text>
     <text class="num" x="84" y="1254">Saving = cost difference × resolved sessions</text>
 
     <rect class="card" x="560" y="1158" width="480" height="112" rx="12"/>

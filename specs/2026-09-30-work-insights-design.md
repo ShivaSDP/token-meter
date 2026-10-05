@@ -476,3 +476,7 @@ sent to the classifier.
   harder complexity level; the copy then says to keep the current model there.
 - Setup: a `start()` after the old thread passed its restart check starts a
   new run (`_winding_down`).
+- Review follow-up: Outside history uses a session's newest activity (as the
+  classifier does), area bars count spend from rows without a daily split on
+  their start day, the new group names are reserved for areas, and labeling
+  progress rounds down.

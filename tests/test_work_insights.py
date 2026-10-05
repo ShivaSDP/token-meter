@@ -1353,6 +1353,8 @@ class AppIntegrationTests(unittest.TestCase):
                         {"outcome": ["x"]}, {"work_type": ["debug", "feature"]}):
                 self.assertEqual(meter.work_sessions_state(bad)[1], 400, bad)
             self.assertEqual(meter.work_sessions_state({"area": ["Nowhere"]})[1], 404)
+            for name in ("No request text", "Outside history", "Pending", "Unclear"):
+                self.assertEqual(meter.work_sessions_state({"months": ["6"], "area": [name]})[1], 200, name)
             self.assertEqual(meter.work_sessions_state({"project": ["missing"]})[1], 404)
             everything, _ = meter.work_sessions_state({"months": ["0"]})
         self.assertEqual(everything["total"], 1)
@@ -2048,6 +2050,23 @@ class UnlabeledReasonTests(unittest.TestCase):
                                      lambda m, p: None, {"area": "Outside history"}, today="2026-09-30",
                                      label_since="2026-07-02")
         self.assertEqual([s["id"] for s in found["sessions"]], ["old"])
+
+    def test_a_session_resumed_inside_the_history_is_not_outside_it(self):
+        resumed = row("resumed", day="2026-06-01")
+        resumed["_language_signal_events"] = {"positive": [{"day": "2026-06-01"}, {"day": "2026-09-25"}]}
+        out = self.build([resumed], {}, label_since="2026-07-02", months=6)
+        self.assertEqual(out["coverage"]["outside_sessions"], 0)
+
+    def test_reserved_names_cannot_be_custom_areas(self):
+        for name in ("No request text", "Outside history", "pending"):
+            with self.assertRaises(ValueError):
+                W.normalize_areas([{"name": name, "description": "x"}, {"name": "Web", "description": "y"}])
+
+    def test_spend_without_a_daily_split_still_counts_toward_its_area(self):
+        quiet = row("quiet", day="2026-09-20", turns_=0, cost=0.75)
+        quiet["_day_cost"] = {}
+        out = self.build([quiet], {})
+        self.assertEqual(sum(b["spend"].get("No request text", 0) for b in out["allocation"]), 0.75)
 
     def test_all_history_setting_keeps_old_sessions_pending(self):
         out = self.build([row("old", day="2026-07-01")], {}, label_since="")

@@ -5887,7 +5887,7 @@ const WORK_COMPLEXITY_LABELS={routine:'Routine',everyday:'Everyday',complex:'Com
 const WORK_TIER_LABELS={light:'Light models',standard:'Standard models',premium:'Premium models'};
 const WORK_UNLABELED_AREAS=['No request text','Outside history','Pending'],WORK_MUTED_AREAS=['Unclear',...WORK_UNLABELED_AREAS];
 const WORK_AREA_NAMES={Pending:'Not labeled yet','Outside history':'Outside labeling history'};
-const WORK_AREA_TIPS={Unclear:'The local model was not confident about the area.','No request text':'These traces have no typed request the local model could read, for example runs started by another tool.','Outside history':'Older than the labeling history in Settings → Work insights. Raise it to label these.',Pending:'Waiting for the local model.'};
+const WORK_AREA_TIPS={Unclear:'The local model was not confident about the area.','No request text':'Token Meter has no typed request to label for these sessions: the app does not record one Token Meter can read, or the session never had one.','Outside history':'Older than the labeling history in Settings → Work insights. Raise it to label these.',Pending:'Waiting for the local model.'};
 function workAreaColor(area,areas){
  if(area==='Unclear')return'var(--w-unclear)';
  if(WORK_UNLABELED_AREAS.includes(area))return'var(--w-pending)';
@@ -5939,7 +5939,7 @@ function renderWorkStatus(payload){
  const status=payload?.status||{},settings=payload?.settings||{},coverage=payload?.insights?.coverage||{};
  const state=status.reason==='delete_pending'?'storage_error':settings.enabled?status.state||'idle':'disabled';
  const labelable=Math.max(0,(coverage.sessions||0)-(coverage.no_text_sessions||0)-(coverage.outside_sessions||0));
- const share=labelable?Math.round(100*coverage.labeled_sessions/labelable):0;
+ const share=labelable?Math.floor(100*coverage.labeled_sessions/labelable):0;
  const progress=`Labeled ${share}% of labelable sessions in this period${status.pending?` · ${status.pending.toLocaleString()} pending`:''}${status.eta_s&&state==='running'?` · ${workDuration(status.eta_s)}`:''}`;
  const copy={
   disabled:['Off','Work insights are off','Turn on local classification in Settings to label sessions.'],

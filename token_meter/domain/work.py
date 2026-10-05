@@ -239,7 +239,7 @@ def _prepare_sessions(rows, labels, key_for, area_names, tiers, runtime, project
         if area == PENDING:
             if not days:
                 area = NO_TEXT
-            elif label_since and (start_day or days[0]) < label_since:
+            elif label_since and max(days) < label_since:  # the classifier skips by newest activity
                 area = OUTSIDE
         sessions.append({
             "row": row, "entry": entry, "area": area,
@@ -258,6 +258,15 @@ def _prepare_sessions(rows, labels, key_for, area_names, tiers, runtime, project
             "pending": bool(pending_keys) and key_for(work_identity(row)) in pending_keys,
         })
     return sessions, runtime_options, project_options
+
+
+def _day_costs(s):
+    """Spend by day; rows without a daily split (some runtimes) count their cost on the start day."""
+    day_cost = s["row"].get("_day_cost") or {}
+    if day_cost or not _cost(s):
+        return day_cost
+    day = (s["row"].get("start") or "")[:10] or (s["days"][0] if s["days"] else "")
+    return {day: _cost(s)} if day else {}
 
 
 def _session_buckets(s, grain):
@@ -304,7 +313,7 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
                 bucket["turns"][s["area"]] += 1
         if s["start"] in by_month:
             by_month[s["start"]]["sessions"][s["area"]] += 1
-        for day, cost in (s["row"].get("_day_cost") or {}).items():
+        for day, cost in _day_costs(s).items():
             bucket = by_month.get(_bucket(str(day), grain))
             if bucket:
                 bucket["spend"][s["area"]] += float(cost or 0)

@@ -61,6 +61,7 @@ RATE_CHOICES = (5, 10, 20, 40, 60)
 DEFAULT_RATE_PER_MINUTE = 5  # Gentle enough for a 4B model on a low-end laptop.
 BACKFILL_CHOICES = (30, 90, 365, 0)
 MIN_AREAS, MAX_AREAS = 2, 8
+RESERVED_AREA_NAMES = ("unclear", "pending", "no request text", "outside history")
 MAX_AREA_NAME, MAX_AREA_DESCRIPTION = 40, 160
 
 WORK_TYPES = {
@@ -237,8 +238,8 @@ def normalize_areas(values):
             raise ValueError(f"Area descriptions must be 1 to {MAX_AREA_DESCRIPTION} characters.")
         if name.lower() in seen:
             raise ValueError("Area names must be unique.")
-        if name.lower() in ("unclear", "pending"):
-            raise ValueError("Unclear and Pending are reserved area names.")
+        if name.lower() in RESERVED_AREA_NAMES:
+            raise ValueError("Unclear, Pending, No request text, and Outside history are reserved area names.")
         seen.add(name.lower())
         areas.append({"name": name, "description": description})
     return areas
