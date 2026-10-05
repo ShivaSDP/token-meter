@@ -434,6 +434,7 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
         "tags": _tag_summary(in_window, tag_context),
         "rhythm": rhythm,
         "recommendations": _recommendations(in_window, opportunities, tiers, model_prices or {}),
+        "subagent_outcomes": _subagent_outcomes(in_window),
         "coverage": {
             "sessions": len(in_window), "labeled_sessions": labeled_sessions,
             "no_text_sessions": sum(1 for s in in_window if s["area"] == NO_TEXT),
@@ -445,6 +446,27 @@ def _aggregate(sessions, all_months, month_set, segments, area_names, tiers, tie
             "projects": [name for name, _ in project_options.most_common(50)],
         },
     }
+
+
+def _outcome_summary(group):
+    outcomes = [_outcome(s) for s in group]
+    judged = sum(o in ("accepted", "recovered", "ended_on_pushback") for o in outcomes)
+    resolved = [s for s, o in zip(group, outcomes) if o in ("accepted", "recovered")]
+    return {
+        "sessions": len(group), "judged_sessions": judged,
+        "resolved_rate": len(resolved) / judged if judged else None,
+        "ended_on_pushback": sum(o == "ended_on_pushback" for o in outcomes),
+        "pushback": _rate(sum(s["corrections"] for s in group), sum(s["correction_labels"] for s in group)),
+        "cost_per_resolved": sum(_cost(s) for s in resolved) / len(resolved) if resolved else None,
+        "spend": round(sum(_cost(s) for s in group), 6),
+    }
+
+
+def _subagent_outcomes(in_window):
+    """How sessions that ran subagents ended, next to sessions that did not (labels are estimates)."""
+    multi = [s for s in in_window if s["turns"] > 1]
+    return {"with": _outcome_summary([s for s in multi if s["children"]]),
+            "without": _outcome_summary([s for s in multi if not s["children"]])}
 
 
 def _trend_point(day, grain):
@@ -952,3 +974,89 @@ def find_sessions(rows, labels, key_for, areas, output_price, filters, months=6,
             "tags": s["tags"],
         } for s in matched[:limit]],
     }
+
+
+LIVE_HINT_ORDER = ("pushback_streak", "light_complex", "premium_routine", "effort_routine", "long_thread",
+                   "newer_version")
+MAX_LIVE_HINTS = 3
+MIN_SIBLING_SESSIONS = 5
+
+
+def live_session_hints(rows, current, labels, key_for, output_price, corrections_for=None):
+    """Suggestions for running sessions, keyed by trace key; content-free and bounded.
+
+    Uses the same rules as Right-sizing, applied to one session: routine work on a premium model or
+    high effort, complex work on a light model that got pushback, two pushbacks in a row, a long thread,
+    and a newer, cheaper version of the same model that this user already runs in the same app.
+    """
+    wanted = {str(c.get("session") or "") for c in current or () if c.get("session")}
+    if not wanted:
+        return {}
+    tiers, _tier_prices, prices = price_tiers(rows, output_price, with_prices=True)
+    used = collections.Counter((row.get("runtime") or "", primary_model(row)) for row in rows
+                               if not is_child_row(row) and primary_model(row))
+    standard = {}
+    for (runtime, model), _count in used.most_common():
+        if tiers.get((runtime, model)) == "standard":
+            standard.setdefault(runtime, model)
+    out = {}
+    for row in rows:
+        key = _trace_key(row)
+        if key not in wanted or is_child_row(row):
+            continue
+        runtime, model = row.get("runtime") or "", primary_model(row)
+        entry = labels.get(key_for(work_identity(row))) or {}
+        complexity = entry.get("complexity") or ""
+        tier = tiers.get((runtime, model))
+        effort = str(row.get("reasoning_effort") or "").lower()
+        turns = len(turn_days(row))
+        hints = []
+        if complexity == "routine" and tier == "premium":
+            hints.append({"kind": "premium_routine", "model": model, "to_model": standard.get(runtime) or ""})
+        if complexity == "routine" and effort in HIGH_EFFORTS:
+            hints.append({"kind": "effort_routine", "effort": effort})
+        if complexity in ("complex", "high_impact") and tier == "light" and int(entry.get("corrections") or 0) > 0:
+            hints.append({"kind": "light_complex", "model": model})
+        if corrections_for is not None and turns > 2 and entry.get("correction_labels"):
+            confident = [value for _ordinal, value in corrections_for(work_identity(row), turns) if value is not None]
+            if len(confident) >= 2 and confident[-1] and confident[-2]:
+                hints.append({"kind": "pushback_streak"})
+        if turns >= LONG_THREAD_TURNS:
+            hints.append({"kind": "long_thread", "turns": turns})
+        price, version = prices.get((runtime, model)), model_version(model)
+        if price and version:
+            siblings = [(m, prices[(r, m)]) for (r, m), count in used.items()
+                        if r == runtime and m != model and count >= MIN_SIBLING_SESSIONS and (r, m) in prices
+                        and model_family(m) == model_family(model) and model_version(m) > version
+                        and prices[(r, m)] < price]
+            if siblings:
+                to_model, to_price = min(siblings, key=lambda item: item[1])
+                hints.append({"kind": "newer_version", "model": model, "to_model": to_model,
+                              "saving_share": round(1 - to_price / price, 4)})
+        hints.sort(key=lambda hint: LIVE_HINT_ORDER.index(hint["kind"]))
+        if hints:
+            out[key] = [dict(hint, **_live_hint_text(hint)) for hint in hints[:MAX_LIVE_HINTS]]
+    return out
+
+
+def _live_hint_text(hint):
+    kind = hint["kind"]
+    if kind == "pushback_streak":
+        return {"title": "Two pushbacks in a row",
+                "detail": "Restate the goal in one message, or start a fresh session with what you learned."}
+    if kind == "light_complex":
+        return {"title": "Complex work on a light model",
+                "detail": f"{hint['model']} is getting pushback on a complex request. A stronger model may finish sooner."}
+    if kind == "premium_routine":
+        return {"title": "Routine request on a premium model",
+                "detail": f"{hint['to_model']} handles routine work for less." if hint["to_model"]
+                else "A mid-priced model handles routine work for less."}
+    if kind == "effort_routine":
+        return {"title": "High reasoning effort on routine work",
+                "detail": f"{hint['effort']} effort costs more than a routine request needs. Try medium."}
+    if kind == "long_thread":
+        return {"title": "Long session",
+                "detail": f"{hint['turns']} requests so far, and each re-sends the conversation. "
+                          "A fresh session with a short summary costs less."}
+    return {"title": "Newer, cheaper model",
+            "detail": f"{hint['to_model']} costs {round(100 * hint['saving_share'])}% less per token than {hint['model']}."}

@@ -157,7 +157,46 @@ Model families drop version numbers, vendor or region prefixes, `[1m]`-style
 markers, `-v1:0`, and date stamps (`claude-opus-4-8` and `claude-opus-5-5` are
 both `claude-opus`, versions `(4, 8)` and `(5, 5)`).
 
-## 6. Limits
+## 6. Live suggestions and notifications
+
+Each running session on **Sessions → Current sessions** can show up to three
+suggestions (`live_session_hints`), computed when the live state refreshes:
+
+| Suggestion | When |
+| --- | --- |
+| Two pushbacks in a row | the last two confidently labeled follow-ups were pushback |
+| Complex work on a light model | Complex+ request on a light-tier model with at least one pushback |
+| Routine request on a premium model | routine request on a premium-tier model; names the app's most-used standard model |
+| High reasoning effort on routine work | routine request at xhigh, max, or ultra effort |
+| Long session | 30 or more requests so far |
+| Newer, cheaper model | a newer version of the same model family, cheaper per token, that this user has run 5+ times in the same app |
+
+The first four need Work labels; the last two work without them. The menu bar
+gets the same suggestions as `live_hints` (stable id, title, body; no paths or
+titles) and notifies once per session and suggestion, remembering the last 200
+ids. **Settings → Work insights → Notify me about live suggestions** turns this
+off (`live_notifications`, on by default).
+
+## 7. Subagents: do they finish?
+
+The Subagents page opens with **Do subagents finish?**, from the child-agent
+records Token Meter already reads (`agent_usage.completion`):
+
+- **Finished**: the run's trace reached its end. **Stopped early**: it ended
+  without finishing (interrupted or crashed). **Still running** runs are left
+  out of the finish rate. **Retried**: at least one retry or failed attempt.
+- Per role and per model (scoped by app): runs, finish rate, stopped runs,
+  spend on stopped runs, and cost per finished run; rows with a finish rate
+  under 80% (3+ ended runs) are highlighted.
+- **How the sessions ended** compares sessions with and without subagents
+  (two or more requests each) using Work labels: resolved rate, pushback, and
+  cost per resolved session. It is a pattern, not a cause: sessions that use
+  subagents are often bigger jobs.
+
+Finished does not prove the result was right; the outcome comparison is the
+signal for that.
+
+## 8. Limits
 
 - Labels come from a 4B local model and are estimates; misclassified
   complexity or work type moves a session into the wrong comparison.

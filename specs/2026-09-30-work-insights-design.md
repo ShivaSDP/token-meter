@@ -480,3 +480,15 @@ sent to the classifier.
   classifier does), area bars count spend from rows without a daily split on
   their start day, the new group names are reserved for areas, and labeling
   progress rounds down.
+
+## Iteration 10: live suggestions, notifications, subagent completion
+
+- `live_session_hints` adds up to three suggestions to each current session
+  (pushback streak, light model on complex work, premium or high effort on
+  routine work, long session, newer cheaper sibling model); the menu bar
+  notifies once per session and suggestion (`live_hints`, setting
+  `live_notifications`).
+- `agent_usage.completion` (agents domain, projected) reports finished,
+  stopped early, running, and retried child runs overall, by role, and by
+  model; the Work payload adds `subagent_outcomes` (with vs without
+  subagents). The Subagents page renders both in "Do subagents finish?".

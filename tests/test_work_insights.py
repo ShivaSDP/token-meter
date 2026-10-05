@@ -2098,3 +2098,91 @@ class SwitchGuardTests(unittest.TestCase):
         harder = self.combine(parts, self.sessions("cheap", 1, 2.0, "complex", prefix="hard"))
         switch = next(r for r in self.build(*harder)["recommendations"] if r["kind"] == "switch_model")
         self.assertFalse(switch["to_untested_harder"])
+
+
+class SubagentCompletionTests(unittest.TestCase):
+    def record(self, ident, state, cost=1.0, role="tester", model="m", runtime="codex", retries=0):
+        return {"id": ident, "kind": "spawned", "activity_state": state, "cost": cost, "cost_available": True,
+                "retries": retries, "failed_attempts": 0, "role": role, "model": model, "runtime": runtime}
+
+    def test_finish_rate_counts_only_runs_that_ended(self):
+        from token_meter.domain import agents
+        records = [self.record("a", "complete", 2.0), self.record("b", "complete", 4.0),
+                   self.record("c", "incomplete", 5.0, retries=2), self.record("d", "working"),
+                   {**self.record("root", "complete"), "kind": "root"}]
+        out = agents._completion(records)
+        overall = out["overall"]
+        self.assertEqual((overall["runs"], overall["finished"], overall["stopped"], overall["running"]), (4, 2, 1, 1))
+        self.assertAlmostEqual(overall["finish_rate"], 2 / 3)
+        self.assertEqual((overall["stopped_cost"], overall["cost_per_finished"], overall["retry_runs"]), (5.0, 3.0, 1))
+        self.assertEqual(out["roles"][0]["role"], "tester")
+        projected = __import__("token_meter.projections", fromlist=["x"])._agent_completion_projection(out)
+        self.assertEqual(set(projected), {"overall", "roles", "models", "role_count", "model_count"})
+        self.assertEqual(projected["roles"][0]["runtime"], "codex")
+
+
+class LiveHintTests(unittest.TestCase):
+    PRICES = {"gpt-5.6": 10.0, "cheap": 1.0, "mid": 4.0, "claude-opus-4-8": 25.0, "claude-opus-5-5": 20.0}
+
+    def hints(self, rows, current, labels=None, corrections=None):
+        return domain.live_session_hints(
+            rows, current, labels or {}, lambda ident: ident.split("\0")[0], lambda m, p: self.PRICES.get(m),
+            corrections_for=(lambda ident, n: corrections.get(ident.split("\0")[0], [])) if corrections else None)
+
+    def test_live_hints_follow_the_right_sizing_rules(self):
+        live = row("live", model="gpt-5.6", turns_=31)
+        live["session"], live["reasoning_effort"] = "live.jsonl", "xhigh"
+        others = [row("m", model="mid"), row("c", model="cheap")]
+        labels = {"live": {"complexity": "routine", "correction_labels": 4, "corrections": 2}}
+        corrections = {"live": [(1, False), (2, True), (3, True)]}
+        out = self.hints([live, *others], [{"session": "live.jsonl"}], labels, corrections)
+        kinds = [hint["kind"] for hint in out["live.jsonl"]]
+        self.assertEqual(kinds, ["pushback_streak", "premium_routine", "effort_routine"])
+        self.assertEqual(out["live.jsonl"][1]["to_model"], "mid")
+        self.assertTrue(all(hint["title"] and hint["detail"] for hint in out["live.jsonl"]))
+
+    def test_long_session_and_newer_model_need_no_labels(self):
+        live = row("live", model="claude-opus-4-8", runtime="Claude", turns_=30)
+        live["session"] = "live.jsonl"
+        newer = [row(f"n{i}", model="claude-opus-5-5", runtime="Claude") for i in range(5)]
+        out = self.hints([live, *newer], [{"session": "live.jsonl"}])
+        self.assertEqual([hint["kind"] for hint in out["live.jsonl"]], ["long_thread", "newer_version"])
+        self.assertIn("20% less per token", out["live.jsonl"][1]["detail"])
+        self.assertEqual(self.hints([live, *newer[:4]], [{"session": "live.jsonl"}])["live.jsonl"][0]["kind"],
+                         "long_thread")
+
+    def test_menu_bar_notifications_are_bounded_and_respect_the_setting(self):
+        current = [{"session": "a.jsonl", "runtime": "Codex",
+                    "hints": [{"kind": "long_thread", "title": "Long session", "detail": "30 requests so far."}]}]
+        with mock.patch.object(meter, "work_insights_supported", return_value=True), \
+                mock.patch.object(meter, "work_insights_settings", return_value=W.normalize_settings({})):
+            first = meter.live_hint_notifications(current)
+            self.assertEqual(first, meter.live_hint_notifications(current))
+            self.assertEqual(set(first[0]), {"id", "title", "body"})
+            self.assertNotIn("a.jsonl", json.dumps(first))
+        with mock.patch.object(meter, "work_insights_supported", return_value=True), \
+                mock.patch.object(meter, "work_insights_settings",
+                                  return_value=W.normalize_settings({"live_notifications": False})):
+            self.assertEqual(meter.live_hint_notifications(current), [])
+
+    def test_live_notification_setting_is_validated_and_public(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "settings.json")
+        with mock.patch.object(meter, "_work_settings_cache", {"key": None, "value": None}):
+            self.assertFalse(meter.set_work_insights_settings({"live_notifications": "yes"}, path)["ok"])
+            self.assertTrue(meter.set_work_insights_settings({"live_notifications": False}, path)["ok"])
+            self.assertFalse(meter.work_insights_public_settings(meter.work_insights_settings(path))["live_notifications"])
+
+    def test_surfaces_render_hints_completion_and_notifications(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "page.html"), encoding="utf-8") as handle:
+            page = handle.read()
+        with open(os.path.join(root, "menubar", "TokenMeterMenuBar.swift"), encoding="utf-8") as handle:
+            swift = handle.read()
+        for marker in ("class=currentSessionHints", "id=sa-completion", "Do subagents finish?", "id=work-live-notify",
+                       "live_notifications:event.target.checked", "renderSubagentCompletion(usage);"):
+            self.assertIn(marker, page)
+        self.assertLess(page.index("let subagentCompletionDim"), page.index("function applyHashRoute(){"))
+        for marker in ("evaluateLiveHintNotifications", '"TokenMeterLiveHintNotificationIDs"', 'dict["live_hints"]'):
+            self.assertIn(marker, swift)

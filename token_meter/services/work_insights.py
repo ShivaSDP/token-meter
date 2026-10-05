@@ -275,6 +275,7 @@ def default_settings():
         "enabled": False,
         "paused_until": None,
         "pause_on_battery": True,
+        "live_notifications": True,
         "rate_per_minute": DEFAULT_RATE_PER_MINUTE,
         "backfill_days": 90,
         "model": DEFAULT_MODEL,
@@ -298,6 +299,8 @@ def normalize_settings(raw):
         settings["paused_until"] = paused
     if isinstance(raw.get("pause_on_battery"), bool):
         settings["pause_on_battery"] = raw["pause_on_battery"]
+    if isinstance(raw.get("live_notifications"), bool):
+        settings["live_notifications"] = raw["live_notifications"]
     if raw.get("rate_per_minute") in RATE_CHOICES and not isinstance(raw.get("rate_per_minute"), bool):
         settings["rate_per_minute"] = raw["rate_per_minute"]
     if raw.get("backfill_days") in BACKFILL_CHOICES and not isinstance(raw.get("backfill_days"), bool):

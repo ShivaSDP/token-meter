@@ -131,6 +131,7 @@ from token_meter.domain.work import work_identity as _work_identity
 from token_meter.domain.work import find_sessions as _domain_find_sessions
 from token_meter.domain.work import DRILL_FILTERS as _domain_drill_filters
 from token_meter.domain.work import TAG_ORDER as _domain_work_tags
+from token_meter.domain.work import live_session_hints as _domain_live_session_hints
 from token_meter.domain.work import UNCLEAR as _work_domain_unclear
 from token_meter.domain.work import UNLABELED as _work_domain_unlabeled
 from token_meter.domain.work import parse_period as _domain_parse_period
@@ -2148,7 +2149,7 @@ def _set_work_insights_settings(values, path=None):
     if not isinstance(values, dict):
         return {"ok": False, "error": "Work insight settings must be an object."}
     allowed = {"enabled", "pause", "pause_on_battery", "rate_per_minute", "backfill_days",
-               "model", "ollama_url", "areas", "reset_areas"}
+               "model", "ollama_url", "areas", "reset_areas", "live_notifications"}
     unknown = set(values) - allowed
     if unknown:
         return {"ok": False, "error": "Unsupported work insight setting."}
@@ -2157,9 +2158,11 @@ def _set_work_insights_settings(values, path=None):
     current = work_insights_settings(path)
     updated = copy.deepcopy(current)
     try:
-        for field in ("enabled", "pause_on_battery", "reset_areas"):
+        for field in ("enabled", "pause_on_battery", "reset_areas", "live_notifications"):
             if field in values and not isinstance(values[field], bool):
                 raise ValueError("Toggles must be on or off.")
+        if "live_notifications" in values:
+            updated["live_notifications"] = values["live_notifications"]
         if "enabled" in values:
             updated["enabled"] = values["enabled"]
         if "pause_on_battery" in values:
@@ -8122,6 +8125,7 @@ def work_insights_public_settings(settings=None):
         "enabled": settings["enabled"],
         "paused_until": settings["paused_until"],
         "pause_on_battery": settings["pause_on_battery"],
+        "live_notifications": settings["live_notifications"],
         "rate_per_minute": settings["rate_per_minute"],
         "backfill_days": settings["backfill_days"],
         "model": settings["model"],
@@ -8150,6 +8154,32 @@ def work_insights_status():
     if work_insights_supported():
         result["setup"] = work_setup().status()
     return result
+
+
+def attach_live_hints(current, rows):
+    """Add Right-sizing style suggestions to each running session; label-based ones need Work insights."""
+    service = (work_insights_service()
+               if work_insights_supported() and work_insights_settings()["enabled"] else None)
+    hints = _domain_live_session_hints(
+        rows, current, service.snapshot() if service else {},
+        service.session_key if service else (lambda _row_id: ""), _work_output_price,
+        corrections_for=service.session_corrections if service else None)
+    for summary in current or ():
+        summary["hints"] = hints.get(str(summary.get("session") or ""), [])
+    return current
+
+
+def live_hint_notifications(current):
+    """Bounded, content-free notifications for the menu bar: one stable id per session and hint."""
+    if not (work_insights_supported() and work_insights_settings().get("live_notifications", True)):
+        return []
+    out = []
+    for summary in current or ():
+        for hint in summary.get("hints") or ():
+            ident = hashlib.sha256(f"{summary.get('session')}\0{hint['kind']}".encode("utf-8")).hexdigest()[:16]
+            out.append({"id": ident, "title": hint["title"][:80],
+                        "body": f"{hint['detail'][:200]} ({summary.get('runtime') or 'session'})"})
+    return out[:12]
 
 
 def work_session_tags(source):
@@ -8578,7 +8608,7 @@ def cross_session(sources=None):
     data = {
         "generated_at": int(now),
         "sessions": sessions[:60],
-        "current_sessions": current_session_summaries(internal_rows, now=now),
+        "current_sessions": attach_live_hints(current_session_summaries(internal_rows, now=now), internal_rows),
         "model_mix": mm,
         "trend": trend,
         "total_cost": total,
@@ -10525,6 +10555,7 @@ def menubar_state(session_id=None):
         ),
         "today_spend": menubar_today_spend(cross),
         "work_insights": menubar_work_insights(),
+        "live_hints": live_hint_notifications(cross.get("current_sessions")),
         "cost_approx": st.get("cost_approx", False),
         "total_tokens": st.get("total_tokens", 0),
         "turns": st.get("turns", 0),

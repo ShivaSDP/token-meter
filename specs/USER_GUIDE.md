@@ -247,6 +247,14 @@ disable recommendations.
 The exact rules behind every number and suggestion are in
 [Work insights: how it works](WORK_INSIGHTS.md).
 
+Running sessions on **Sessions → Current sessions** show the same kind of
+suggestions live (for example a long session, or routine work on a premium
+model), and the menu bar notifies you once per session unless you turn off
+**Notify me about live suggestions** in Settings. The **Subagents** page opens
+with **Do subagents finish?**: how many child runs finished, stopped early, or
+retried, by role or model, and how sessions with subagents ended compared with
+sessions without them.
+
 Work is available on macOS only. It is off until you turn on **Settings → Work
 insights**, which also sets up Ollama and the model in the background (see the
 README). A local Jet decision model then labels each session's opening request with an

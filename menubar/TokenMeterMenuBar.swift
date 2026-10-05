@@ -19,6 +19,8 @@ private let quotaAlertThresholdDefaultsKey = "TokenMeterQuotaAlertThreshold"
 private let quotaNotificationStatesDefaultsKey = "TokenMeterQuotaNotificationStates"
 private let budgetNotificationStatesDefaultsKey = "TokenMeterBudgetNotificationStates"
 private let budgetExceededMonthsDefaultsKey = "TokenMeterBudgetExceededNotificationMonths"
+private let liveHintNotificationIDsDefaultsKey = "TokenMeterLiveHintNotificationIDs"
+private let maxRememberedLiveHintIDs = 200
 private let statusDisplayModeDefaultsKey = "TokenMeterStatusDisplayMode"
 private let globalShortcutDefaultsKey = "TokenMeterGlobalShortcut"
 private let customShortcutKeyCodeDefaultsKey = "TokenMeterCustomShortcutKeyCode"
@@ -1091,6 +1093,8 @@ final class TokenMeterMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var menuRefreshPending = false
     private var snapshot = MeterSnapshot.disconnected("Waiting for http://127.0.0.1:8722/menubar")
     private var monthlyBudget: MonthlyBudget?
+    private var deliveredLiveHintIDs: [String] =
+        tokenMeterDefaults.stringArray(forKey: liveHintNotificationIDsDefaultsKey) ?? []
     private var softwareUpdate = SoftwareUpdateSnapshot.waiting
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1188,6 +1192,7 @@ final class TokenMeterMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 )
                 self.evaluateQuotaNotifications()
                 self.evaluateBudgetNotifications()
+                self.evaluateLiveHintNotifications(dict["live_hints"] as? [[String: Any]] ?? [])
                 self.refreshMenu()
             }
         }.resume()
@@ -2277,6 +2282,28 @@ final class TokenMeterMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if changed, let data = try? JSONEncoder().encode(budgetNotificationStates) {
             tokenMeterDefaults.set(data, forKey: budgetNotificationStatesDefaultsKey)
+        }
+    }
+
+    /// One notification per running session and suggestion; the server only sends hints when
+    /// "Notify me about live suggestions" is on in Settings.
+    private func evaluateLiveHintNotifications(_ hints: [[String: Any]]) {
+        var changed = false
+        for hint in hints.prefix(12) {
+            guard let id = hint["id"] as? String, !id.isEmpty,
+                  let title = hint["title"] as? String,
+                  let body = hint["body"] as? String,
+                  !deliveredLiveHintIDs.contains(id)
+            else { continue }
+            deliverQuotaNotification(title: "Token Meter: \(title)", body: body)
+            deliveredLiveHintIDs.append(id)
+            changed = true
+        }
+        if deliveredLiveHintIDs.count > maxRememberedLiveHintIDs {
+            deliveredLiveHintIDs.removeFirst(deliveredLiveHintIDs.count - maxRememberedLiveHintIDs)
+        }
+        if changed {
+            tokenMeterDefaults.set(deliveredLiveHintIDs, forKey: liveHintNotificationIDsDefaultsKey)
         }
     }
 
