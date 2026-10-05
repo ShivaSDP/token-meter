@@ -30,6 +30,16 @@ public static class TokenMeterNativeIcon {
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool DestroyIcon(IntPtr handle);
 }
+
+public static class TokenMeterExceptionSuppressor {
+    // A native C# handler so that PipelineStoppedException from a PowerShell
+    // event handler cannot re-trigger during ThreadException handling and crash
+    // the process. A PS scriptblock delegate re-throws when the pipeline is
+    // already stopped; a C# method does not.
+    public static void Handle(
+        object sender,
+        System.Threading.ThreadExceptionEventArgs e) { }
+}
 "@
 
 $script:DpiAwareness = "Unavailable"
@@ -631,7 +641,7 @@ function Invoke-TrayRefresh {
         $script:GuidanceItem.Text = "Guidance: reconnecting"
         $script:ActivityItem.Text = "Activity: unavailable"
     }
-    Write-TrayStatus $true $script:Connected
+    try { Write-TrayStatus $true $script:Connected } catch { }
 }
 
 $CreatedNew = $false
@@ -644,7 +654,11 @@ if (-not $CreatedNew) {
 [System.Windows.Forms.Application]::SetUnhandledExceptionMode(
     [System.Windows.Forms.UnhandledExceptionMode]::CatchException
 )
-[System.Windows.Forms.Application]::add_ThreadException({ param($s, $e) })
+$script:ExceptionHandler = [System.Delegate]::CreateDelegate(
+    [System.Threading.ThreadExceptionEventHandler],
+    [TokenMeterExceptionSuppressor].GetMethod("Handle")
+)
+[System.Windows.Forms.Application]::add_ThreadException($script:ExceptionHandler)
 [System.Windows.Forms.Application]::EnableVisualStyles()
 $script:NotifyIcon = New-Object System.Windows.Forms.NotifyIcon
 $script:TrayIcon = New-TokenMeterIcon

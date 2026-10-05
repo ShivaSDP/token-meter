@@ -410,6 +410,8 @@ class WindowsPackagingContracts(unittest.TestCase):
             "panel_text",
             "panel_constructed",
             "SetUnhandledExceptionMode",
+            "TokenMeterExceptionSuppressor",
+            "CreateDelegate",
             "add_ThreadException",
         ):
             self.assertIn(marker, tray, f"run-tray.ps1 missing: {marker!r}")
