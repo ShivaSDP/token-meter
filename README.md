@@ -46,6 +46,13 @@ The bootstrap uses WinGet from Microsoft App Installer to install missing Git an
 It then stages the beta extension without administrator access. From an
 existing checkout, rerun `.\scripts\install-windows.cmd`.
 
+The notification-area companion includes a floating usage panel for local
+session status. Use its context menu to show or hide the panel and drag it to
+reposition it; that preference persists across installs and updates. Running
+`run-tray.ps1` directly backgrounds it automatically. `-Inline` is the
+internal launch mode used by the installer-managed tray process to retain its
+lifecycle and PID ownership.
+
 For a browser-dashboard-only installation without the Windows notification-area companion,
 add `-BackendOnly` to the downloaded bootstrap invocation
 (`& $p -BackendOnly`) or run `.\scripts\install-windows.cmd -BackendOnly` from
